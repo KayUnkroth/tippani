@@ -82,9 +82,13 @@ function loadCache(prId) {
 }
 
 function saveCache(prId, data) {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  data.cachedAt = new Date().toISOString();
-  fs.writeFileSync(getCachePath(prId), JSON.stringify(data, null, 2));
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    data.cachedAt = new Date().toISOString();
+    fs.writeFileSync(getCachePath(prId), JSON.stringify(data, null, 2));
+  } catch (e) {
+    console.warn(`  ⚠ Could not write cache: ${e.code || e.message}. Continuing without cache.`);
+  }
 }
 
 function isCacheFresh(cache, maxAgeMs = 3600000) {
@@ -103,8 +107,12 @@ function loadPending(prId) {
 }
 
 function savePending(prId, actions) {
-  fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.writeFileSync(getPendingPath(prId), JSON.stringify(actions, null, 2));
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(getPendingPath(prId), JSON.stringify(actions, null, 2));
+  } catch (e) {
+    console.warn(`  ⚠ Could not save pending queue: ${e.code || e.message}`);
+  }
 }
 
 function addPending(prId, action) {
@@ -115,6 +123,27 @@ function addPending(prId, action) {
   pending.push(action);
   savePending(prId, pending);
   return action;
+}
+
+// --- ADO error helper ---
+function friendlyAdoError(e, context) {
+  const msg = e.message || String(e);
+  const status = e.statusCode || e.status || (msg.match(/(\d{3})/) || [])[1];
+  if (msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED"))
+    return `Could not connect to ADO org. Check the --org URL and your network.`;
+  if (status == 401)
+    return `Authentication failed (401). Your PAT may be expired. Delete ~/.tippani/pat and re-run.`;
+  if (status == 403)
+    return `Access denied (403). Your PAT may lack the Code (Read & Write) scope.\n  Generate a new one at: ${ADO_ORG}/_usersSettings/tokens`;
+  if (status == 404 || msg.includes("TF200016"))
+    return `Not found (404). Check --project and --repo names.\n  Project: "${ADO_PROJECT}" | Repo: "${ADO_REPO}"`;
+  if (msg.includes("VS404689"))
+    return `Repo "${ADO_REPO}" not found in project "${ADO_PROJECT}". Check --repo.`;
+  if (status == 429)
+    return `ADO rate limited (429). Wait a minute and try again.`;
+  if (status >= 500)
+    return `ADO server error (${status}). Try again in a few minutes.`;
+  return `${context}: ${msg}`;
 }
 
 async function getTokenFromAzCli() {
@@ -238,6 +267,17 @@ async function renderMarkdown(content) {
     .use(rehypeSlug)
     .use(rehypeAutolinkHeadings, { behavior: "wrap" })
     .use(rehypeStringify, { allowDangerousHtml: true })
+    .process(content);
+  return String(result);
+}
+
+// Safe renderer for user-authored content (comments) — no raw HTML allowed
+async function renderMarkdownSafe(content) {
+  const result = await unified()
+    .use(remarkParse)
+    .use(remarkGfm)
+    .use(remarkRehype)
+    .use(rehypeStringify)
     .process(content);
   return String(result);
 }
@@ -1099,7 +1139,8 @@ async function main() {
     console.error("Run: tippani <PR_ID> --org=https://dev.azure.com/YOURORG --project='YOUR PROJECT' --save-config");
     process.exit(1);
   }
-  ADO_ORG = adoConfig.org;
+  ADO_ORG = adoConfig.org.replace(/\/+$/, "");
+  if (!ADO_ORG.startsWith("https://")) ADO_ORG = "https://" + ADO_ORG;
   ADO_PROJECT = adoConfig.project;
   ADO_REPO = adoConfig.repo || adoConfig.project;
 
@@ -1165,13 +1206,17 @@ async function main() {
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         pat = await new Promise((resolve) => {
           console.log("\nNo PAT found and az CLI not available. Generate a PAT at:");
-          console.log("  https://dev.azure.com/powerbi/_usersSettings/tokens");
+          console.log(`  ${ADO_ORG}/_usersSettings/tokens`);
           console.log("  Scope: Code (Read & Write)\n");
           rl.question("Paste your PAT: ", (answer) => {
             rl.close();
             resolve(answer.trim());
           });
         });
+        if (!pat) {
+          console.error("No PAT provided. Exiting.");
+          process.exit(1);
+        }
         savePat(pat);
         console.log("PAT saved to ~/.tippani/pat\n");
         _conn = getAdoConnection(pat);
@@ -1179,13 +1224,27 @@ async function main() {
     }
 
     console.log(`Loading PR #${_prId}...`);
-    _pr = await getPullRequest(_conn, _prId);
+    try {
+      _pr = await getPullRequest(_conn, _prId);
+    } catch (e) {
+      console.error(`\n  Error: ${friendlyAdoError(e, "Loading PR")}\n`);
+      process.exit(1);
+    }
     console.log(`  "${_pr.title}" by ${_pr.createdBy?.displayName}`);
+
+    // Warn if PR is abandoned or completed
+    if (_pr.status === 3) console.log("  ⚠ This PR is abandoned. Comments may not be actionable.");
+    if (_pr.status === 2) console.log("  ⚠ This PR is completed. Comments may not be actionable.");
 
     _branch = _pr.sourceRefName;
 
     console.log("  Fetching changed files...");
-    _changedFiles = await getPRChangedFiles(_conn, _prId);
+    try {
+      _changedFiles = await getPRChangedFiles(_conn, _prId);
+    } catch (e) {
+      console.error(`\n  Error: ${friendlyAdoError(e, "Fetching changed files")}\n`);
+      process.exit(1);
+    }
     console.log(`  ${_changedFiles.length} .md file(s) changed.`);
 
     // Cache file contents and threads
@@ -1283,7 +1342,7 @@ async function main() {
       for (const t of allThreads) {
         for (const c of (t.comments || [])) {
           if (c.content && !c.renderedContent) {
-            c.renderedContent = await renderMarkdown(c.content);
+            c.renderedContent = await renderMarkdownSafe(c.content);
           }
         }
       }
@@ -1406,15 +1465,23 @@ async function main() {
     res.json({ count: unsynced.length, isOffline: _isOffline });
   });
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     const base = `http://localhost:${PORT}`;
     const url = openIndex !== null ? `${base}/file/${openIndex}` : base;
     console.log(`\n  Review portal running at ${base}\n`);
     open(url);
   });
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(`\n  Error: Port ${PORT} is already in use. Is another tippani instance running?\n`);
+    } else {
+      console.error(`\n  Error starting server: ${err.message}\n`);
+    }
+    process.exit(1);
+  });
 }
 
 main().catch((e) => {
-  console.error("Error:", e.message);
+  console.error(`\n  Error: ${friendlyAdoError(e, "Startup")}\n`);
   process.exit(1);
 });
