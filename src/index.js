@@ -42,9 +42,9 @@ function getConfig() {
     return a ? a.split("=").slice(1).join("=") : null;
   };
   return {
-    org: findArg("org") || process.env.REVIEW_PORTAL_ORG || cfg.org || null,
-    project: findArg("project") || process.env.REVIEW_PORTAL_PROJECT || cfg.project || null,
-    repo: findArg("repo") || process.env.REVIEW_PORTAL_REPO || cfg.repo || cfg.project || null,
+    org: findArg("org") || process.env.TIPPANI_ORG || cfg.org || null,
+    project: findArg("project") || process.env.TIPPANI_PROJECT || cfg.project || null,
+    repo: findArg("repo") || process.env.TIPPANI_REPO || cfg.repo || cfg.project || null,
   };
 }
 

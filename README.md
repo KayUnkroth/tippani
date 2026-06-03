@@ -1,34 +1,46 @@
 # tippani
 
+> टिप्पणी — *annotation* (Sanskrit)
+
 Offline-capable CLI that renders Azure DevOps PR markdown files as a clean, three-column review portal — designed for non-technical reviewers who shouldn't need to learn ADO's diff view.
 
+## Quick Start
+
+Download the [latest release](https://github.com/mavaali/tippani/releases/latest):
+
+| Platform | Download | Requires |
+|---|---|---|
+| **macOS** (Apple Silicon) | [`tippani`](https://github.com/mavaali/tippani/releases/latest/download/tippani) | Nothing — standalone binary |
+| **Windows** | [`cli.cjs`](https://github.com/mavaali/tippani/releases/latest/download/cli.cjs) + [`tippani.bat`](https://github.com/mavaali/tippani/releases/latest/download/tippani.bat) | Node.js 18+ |
+| **Linux / macOS** | [`cli.cjs`](https://github.com/mavaali/tippani/releases/latest/download/cli.cjs) + [`tippani.sh`](https://github.com/mavaali/tippani/releases/latest/download/tippani.sh) | Node.js 18+ |
+
+```bash
+# macOS — download and run
+chmod +x tippani
+./tippani 12345 --org=https://dev.azure.com/YOUR_ORG --project="Your Project" --save-config
+
+# Windows — place cli.cjs and tippani.bat in the same folder
+tippani.bat 12345 --org=https://dev.azure.com/YOUR_ORG --project="Your Project" --save-config
+```
+
+Or install from source:
+
+```bash
+git clone https://github.com/mavaali/tippani.git
+cd tippani
+npm install
+npx tippani 12345 --org=https://dev.azure.com/YOUR_ORG --project="Your Project" --save-config
+```
 
 ## Features
 
 - **File picker** — multi-file PRs show a landing page; single-file PRs auto-open
 - **Three-column layout** — TOC sidebar, rendered spec, comment threads (all resizable)
-- **Inline commenting** — hover any paragraph/list/table/code block → click `+` → comment posts to ADO
+- **Inline commenting** — hover any content block → click `+` → comment posts to ADO
 - **Offline mode** — cache PR data, comment offline, sync when reconnected
 - **Dark mode** — auto-detects system preference
-- **Active/resolved threads** — color-coded (pink active, green resolved), inline bubbles on spec content
+- **Active/resolved threads** — color-coded with inline bubbles on spec content
 - **Review actions** — Approve / Request Changes from the bottom bar
-- **Standalone binary** — macOS binary via Node SEA (no Node.js install required)
-
-## Install
-
-```bash
-# Clone and install
-git clone https://github.com/mavaali/tippani.git
-cd tippani
-npm install
-
-# Configure your ADO connection (one-time)
-npx tippani 12345 \
-  --org=https://dev.azure.com/YOUR_ORG \
-  --project="Your Project" \
-  --repo="Your Repo" \
-  --save-config
-```
 
 ## Usage
 
@@ -59,9 +71,9 @@ Settings are stored in `~/.tippani/config.json`:
 ```
 
 You can also use environment variables:
-- `REVIEW_PORTAL_ORG`
-- `REVIEW_PORTAL_PROJECT`
-- `REVIEW_PORTAL_REPO`
+- `TIPPANI_ORG`
+- `TIPPANI_PROJECT`
+- `TIPPANI_REPO`
 
 Priority: CLI flags > env vars > config file.
 
