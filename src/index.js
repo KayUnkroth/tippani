@@ -306,12 +306,13 @@ async function pushFileToBranch(conn, branchRef, filePath, content, message, exp
 const GIT_SECURITY_NAMESPACE = "2e9eb7ed-3c0a-47d4-87c1-0ffdd275fd87";
 const GIT_PERMISSION_GENERIC_CONTRIBUTE = 4;
 
-// Whether the authenticated identity may push to the PR repo, gating the Edit affordance.
-// Hard false offline / unauthenticated / on a non-active PR (no network call). Otherwise
-// probe ADO for GenericContribute at the repository level. The repo-level token needs no
-// ref-name encoding and catches the dominant "read-only access" case; rare per-branch deny
-// ACLs fall through (fail open) and the save path surfaces any real rejection. Probe errors
-// also fail open. See decideCanEdit (canedit.js) for the pure gate logic.
+// Whether the Edit affordance should be offered, gating push access. Decided without a
+// network call when it can be: a non-active PR is never editable; offline is allowed
+// (edits queue and sync on reconnect, per #48); online-but-unauthenticated can't push.
+// Otherwise probe ADO for GenericContribute at the repository level. The repo-level token
+// needs no ref-name encoding and catches the dominant "read-only access" case; rare
+// per-branch deny ACLs fall through (fail open) and the save path surfaces any real
+// rejection. Probe errors also fail open. See decideCanEdit (canedit.js) for the gate.
 async function computeCanEdit(conn, pr, isOffline) {
   if (isOffline || !conn || pr?.status !== 1) {
     return decideCanEdit({ isOffline, hasConn: !!conn, prStatus: pr?.status, probe: null });

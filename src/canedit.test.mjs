@@ -11,12 +11,16 @@ function ok(name, cond) {
   }
 }
 
-// Hard gates — no push possible regardless of probe.
-ok("offline => false", decideCanEdit({ isOffline: true, hasConn: true, prStatus: 1, probe: true }) === false);
-ok("no connection => false", decideCanEdit({ isOffline: false, hasConn: false, prStatus: 1, probe: true }) === false);
+// Status gate — a finished PR is never editable, even offline or with a true probe.
 ok("completed PR (status 2) => false", decideCanEdit({ isOffline: false, hasConn: true, prStatus: 2, probe: true }) === false);
 ok("abandoned PR (status 3) => false", decideCanEdit({ isOffline: false, hasConn: true, prStatus: 3, probe: true }) === false);
-ok("offline beats a true probe", decideCanEdit({ isOffline: true, hasConn: true, prStatus: 1, probe: true }) === false);
+ok("non-active PR offline => false", decideCanEdit({ isOffline: true, hasConn: false, prStatus: 3, probe: null }) === false);
+
+// Offline editing IS allowed on an active PR (edits queue and sync on reconnect).
+ok("offline + active => true", decideCanEdit({ isOffline: true, hasConn: false, prStatus: 1, probe: null }) === true);
+
+// Online: unauthenticated can't push.
+ok("online + no connection => false", decideCanEdit({ isOffline: false, hasConn: false, prStatus: 1, probe: true }) === false);
 
 // Probe outcomes on an active, connected, online PR.
 ok("active + probe true => true", decideCanEdit({ isOffline: false, hasConn: true, prStatus: 1, probe: true }) === true);
