@@ -16,6 +16,7 @@ import { syntaxTree } from "@codemirror/language";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { tableField } from "./table-widget.js";
 
 // --- Live-preview decorations -------------------------------------------------
 
@@ -247,6 +248,21 @@ const tippaniTheme = EditorView.theme({
     borderBottom: "2px solid var(--cp-border)",
     display: "block",
   },
+  // Rendered table grid (#45)
+  ".cm-pv-table": {
+    borderCollapse: "collapse",
+    margin: "4px 0",
+    fontSize: "0.95em",
+    width: "auto",
+  },
+  ".cm-pv-table th, .cm-pv-table td": {
+    border: "1px solid var(--cp-border)",
+    padding: "5px 12px",
+  },
+  ".cm-pv-table th": {
+    background: "var(--cp-surface-soft)",
+    fontWeight: "600",
+  },
 });
 
 // --- Public API ---------------------------------------------------------------
@@ -260,6 +276,7 @@ function mount(el, markdownText, opts = {}) {
       keymap.of([...defaultKeymap, ...historyKeymap]),
       markdown({ extensions: GFM }),
       livePreview,
+      tableField,
       tippaniTheme,
       EditorView.lineWrapping,
       onChange
