@@ -524,7 +524,7 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
 }
 
 // --- Spec review page (3-column layout) ---
-function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown) {
+function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown, canEdit) {
   const tocHtml = toc
     .map(
       (t) =>
@@ -611,6 +611,12 @@ button:focus-visible { outline: 2px solid var(--cp-accent); outline-offset: 2px;
 /* Header */
 .header { height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; background: var(--cp-surface); border-bottom: 1px solid var(--cp-border); flex-shrink: 0; z-index: 50; }
 .header-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.header-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.edit-toggle { font-family: inherit; font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--cp-border); background: var(--cp-bg); color: var(--cp-text); cursor: pointer; transition: background 0.12s, border-color 0.12s; }
+.edit-toggle:hover { background: var(--cp-surface-soft); border-color: var(--cp-border-strong); }
+/* Edit-mode visual distinction on the center column */
+.main-content.editing { box-shadow: inset 0 0 0 2px var(--cp-accent-soft); background: var(--cp-accent-soft); }
+.main-content.editing #spec-editor { background: var(--cp-bg); }
 .logo { width: 26px; height: 26px; border-radius: 6px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-size: 10px; font-weight: 700; flex-shrink: 0; }
 .brand { font-size: 13px; font-weight: 600; color: var(--cp-text-muted); flex-shrink: 0; }
 .hdr-sep { color: var(--cp-border); margin: 0 2px; }
@@ -773,6 +779,9 @@ details[open] .resolved-summary::before { content: '▾ '; }
       </div>
     </div>
   </div>
+  <div class="header-right">
+    ${canEdit ? `<button class="edit-toggle" id="editToggle" onclick="tippani.toggle()" title="Toggle edit mode (${"⌘"}/Ctrl+E)">Edit</button>` : ""}
+  </div>
 </div>
 
 <div class="layout" id="layout">
@@ -828,22 +837,72 @@ details[open] .resolved-summary::before { content: '▾ '; }
 
 <script>${EDITOR_JS}</script>
 <script>
-// #44 dev hatch: ?edit=1 mounts the live-preview editor in place of the rendered
-// spec. The real edit/view toggle is #47.
-(function () {
+// #47 edit/view toggle. Read-only rendered view is the default; editing is opt-in.
+// The CM editor is mounted lazily on first entry and reused, so edits persist
+// across toggle cycles within the session. Cmd/Ctrl+E toggles.
+window.tippani = (function () {
   const RAW_MARKDOWN = ${JSON.stringify(rawMarkdown || "")};
-  function initEditor() {
-    if (new URLSearchParams(location.search).get("edit") !== "1") return;
-    const host = document.getElementById("spec-editor");
-    const read = document.getElementById("spec-content");
-    if (!host || !read || !window.TippaniEditor) return;
-    read.style.display = "none";
-    host.style.display = "";
-    window.__tippaniEditor = window.TippaniEditor.mount(host, RAW_MARKDOWN, {});
+  let editor = null;
+  let editMode = false;
+
+  const el = (id) => document.getElementById(id);
+  const isDirty = () => !!editor && editor.getMarkdown() !== RAW_MARKDOWN;
+
+  function ensureEditor() {
+    if (!editor && window.TippaniEditor)
+      editor = window.TippaniEditor.mount(el("spec-editor"), RAW_MARKDOWN, {});
+    return editor;
   }
-  if (document.readyState === "loading")
-    document.addEventListener("DOMContentLoaded", initEditor);
-  else initEditor();
+  function enterEdit() {
+    if (!ensureEditor()) return;
+    el("spec-content").style.display = "none";
+    el("spec-editor").style.display = "";
+    el("mainContent").classList.add("editing");
+    const btn = el("editToggle");
+    if (btn) btn.textContent = "View";
+    editMode = true;
+    editor.view.focus();
+  }
+  function exitEdit() {
+    // Unsaved-changes prompt on mode switch. Edits are kept for the session (not
+    // discarded) so they survive toggle cycles; a true discard/Save arrives with
+    // #49 / #48. Cancel keeps you in edit mode.
+    if (isDirty() && !confirm("You have unsaved changes. Switch to read view? Your edits are kept for this session.")) return;
+    el("spec-editor").style.display = "none";
+    el("spec-content").style.display = "";
+    el("mainContent").classList.remove("editing");
+    const btn = el("editToggle");
+    if (btn) btn.textContent = "Edit";
+    editMode = false;
+  }
+  function toggle() {
+    editMode ? exitEdit() : enterEdit();
+  }
+
+  document.addEventListener("keydown", (e) => {
+    if ((e.metaKey || e.ctrlKey) && (e.key === "e" || e.key === "E")) {
+      // Only when an Edit affordance exists (write access).
+      if (!el("editToggle")) return;
+      e.preventDefault();
+      toggle();
+    }
+  });
+  // ?edit=1 still auto-enters edit mode (convenient for testing).
+  if (new URLSearchParams(location.search).get("edit") === "1") {
+    if (document.readyState === "loading")
+      document.addEventListener("DOMContentLoaded", enterEdit);
+    else enterEdit();
+  }
+  return {
+    toggle,
+    enterEdit,
+    exitEdit,
+    isDirty,
+    // For the write path (#48): current editor buffer (or the original if the
+    // editor was never opened).
+    getMarkdown: () => (editor ? editor.getMarkdown() : RAW_MARKDOWN),
+    getEditor: () => editor,
+  };
 })();
 </script>
 <script>
@@ -1397,7 +1456,11 @@ async function main() {
         }
       }
 
-      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body));
+      // canEdit gates the Edit affordance. Real ADO push-permission detection for
+      // the PR source branch lands with the write path (#48); for now, editing is
+      // offered whenever a PR was loaded.
+      const canEdit = true;
+      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body, canEdit));
     } catch (e) {
       res.status(500).send("Error rendering spec. Check the server console for details.");
       console.error("Spec render error:", e.message);
