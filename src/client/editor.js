@@ -130,9 +130,30 @@ function buildDecorations(view) {
             }
             break;
           }
-          case "FencedCode":
-            addLineClass(state, node.from, node.to, "cm-pv-code", deco);
+          case "FencedCode": {
+            const first = state.doc.lineAt(node.from);
+            const last = state.doc.lineAt(node.to);
+            if (reveal || first.number >= last.number) {
+              // Cursor inside (or degenerate): show fences, style every line.
+              for (let n = first.number; n <= last.number; n++) {
+                deco.push(lineClass("cm-pv-code").range(state.doc.line(n).from));
+              }
+            } else {
+              // Off-cursor: hide each fence line's text (inline replace — no line
+              // break, so it's plugin-legal) and collapse the now-empty line's
+              // height via CSS. Interior lines get the code background.
+              if (first.to > first.from)
+                deco.push(hideMark.range(first.from, first.to));
+              deco.push(lineClass("cm-pv-fence").range(first.from));
+              for (let n = first.number + 1; n <= last.number - 1; n++) {
+                deco.push(lineClass("cm-pv-code").range(state.doc.line(n).from));
+              }
+              if (last.to > last.from)
+                deco.push(hideMark.range(last.from, last.to));
+              deco.push(lineClass("cm-pv-fence").range(last.from));
+            }
             break;
+          }
           case "HorizontalRule": {
             const line = state.doc.lineAt(node.from);
             deco.push(lineClass("cm-pv-hr").range(line.from));
@@ -211,6 +232,16 @@ const tippaniTheme = EditorView.theme({
     fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
     fontSize: "0.9em",
     background: "var(--cp-surface-soft)",
+  },
+  // Collapsed (off-cursor) fence line: empty after hiding its ```; shrink to ~0
+  // height so the code block reads as a clean box. Expands when the cursor enters
+  // the block (the .cm-pv-fence class is only applied off-cursor).
+  ".cm-pv-fence": {
+    fontSize: "0",
+    lineHeight: "0",
+    padding: "0",
+    height: "0",
+    overflow: "hidden",
   },
   ".cm-pv-hr": {
     borderBottom: "2px solid var(--cp-border)",
