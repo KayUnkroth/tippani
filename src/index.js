@@ -15,9 +15,17 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import os from "os";
+import crypto from "crypto";
 import { EDITOR_JS } from "./client/editor.bundle.js";
 import { isConflict } from "./conflict.js";
 import { decideCanEdit } from "./canedit.js";
+import {
+  createFocusStore,
+  createDraftStore,
+  createLockStore,
+  createInflightStore,
+} from "./api-state.js";
+import { registerControlApi } from "./control-api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -836,6 +844,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .reply-btn-post:hover { opacity: 0.9; }
 .reply-btn-cancel { background: none; border: 1px solid var(--cp-border); color: var(--cp-text-muted); font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
 .reply-btn-cancel:hover { color: var(--cp-text); }
+.reply-external-badge { font-size: 11px; color: var(--cp-accent); background: color-mix(in srgb, var(--cp-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--cp-accent) 30%, transparent); border-radius: 6px; padding: 4px 8px; margin-bottom: 6px; }
 .comment-thread.thread-focused { box-shadow: 0 0 0 2px var(--cp-accent); }
 .kbd-hint { font-size: 11px; color: var(--cp-text-muted); padding: 6px 12px; border-top: 1px solid var(--cp-border); background: var(--cp-surface-soft); }
 .kbd-hint kbd { background: var(--cp-surface); border: 1px solid var(--cp-border); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-family: ui-monospace, monospace; font-size: 10px; }
@@ -1630,6 +1639,102 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
+// --- Control-API integration (#42 Phase 1) ---
+// Poll the server's control-API state every 1.5s. When focus changes from
+// an external client (LLM/script), scroll to that thread; when a draft is
+// staged externally, populate the textarea and badge it.
+(function() {
+  let lastVersion = -1;
+  const seenDraftKey = (id, d) => id + ':' + (d ? d.updatedAt : '0');
+  const lastDraftSeen = new Map();
+
+  function applyExternalDraft(threadId, draft) {
+    const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+    if (!form) return;
+    const ta = form.querySelector('.reply-textarea');
+    if (!ta) return;
+    // Don't clobber user-typed content: only fill if textarea is empty OR the
+    // existing content matches a prior external draft (i.e., user hasn't touched it).
+    const priorKey = lastDraftSeen.get(threadId);
+    const userTouched = ta.value && (!priorKey || !ta.dataset.externalContent || ta.dataset.externalContent !== ta.value);
+    if (userTouched) return;
+    form.classList.add('open');
+    ta.value = draft.content;
+    ta.dataset.externalContent = draft.content;
+    let badge = form.querySelector('.reply-external-badge');
+    if (!badge) {
+      badge = document.createElement('div');
+      badge.className = 'reply-external-badge';
+      badge.textContent = '✨ Draft from external client — edit or post';
+      form.insertBefore(badge, form.firstChild);
+    }
+  }
+
+  function clearExternalBadge(threadId) {
+    const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+    if (!form) return;
+    const badge = form.querySelector('.reply-external-badge');
+    if (badge) badge.remove();
+    const ta = form.querySelector('.reply-textarea');
+    if (ta) delete ta.dataset.externalContent;
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/api/v1/state');
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.version !== lastVersion) {
+        lastVersion = s.version;
+        // Focus change from external client.
+        if (s.focusedThreadId != null && s.focusedThreadId !== _focusedThreadId) {
+          focusThread(s.focusedThreadId);
+        }
+        // Apply / clear drafts.
+        const seenThisRound = new Set();
+        Object.entries(s.drafts || {}).forEach(([id, d]) => {
+          const tid = Number(id);
+          seenThisRound.add(tid);
+          const k = seenDraftKey(tid, d);
+          if (lastDraftSeen.get(tid) !== k) {
+            lastDraftSeen.set(tid, k);
+            applyExternalDraft(tid, d);
+          }
+        });
+        // Drafts that disappeared server-side.
+        for (const tid of Array.from(lastDraftSeen.keys())) {
+          if (!seenThisRound.has(tid)) {
+            lastDraftSeen.delete(tid);
+            clearExternalBadge(tid);
+          }
+        }
+      }
+    } catch {}
+  }
+  setInterval(poll, 1500);
+  poll();
+})();
+
+// User-editing lock heartbeat: while the user types in a reply textarea,
+// touch the server-side lock every 3s so external clients get a 409 if they
+// try to PUT a draft. Lock TTL on the server is 10s.
+(function() {
+  let lastTouchTid = null;
+  let lastTouchAt = 0;
+  document.addEventListener('input', (e) => {
+    const ta = e.target.closest && e.target.closest('.reply-textarea');
+    if (!ta) return;
+    const form = ta.closest('.reply-form');
+    const tid = Number(form?.getAttribute('data-thread-id'));
+    if (!Number.isFinite(tid)) return;
+    const now = Date.now();
+    if (tid === lastTouchTid && (now - lastTouchAt) < 3000) return;
+    lastTouchTid = tid;
+    lastTouchAt = now;
+    fetch('/api/v1/threads/' + tid + '/lock', { method: 'POST' }).catch(() => {});
+  });
+})();
+
 async function resolveThread(threadId) {
   try {
     const res = await fetch('/api/resolve', {
@@ -1750,6 +1855,15 @@ setInterval(updateSyncStatus, 30000);
 
 // --- Module-level state ---
 let _conn, _pr, _prId, _branch, _changedFiles, _cache, _isOffline, _canEdit = false;
+
+// Control API state (#42 Phase 1). All in-memory, ephemeral by design.
+const _focus = createFocusStore();
+const _drafts = createDraftStore({ onChange: () => _focus.bumpVersion() });
+const _locks = createLockStore({ ttlMs: 10_000 });
+const _inflight = createInflightStore();
+// Session token authorises external (non-browser-same-origin) mutations.
+// Generated fresh per process and printed to stdout at startup.
+const _sessionToken = crypto.randomBytes(24).toString("base64url");
 
 // --- Express server ---
 async function main() {
@@ -2044,42 +2158,59 @@ async function main() {
     }
   });
 
-  app.post("/api/reply", async (req, res) => {
-    const action = addPending(_prId, { type: 'reply', threadId: req.body.threadId, content: req.body.content });
+  // Shared reply/resolve helpers — wraps the inflight guard + pending-queue
+  // bookkeeping so both /api/reply (legacy) and /api/v1/threads/:id/reply
+  // (control API) share one path.
+  async function doReply(threadId, content) {
+    const tid = Number(threadId);
+    if (Number.isFinite(tid) && !_inflight.acquire(tid)) {
+      return { ok: false, status: 409, body: { error: "another reply is already in flight for this thread" } };
+    }
+    const action = addPending(_prId, { type: 'reply', threadId, content });
     if (!_isOffline && _conn) {
       try {
-        await replyToThread(_conn, _prId, req.body.threadId, req.body.content);
+        await replyToThread(_conn, _prId, threadId, content);
         action.synced = true;
         const pending = loadPending(_prId);
-        const idx = pending.findIndex(p => p.id === action.id);
-        if (idx >= 0) pending[idx].synced = true;
+        const i = pending.findIndex(p => p.id === action.id);
+        if (i >= 0) pending[i].synced = true;
         savePending(_prId, pending);
-        res.json({ ok: true, synced: true });
+        if (Number.isFinite(tid)) { _drafts.delete(tid); _inflight.release(tid); }
+        return { ok: true, status: 200, body: { ok: true, synced: true } };
       } catch {
-        res.json({ ok: true, synced: false, queued: true });
+        if (Number.isFinite(tid)) _inflight.release(tid);
+        return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
       }
-    } else {
-      res.json({ ok: true, synced: false, queued: true });
     }
+    if (Number.isFinite(tid)) { _drafts.delete(tid); _inflight.release(tid); }
+    return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+  }
+  async function doResolve(threadId) {
+    const action = addPending(_prId, { type: 'resolve', threadId });
+    if (!_isOffline && _conn) {
+      try {
+        await resolveThread(_conn, _prId, threadId);
+        action.synced = true;
+        const pending = loadPending(_prId);
+        const i = pending.findIndex(p => p.id === action.id);
+        if (i >= 0) pending[i].synced = true;
+        savePending(_prId, pending);
+        return { ok: true, status: 200, body: { ok: true, synced: true } };
+      } catch {
+        return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+      }
+    }
+    return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+  }
+
+  app.post("/api/reply", async (req, res) => {
+    const r = await doReply(req.body.threadId, req.body.content);
+    res.status(r.status).json(r.body);
   });
 
   app.post("/api/resolve", async (req, res) => {
-    const action = addPending(_prId, { type: 'resolve', threadId: req.body.threadId });
-    if (!_isOffline && _conn) {
-      try {
-        await resolveThread(_conn, _prId, req.body.threadId);
-        action.synced = true;
-        const pending = loadPending(_prId);
-        const idx = pending.findIndex(p => p.id === action.id);
-        if (idx >= 0) pending[idx].synced = true;
-        savePending(_prId, pending);
-        res.json({ ok: true, synced: true });
-      } catch {
-        res.json({ ok: true, synced: false, queued: true });
-      }
-    } else {
-      res.json({ ok: true, synced: false, queued: true });
-    }
+    const r = await doResolve(req.body.threadId);
+    res.status(r.status).json(r.body);
   });
 
   // Save an edited spec: commit the markdown to the PR source branch (#48).
@@ -2179,10 +2310,56 @@ async function main() {
     res.json({ count: unsynced.length, isOffline: _isOffline });
   });
 
+  // ----- Control API (#42 Phase 1) ---------------------------------------
+  // Routes live in src/control-api.js so they're mountable in tests without
+  // bootstrapping the full ADO flow. Token is generated above; external
+  // clients send `Authorization: Bearer <token>` + `X-Tippani-Client: <name>`
+  // for mutations, just `X-Tippani-Client` for reads.
+  registerControlApi(app, {
+    port: PORT,
+    sessionToken: _sessionToken,
+    focus: _focus,
+    drafts: _drafts,
+    locks: _locks,
+    getThreads: () => _cache?.threads || [],
+    getChangedFiles: () => _changedFiles || [],
+    readFileMarkdown: async (filePath) => {
+      if (_cache?.fileContents?.[filePath]) return _cache.fileContents[filePath];
+      if (!_isOffline && _conn) {
+        const md = await getFileContent(_conn, filePath, _branch);
+        _cache.fileContents = _cache.fileContents || {};
+        _cache.fileContents[filePath] = md;
+        return md;
+      }
+      return "";
+    },
+    postReply: doReply,
+    resolveThread: doResolve,
+  });
+
+  // Persist session token to ~/.tippani/session-token so the MCP shim
+  // (and other local helpers) can authenticate without copy/paste.
+  // 0600 perms; overwritten on each startup.
+  try {
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    const tokenPath = path.join(CONFIG_DIR, "session-token");
+    fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
+    // Best-effort cleanup on graceful shutdown so the token doesn't outlive
+    // the server process for any meaningful window.
+    const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} };
+    process.on("exit", cleanup);
+    process.on("SIGINT", () => { cleanup(); process.exit(0); });
+    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+  } catch (e) {
+    console.warn(`  Warning: could not persist session token: ${e.message}`);
+  }
+
   const server = app.listen(PORT, "127.0.0.1", () => {
     const base = `http://localhost:${PORT}`;
     const url = openIndex !== null ? `${base}/file/${openIndex}` : base;
-    console.log(`\n  Tippani running at ${base}\n`);
+    console.log(`\n  Tippani running at ${base}`);
+    console.log(`  Control API token: ${_sessionToken}`);
+    console.log(`  External clients: set Authorization: Bearer <token> and X-Tippani-Client: <name>\n`);
     open(url);
   });
   server.on("error", (err) => {
