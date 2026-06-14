@@ -20,7 +20,8 @@
     "test:conflict": "node src/conflict.test.mjs",
     "test:canedit": "node src/canedit.test.mjs",
     "test:apistate": "node src/api-state.test.mjs",
-    "test": "node src/client/table.test.mjs && node src/client/diff.test.mjs && node src/client/invariant.test.mjs && node src/conflict.test.mjs && node src/canedit.test.mjs && node src/api-state.test.mjs",
+    "test:controlapi": "node src/control-api.test.mjs",
+    "test": "node src/client/table.test.mjs && node src/client/diff.test.mjs && node src/client/invariant.test.mjs && node src/conflict.test.mjs && node src/canedit.test.mjs && node src/api-state.test.mjs && node src/control-api.test.mjs",
     "build:client": "node scripts/build-client.js",
     "build": "node scripts/build.js"
   },

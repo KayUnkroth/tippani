@@ -25,6 +25,7 @@ import {
   createLockStore,
   createInflightStore,
 } from "./api-state.js";
+import { registerControlApi } from "./control-api.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -2300,182 +2301,28 @@ async function main() {
   });
 
   // ----- Control API (#42 Phase 1) ---------------------------------------
-  // External clients (LLM tools, scripts, IDE extensions) must:
-  //   1) send an `X-Tippani-Client: <name>` header on every /api/v1/* call
-  //      (acts as a CORS-style guard — browsers can't set this cross-origin
-  //      without preflight, so a same-origin Origin/Referer is the only way
-  //      to omit it), AND
-  //   2) for mutations, send `Authorization: Bearer <session-token>` where
-  //      the token was printed to stdout at startup.
-  // The browser uses same-origin and doesn't need the token.
-  const PORT_LOCAL_PREFIXES = [
-    `http://localhost:${PORT}`,
-    `http://127.0.0.1:${PORT}`,
-  ];
-  function isSameOrigin(req) {
-    const origin = req.headers.origin || req.headers.referer || "";
-    return PORT_LOCAL_PREFIXES.some((p) => origin.startsWith(p));
-  }
-  function requireExternalAuth(opts = { mutation: false }) {
-    return (req, res, next) => {
-      const sameOrigin = isSameOrigin(req);
-      if (!sameOrigin) {
-        if (!req.headers["x-tippani-client"]) {
-          return res.status(403).json({ error: "missing X-Tippani-Client header" });
-        }
-      }
-      if (opts.mutation && !sameOrigin) {
-        const auth = req.headers.authorization || "";
-        const m = auth.match(/^Bearer\s+(.+)$/);
-        if (!m || m[1] !== _sessionToken) {
-          return res.status(401).json({ error: "invalid or missing session token" });
-        }
-      }
-      next();
-    };
-  }
-
-  function summarizeThread(t) {
-    return {
-      id: t.id,
-      status: t.status,
-      resolved: t.status === 2 || t.status === 4,
-      file: t.threadContext?.filePath || null,
-      line: t.threadContext?.rightFileStart?.line || null,
-      count: (t.comments || []).length,
-      lastUpdated: t.lastUpdatedDate || null,
-      hasDraft: !!_drafts.get(t.id),
-    };
-  }
-  function fullThread(t) {
-    return {
-      ...summarizeThread(t),
-      comments: (t.comments || []).map((c) => ({
-        id: c.id,
-        author: c.author?.displayName || null,
-        publishedDate: c.publishedDate || null,
-        content: c.content || "",
-      })),
-      draft: _drafts.get(t.id),
-    };
-  }
-  function findThread(id) {
-    const tid = Number(id);
-    if (!Number.isFinite(tid)) return null;
-    return (_cache?.threads || []).find((t) => t.id === tid) || null;
-  }
-
-  // GET /api/v1/threads — list all threads (summary).
-  app.get("/api/v1/threads", requireExternalAuth(), (_req, res) => {
-    const all = (_cache?.threads || []).filter((t) => t.comments?.length > 0);
-    res.json({
-      threads: all.map(summarizeThread),
-      focus: _focus.get(),
-    });
-  });
-
-  // GET /api/v1/threads/:id — full thread + draft.
-  app.get("/api/v1/threads/:id", requireExternalAuth(), (req, res) => {
-    const t = findThread(req.params.id);
-    if (!t) return res.status(404).json({ error: "thread not found" });
-    res.json(fullThread(t));
-  });
-
-  // PUT /api/v1/threads/:id/draft — stage a reply draft.
-  // 409 if the user is currently typing in that thread's textarea.
-  app.put("/api/v1/threads/:id/draft", requireExternalAuth({ mutation: true }), (req, res) => {
-    const t = findThread(req.params.id);
-    if (!t) return res.status(404).json({ error: "thread not found" });
-    if (_locks.isLocked(t.id)) {
-      return res.status(409).json({
-        error: "user is editing this thread",
-        retryAfterMs: 10_000,
-      });
-    }
-    const { content, source } = req.body || {};
-    if (typeof content !== "string") {
-      return res.status(400).json({ error: "content (string) required" });
-    }
-    const d = _drafts.put(t.id, content, { source: source || "external" });
-    res.json({ ok: true, threadId: t.id, draft: d, version: _focus.get().version });
-  });
-
-  // DELETE /api/v1/threads/:id/draft — clear staged draft.
-  app.delete("/api/v1/threads/:id/draft", requireExternalAuth({ mutation: true }), (req, res) => {
-    const t = findThread(req.params.id);
-    if (!t) return res.status(404).json({ error: "thread not found" });
-    const had = _drafts.delete(t.id);
-    res.json({ ok: true, removed: had, version: _focus.get().version });
-  });
-
-  // POST /api/v1/threads/:id/lock — sliding-window "user is typing" lock.
-  // Called by the browser on every keystroke in a reply textarea.
-  app.post("/api/v1/threads/:id/lock", requireExternalAuth({ mutation: true }), (req, res) => {
-    const t = findThread(req.params.id);
-    if (!t) return res.status(404).json({ error: "thread not found" });
-    const exp = _locks.touch(t.id);
-    res.json({ ok: true, threadId: t.id, expiresAt: exp });
-  });
-
-  // POST /api/v1/commands/focus — RPC: scroll browser to thread.
-  app.post("/api/v1/commands/focus", requireExternalAuth({ mutation: true }), (req, res) => {
-    const { threadId } = req.body || {};
-    if (threadId !== null && !Number.isFinite(Number(threadId))) {
-      return res.status(400).json({ error: "threadId (number|null) required" });
-    }
-    if (threadId !== null) {
-      const t = findThread(threadId);
-      if (!t) return res.status(404).json({ error: "thread not found" });
-    }
-    const next = _focus.set(threadId);
-    res.json({ ok: true, focus: next });
-  });
-
-  // GET /api/v1/specs/:fileIndex — structured JSON for the spec.
-  // Returns raw markdown + a flat heading list. (Section bodies are derivable
-  // from the markdown + line ranges, which is enough for Phase 1 LLM context.)
-  app.get("/api/v1/specs/:fileIndex", requireExternalAuth(), async (req, res) => {
-    const idx = parseInt(req.params.fileIndex);
-    if (!Number.isFinite(idx) || idx < 0 || idx >= _changedFiles.length) {
-      return res.status(404).json({ error: "file index out of range" });
-    }
-    const file = _changedFiles[idx];
-    let markdown = "";
-    try {
-      if (_cache?.fileContents?.[file.path]) {
-        markdown = _cache.fileContents[file.path];
-      } else if (!_isOffline && _conn) {
-        markdown = await getFileContent(_conn, file.path, _branch);
+  // Routes live in src/control-api.js so they're mountable in tests without
+  // bootstrapping the full ADO flow. Token is generated above; external
+  // clients send `Authorization: Bearer <token>` + `X-Tippani-Client: <name>`
+  // for mutations, just `X-Tippani-Client` for reads.
+  registerControlApi(app, {
+    port: PORT,
+    sessionToken: _sessionToken,
+    focus: _focus,
+    drafts: _drafts,
+    locks: _locks,
+    getThreads: () => _cache?.threads || [],
+    getChangedFiles: () => _changedFiles || [],
+    readFileMarkdown: async (filePath) => {
+      if (_cache?.fileContents?.[filePath]) return _cache.fileContents[filePath];
+      if (!_isOffline && _conn) {
+        const md = await getFileContent(_conn, filePath, _branch);
         _cache.fileContents = _cache.fileContents || {};
-        _cache.fileContents[file.path] = markdown;
+        _cache.fileContents[filePath] = md;
+        return md;
       }
-    } catch (e) {
-      return res.status(502).json({ error: "failed to read file: " + (e?.message || e) });
-    }
-    const sections = [];
-    const lines = markdown.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (m) sections.push({ level: m[1].length, text: m[2], line: i + 1 });
-    }
-    res.json({
-      fileIndex: idx,
-      path: file.path,
-      changeType: file.changeType || null,
-      markdown,
-      sections,
-    });
-  });
-
-  // GET /api/v1/state — single endpoint the browser polls every ~1.5s to
-  // pick up external focus changes and externally-staged drafts.
-  app.get("/api/v1/state", requireExternalAuth(), (_req, res) => {
-    const f = _focus.get();
-    res.json({
-      focusedThreadId: f.focusedThreadId,
-      version: f.version,
-      drafts: _drafts.list(),
-    });
+      return "";
+    },
   });
 
   const server = app.listen(PORT, "127.0.0.1", () => {
