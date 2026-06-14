@@ -643,9 +643,16 @@ function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap
     const actions = isResolved
       ? ``
       : `<div class="thread-actions">
-          <button class="btn-thread-reply" onclick="replyToThread(${t.id})">Reply</button>
+          <button class="btn-thread-reply" onclick="openReply(${t.id})">Reply</button>
           <button class="btn-thread-resolve" onclick="resolveThread(${t.id})">✓ Resolve</button>
-        </div>`;
+        </div>
+        <form class="reply-form" data-thread-id="${t.id}" onsubmit="return false;">
+          <textarea class="reply-textarea" rows="3" placeholder="Reply… (⌘/Ctrl+Enter to post and advance, Esc to cancel)"></textarea>
+          <div class="reply-form-actions">
+            <button type="button" class="reply-btn-post" onclick="submitReply(${t.id})">Post & next</button>
+            <button type="button" class="reply-btn-cancel" onclick="closeReply(${t.id})">Cancel</button>
+          </div>
+        </form>`;
     return `<div class="comment-thread ${statusClass}" data-thread-id="${t.id}" data-thread-line="${t.threadContext?.rightFileStart?.line || ""}">
       ${anchor ? `<div class="comment-anchor">${isResolved ? "✓ " : ""}${escHtml(anchor)}</div>` : ""}
       ${isResolved ? `<details><summary class="resolved-summary">${escHtml(t.comments[0]?.author?.displayName || "Comment")} — resolved</summary>` : ""}
@@ -819,6 +826,20 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .btn-thread-resolve { background: none; border: 1px solid var(--cp-success); color: var(--cp-success); font-size: 12px; cursor: pointer; padding: 2px 10px; border-radius: 6px; font-weight: 500; transition: all 0.12s; }
 .btn-thread-resolve:hover { background: var(--cp-success); color: #fff; }
 
+/* Inline reply form (Phase 0: keyboard nav, #42) */
+.reply-form { display: none; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--cp-border); }
+.reply-form.open { display: block; }
+.reply-textarea { width: 100%; box-sizing: border-box; font-family: inherit; font-size: 13px; padding: 8px; border: 1px solid var(--cp-border); border-radius: 6px; background: var(--cp-surface-soft); color: var(--cp-text); resize: vertical; min-height: 64px; }
+.reply-textarea:focus { outline: none; border-color: var(--cp-accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--cp-accent) 25%, transparent); }
+.reply-form-actions { display: flex; gap: 8px; margin-top: 8px; }
+.reply-btn-post { background: var(--cp-accent); color: #fff; border: none; font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-weight: 500; }
+.reply-btn-post:hover { opacity: 0.9; }
+.reply-btn-cancel { background: none; border: 1px solid var(--cp-border); color: var(--cp-text-muted); font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
+.reply-btn-cancel:hover { color: var(--cp-text); }
+.comment-thread.thread-focused { box-shadow: 0 0 0 2px var(--cp-accent); }
+.kbd-hint { font-size: 11px; color: var(--cp-text-muted); padding: 6px 12px; border-top: 1px solid var(--cp-border); background: var(--cp-surface-soft); }
+.kbd-hint kbd { background: var(--cp-surface); border: 1px solid var(--cp-border); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-family: ui-monospace, monospace; font-size: 10px; }
+
 /* Bottom review bar */
 .review-bar { height: 64px; display: flex; align-items: center; justify-content: center; gap: 12px; background: var(--cp-panel-strong); backdrop-filter: blur(16px); border-top: 1px solid var(--cp-border); flex-shrink: 0; z-index: 50; }
 .review-btn { padding: 10px 28px; font-size: 14px; font-weight: 700; border-radius: 8px; border: none; cursor: pointer; transition: all 0.15s; font-family: inherit; }
@@ -933,6 +954,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
 
   <aside class="sidebar-right" id="sidebarRight">
     <div class="sidebar-section-label">Comments <span class="comment-count-badge">${activeThreads.length} active</span></div>
+    <div class="kbd-hint"><kbd>J</kbd>/<kbd>K</kbd> next/prev · <kbd>R</kbd> reply · <kbd>S</kbd> skip · <kbd>⌘↵</kbd> post &amp; next</div>
     ${threadsHtml}
   </aside>
 </div>
@@ -1461,8 +1483,74 @@ async function submitComment() {
 }
 
 async function replyToThread(threadId) {
-  const text = prompt('Reply:');
-  if (!text) return;
+  // Back-compat shim: open the inline reply form instead of prompt().
+  openReply(threadId);
+}
+
+// --- Phase 0 keyboard nav (#42) ---
+// Tracks which active thread is "focused" for J/K/R/S shortcuts.
+let _focusedThreadId = null;
+
+function _getActiveThreadIds() {
+  return Array.from(document.querySelectorAll('.comment-thread.thread-active'))
+    .map(el => Number(el.getAttribute('data-thread-id')))
+    .filter(n => Number.isFinite(n));
+}
+
+function focusThread(threadId, { scroll = true } = {}) {
+  const ids = _getActiveThreadIds();
+  if (!ids.includes(threadId)) return false;
+  document.querySelectorAll('.comment-thread.thread-focused')
+    .forEach(el => el.classList.remove('thread-focused'));
+  const el = document.querySelector('.comment-thread[data-thread-id="' + threadId + '"]');
+  if (!el) return false;
+  el.classList.add('thread-focused');
+  if (scroll) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  _focusedThreadId = threadId;
+  return true;
+}
+
+function gotoNext() {
+  const ids = _getActiveThreadIds();
+  if (ids.length === 0) return false;
+  const cur = ids.indexOf(_focusedThreadId);
+  const next = ids[(cur + 1) % ids.length];
+  return focusThread(next);
+}
+
+function gotoPrev() {
+  const ids = _getActiveThreadIds();
+  if (ids.length === 0) return false;
+  const cur = ids.indexOf(_focusedThreadId);
+  const prev = cur <= 0 ? ids[ids.length - 1] : ids[cur - 1];
+  return focusThread(prev);
+}
+
+function openReply(threadId) {
+  focusThread(threadId);
+  const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+  if (!form) return;
+  form.classList.add('open');
+  const ta = form.querySelector('.reply-textarea');
+  if (ta) { ta.focus(); ta.selectionStart = ta.selectionEnd = ta.value.length; }
+}
+
+function closeReply(threadId) {
+  const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+  if (!form) return;
+  form.classList.remove('open');
+  const ta = form.querySelector('.reply-textarea');
+  if (ta) ta.value = '';
+}
+
+async function submitReply(threadId) {
+  const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+  if (!form) return;
+  const ta = form.querySelector('.reply-textarea');
+  const text = (ta?.value || '').trim();
+  if (!text) { ta?.focus(); return; }
+  const postBtn = form.querySelector('.reply-btn-post');
+  if (postBtn) postBtn.disabled = true;
   try {
     const res = await fetch('/api/reply', {
       method: 'POST',
@@ -1471,13 +1559,76 @@ async function replyToThread(threadId) {
     });
     if (!res.ok) throw new Error('Failed');
     const result = await res.json();
-    showToast(result.synced ? 'Reply posted' : 'Reply saved \u2014 pending sync');
+    showToast(result.synced ? 'Reply posted — next thread' : 'Reply queued — next thread');
     updateSyncStatus();
-    setTimeout(() => location.reload(), 500);
+    // Advance before reload so the next thread is pre-focused on reload via hash.
+    const ids = _getActiveThreadIds();
+    const cur = ids.indexOf(threadId);
+    const nextId = ids.length > 1 ? ids[(cur + 1) % ids.length] : null;
+    if (nextId != null) {
+      try { sessionStorage.setItem('tippani.focusThread', String(nextId)); } catch {}
+    }
+    setTimeout(() => location.reload(), 400);
   } catch (e) {
     showToast('Failed to reply');
+    if (postBtn) postBtn.disabled = false;
   }
 }
+
+// Restore focused thread across reloads.
+(function() {
+  try {
+    const saved = sessionStorage.getItem('tippani.focusThread');
+    if (saved) {
+      sessionStorage.removeItem('tippani.focusThread');
+      setTimeout(() => focusThread(Number(saved)), 50);
+    }
+  } catch {}
+})();
+
+document.addEventListener('keydown', (e) => {
+  // Cmd/Ctrl+Enter inside a reply textarea: post & advance.
+  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+    const ta = e.target.closest && e.target.closest('.reply-textarea');
+    if (ta) {
+      const form = ta.closest('.reply-form');
+      const tid = Number(form?.getAttribute('data-thread-id'));
+      if (Number.isFinite(tid)) { e.preventDefault(); submitReply(tid); }
+      return;
+    }
+  }
+  // Escape inside a reply textarea: cancel.
+  if (e.key === 'Escape') {
+    const ta = e.target.closest && e.target.closest('.reply-textarea');
+    if (ta) {
+      const form = ta.closest('.reply-form');
+      const tid = Number(form?.getAttribute('data-thread-id'));
+      if (Number.isFinite(tid)) { e.preventDefault(); closeReply(tid); }
+      return;
+    }
+  }
+  // Global shortcuts: only when not typing in a text input/textarea/contenteditable.
+  const a = document.activeElement;
+  const inEditable = a && (
+    a.tagName === 'INPUT' ||
+    a.tagName === 'TEXTAREA' ||
+    a.isContentEditable
+  );
+  if (inEditable) return;
+  // Ignore modifier-laden keys (let other handlers own them).
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'j') { e.preventDefault(); gotoNext(); }
+  else if (k === 'k') { e.preventDefault(); gotoPrev(); }
+  else if (k === 's') { e.preventDefault(); gotoNext(); }
+  else if (k === 'r') {
+    e.preventDefault();
+    const ids = _getActiveThreadIds();
+    if (ids.length === 0) return;
+    if (_focusedThreadId == null) focusThread(ids[0]);
+    if (_focusedThreadId != null) openReply(_focusedThreadId);
+  }
+});
 
 async function resolveThread(threadId) {
   try {
