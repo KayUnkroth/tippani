@@ -378,12 +378,19 @@ async function renderMarkdown(content) {
   return String(result);
 }
 
-// Safe renderer for user-authored content (comments) — no raw HTML allowed
+// Safe renderer for user-authored content (comments). Uses rehype-sanitize
+// with the default schema, which:
+//   - strips raw HTML (remark-rehype already does this by default)
+//   - blocks javascript:, data:, vbscript: URLs in href/src
+//   - allow-lists tag/attribute combinations
+// The default schema is right for comments — no inline IDs, no autolinks,
+// nothing the spec renderer's looser specSanitizeSchema needs.
 async function renderMarkdownSafe(content) {
   const result = await unified()
     .use(remarkParse)
     .use(remarkGfm)
     .use(remarkRehype)
+    .use(rehypeSanitize)
     .use(rehypeStringify)
     .process(content);
   return String(result);
