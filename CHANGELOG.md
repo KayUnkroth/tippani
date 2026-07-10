@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.4.0-beta.1 (2026-07-10)
 
 ### Fixed — PR file detection (reported by Kay Unkroth)
 - **Repo now auto-detected from the PR.** Previously, running without `--repo` defaulted the repo to the *project* name, so `tippani 920770 --org=… --project="Power BI"` looked in repo "Power BI" instead of the PR's real repo (`powerbi-specs`) and reported **0 changed files** even when the PR had markdown. tippani now reads the authoritative repository (stable GUID) from the loaded PR object and re-points all repo-scoped calls at it, so `--repo` is optional and wrong/omitted repo names self-correct.
