@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Fixed — PR file detection (reported by Kay Unkroth)
+- **Repo now auto-detected from the PR.** Previously, running without `--repo` defaulted the repo to the *project* name, so `tippani 920770 --org=… --project="Power BI"` looked in repo "Power BI" instead of the PR's real repo (`powerbi-specs`) and reported **0 changed files** even when the PR had markdown. tippani now reads the authoritative repository (stable GUID) from the loaded PR object and re-points all repo-scoped calls at it, so `--repo` is optional and wrong/omitted repo names self-correct.
+- **URL-encoded config values are decoded** ([#54](https://github.com/mavaali/tippani/issues/54)). A saved or pasted `project`/`repo` like `Power%20BI` is now decoded to `Power BI` instead of silently returning 0 changed files.
+- **Graceful "no markdown" message.** When a PR changes no `.md` files, tippani now lists the non-markdown files it *did* find (counts per extension + sample paths) and explains it reviews markdown only, instead of the terse `No markdown files changed in this PR.`
+
+### Changed — authentication docs
+- README and CLI prompts now lead with `az login` (no PAT required) and demote PAT to an optional fallback, noting PAT creation is often blocked by tenant policy. Clears up "why do you need a PAT — it never prompted me."
+
+### Notes
+- New unit tests in `src/config-util.test.mjs` (24) cover config decoding, extension parsing, PR-repo derivation (including Kay's exact no-`--repo` failure), and the non-markdown summary. Suite: 217 passing.
+
 ## 1.4.0-beta.0 (2026-06-13)
 
 ### Added — AI / MCP integration (beta)
