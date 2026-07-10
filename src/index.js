@@ -26,6 +26,12 @@ import {
   createInflightStore,
 } from "./api-state.js";
 import { registerControlApi } from "./control-api.js";
+import {
+  decodeConfigValue,
+  extOf,
+  deriveRepoContext,
+  summarizeNonMarkdown,
+} from "./config-util.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,8 +61,8 @@ function getConfig() {
   };
   return {
     org: findArg("org") || process.env.TIPPANI_ORG || cfg.org || null,
-    project: findArg("project") || process.env.TIPPANI_PROJECT || cfg.project || null,
-    repo: findArg("repo") || process.env.TIPPANI_REPO || cfg.repo || cfg.project || null,
+    project: decodeConfigValue(findArg("project") || process.env.TIPPANI_PROJECT || cfg.project || null),
+    repo: decodeConfigValue(findArg("repo") || process.env.TIPPANI_REPO || cfg.repo || cfg.project || null),
   };
 }
 
@@ -149,9 +155,9 @@ function friendlyAdoError(e, context) {
   if (msg.includes("ENOTFOUND") || msg.includes("ECONNREFUSED"))
     return `Could not connect to ADO org. Check the --org URL and your network.`;
   if (status == 401)
-    return `Authentication failed (401). Your PAT may be expired. Delete ~/.tippani/pat and re-run.`;
+    return `Authentication failed (401). Your credentials may be expired.\n  If using az CLI: run 'az login' and re-run. If using a PAT: delete ~/.tippani/pat and re-run.`;
   if (status == 403)
-    return `Access denied (403). Your PAT may lack the Code (Read & Write) scope.\n  Generate a new one at: ${ADO_ORG}/_usersSettings/tokens`;
+    return `Access denied (403). Your account (or PAT) may lack access to this repo, or the PAT is missing the Code (Read & Write) scope.`;
   if (status == 404 || msg.includes("TF200016"))
     return `Not found (404). Check --project and --repo names.\n  Project: "${ADO_PROJECT}" | Repo: "${ADO_REPO}"`;
   if (msg.includes("VS404689"))
@@ -192,6 +198,19 @@ async function getPullRequest(conn, prId) {
   return gitApi.getPullRequestById(prId);
 }
 
+// The PR object carries the authoritative repository (getPullRequestById is a
+// global lookup). Re-point ADO_REPO/ADO_PROJECT at its stable GUIDs so every
+// downstream call targets the real repo, even if the user never passed --repo
+// (it would otherwise default to the project name) or passed URL-encoded names.
+function applyRepoContextFromPR(pr) {
+  const ctx = deriveRepoContext(pr, { repo: ADO_REPO, project: ADO_PROJECT });
+  if (ctx.source === "pr") {
+    ADO_REPO = ctx.repo;
+    ADO_PROJECT = ctx.project;
+  }
+  return ctx;
+}
+
 async function getFileContent(conn, filePath, branch) {
   const gitApi = await conn.getGitApi();
   const versionDesc = branch.replace("refs/heads/", "");
@@ -216,14 +235,21 @@ async function getFileContent(conn, filePath, branch) {
 async function getPRChangedFiles(conn, prId) {
   const gitApi = await conn.getGitApi();
   const iterations = await gitApi.getPullRequestIterations(ADO_REPO, prId, ADO_PROJECT);
-  if (!iterations || iterations.length === 0) return [];
+  if (!iterations || iterations.length === 0) return { mdFiles: [], otherFiles: [] };
   const lastIteration = iterations[iterations.length - 1];
   const changes = await gitApi.getPullRequestIterationChanges(
     ADO_REPO, prId, lastIteration.id, ADO_PROJECT
   );
-  return (changes.changeEntries || [])
-    .filter((c) => c.item?.path?.endsWith(".md") && c.changeType !== 16) // 16 = delete
+  const entries = (changes.changeEntries || []).filter(
+    (c) => c.item?.path && !c.item.isFolder && c.changeType !== 16 // 16 = delete
+  );
+  const mdFiles = entries
+    .filter((c) => c.item.path.toLowerCase().endsWith(".md"))
     .map((c) => ({ path: c.item.path, changeType: c.changeType }));
+  const otherFiles = entries
+    .filter((c) => !c.item.path.toLowerCase().endsWith(".md"))
+    .map((c) => ({ path: c.item.path, ext: extOf(c.item.path) }));
+  return { mdFiles, otherFiles };
 }
 
 async function getSpecFiles(conn, branch) {
@@ -2020,7 +2046,7 @@ setInterval(updateSyncStatus, 30000);
 }
 
 // --- Module-level state ---
-let _conn, _pr, _prId, _branch, _changedFiles, _cache, _isOffline, _canEdit = false;
+let _conn, _pr, _prId, _branch, _changedFiles, _otherChangedFiles = [], _cache, _isOffline, _canEdit = false;
 
 // Control API state (#42 Phase 1). All in-memory, ephemeral by design.
 const _focus = createFocusStore();
@@ -2045,7 +2071,7 @@ async function main() {
     console.log("Options:");
     console.log("  --org=<url>       ADO org URL (e.g. https://dev.azure.com/myorg)");
     console.log("  --project=<name>  ADO project name");
-    console.log("  --repo=<name>     ADO repo name (defaults to project name)");
+    console.log("  --repo=<name>     ADO repo name (optional; auto-detected from the PR)");
     console.log("  --file=<path>     Open a specific file directly");
     console.log("  --refresh         Force re-fetch from ADO (ignore cache)");
     console.log("  --offline         Work from cache only, no ADO connection needed");
@@ -2095,8 +2121,10 @@ async function main() {
     // Fresh cache available — still need auth for live actions
     console.log("  Using cached data (cached " + new Date(_cache.cachedAt).toLocaleString() + ")");
     _pr = _cache.pr;
+    applyRepoContextFromPR(_pr);
     _branch = _cache.branch;
     _changedFiles = _cache.changedFiles;
+    _otherChangedFiles = _cache.otherChangedFiles || [];
 
     // Establish connection for live actions (comment sync etc.)
     let pat = loadPat();
@@ -2113,8 +2141,10 @@ async function main() {
     // Pure offline — skip auth entirely
     console.log("  Offline mode — using cached data (cached " + new Date(_cache.cachedAt).toLocaleString() + ")");
     _pr = _cache.pr;
+    applyRepoContextFromPR(_pr);
     _branch = _cache.branch;
     _changedFiles = _cache.changedFiles;
+    _otherChangedFiles = _cache.otherChangedFiles || [];
     _conn = null;
   } else {
     // Need to fetch from ADO
@@ -2133,9 +2163,10 @@ async function main() {
         const readline = await import("readline");
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         pat = await new Promise((resolve) => {
-          console.log("\nNo PAT found and az CLI not available. Generate a PAT at:");
+          console.log("\nNo credentials found. Recommended: run 'az login' in another terminal, then re-run tippani (no PAT needed).");
+          console.log("Otherwise, generate a PAT at:");
           console.log(`  ${ADO_ORG}/_usersSettings/tokens`);
-          console.log("  Scope: Code (Read & Write)\n");
+          console.log("  Scope: Code (Read & Write). Note: PAT creation may be blocked by your tenant policy.\n");
           rl.question("Paste your PAT: ", (answer) => {
             rl.close();
             resolve(answer.trim());
@@ -2160,6 +2191,12 @@ async function main() {
     }
     console.log(`  "${_pr.title}" by ${_pr.createdBy?.displayName}`);
 
+    // Re-point at the PR's real repository before any repo-scoped calls.
+    const _ctx = applyRepoContextFromPR(_pr);
+    if (_ctx.source === "pr" && _ctx.repoName) {
+      console.log(`  Repository: ${_ctx.projectName || ADO_PROJECT}/${_ctx.repoName}`);
+    }
+
     // Warn if PR is abandoned or completed
     if (_pr.status === 3) console.log("  ⚠ This PR is abandoned. Comments may not be actionable.");
     if (_pr.status === 2) console.log("  ⚠ This PR is completed. Comments may not be actionable.");
@@ -2167,12 +2204,15 @@ async function main() {
     _branch = _pr.sourceRefName;
 
     console.log("  Fetching changed files...");
+    let _fileResult;
     try {
-      _changedFiles = await getPRChangedFiles(_conn, _prId);
+      _fileResult = await getPRChangedFiles(_conn, _prId);
     } catch (e) {
       console.error(`\n  Error: ${friendlyAdoError(e, "Fetching changed files")}\n`);
       process.exit(1);
     }
+    _changedFiles = _fileResult.mdFiles;
+    _otherChangedFiles = _fileResult.otherFiles;
     console.log(`  ${_changedFiles.length} .md file(s) changed.`);
 
     // Cache file contents and threads
@@ -2186,13 +2226,25 @@ async function main() {
       }
     }
     const threads = await getCommentThreads(_conn, _prId);
-    _cache = { pr: _pr, branch: _branch, changedFiles: _changedFiles, fileContents, threads, cachedAt: new Date().toISOString() };
+    _cache = { pr: _pr, branch: _branch, changedFiles: _changedFiles, otherChangedFiles: _otherChangedFiles, fileContents, threads, cachedAt: new Date().toISOString() };
     saveCache(_prId, _cache);
     console.log("  Cached to ~/.tippani/cache/pr-" + _prId + ".json");
   }
 
   if (_changedFiles.length === 0) {
-    console.error("No markdown files changed in this PR.");
+    const others = _otherChangedFiles || [];
+    if (others.length > 0) {
+      const summary = summarizeNonMarkdown(others);
+      console.error(`\n  No markdown (.md) files changed in PR #${_prId}.`);
+      console.error(`  tippani reviews markdown specs only, but this PR changed ${others.length} non-markdown file(s):`);
+      console.error(`    ${summary.join(", ")}`);
+      for (const f of others.slice(0, 5)) console.error(`      - ${f.path}`);
+      if (others.length > 5) console.error(`      … and ${others.length - 5} more`);
+      console.error(`\n  If the spec is a .docx/.pdf or other format, tippani can't render it yet.`);
+      console.error(`  If you expected .md changes, double-check the PR id and that you're on the right repo.\n`);
+    } else {
+      console.error(`\n  PR #${_prId} has no reviewable changed files (it may be empty, or all changes were deletions).\n`);
+    }
     process.exit(1);
   }
 

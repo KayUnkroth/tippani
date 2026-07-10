@@ -90,11 +90,13 @@ Priority: CLI flags > env vars > config file.
 
 The CLI authenticates to Azure DevOps in this order:
 
-1. **Saved PAT** — stored at `~/.tippani/pat`
-2. **Azure CLI** — `az account get-access-token` (if `az` is installed and logged in)
-3. **Interactive prompt** — asks for a PAT on first run
+1. **Saved PAT** — stored at `~/.tippani/pat` (only if you created one previously)
+2. **Azure CLI** — `az account get-access-token` (recommended: just run `az login` once — no PAT needed)
+3. **Interactive prompt** — falls back to asking for a PAT only if neither of the above is available
 
-To generate a PAT: go to `https://dev.azure.com/YOUR_ORG/_usersSettings/tokens` and create a token with **Code (Read & Write)** scope.
+**You do not need a PAT.** If `az` is installed and you've run `az login`, tippani authenticates automatically and never prompts. This is the recommended path — in many tenants, PAT creation is disabled by policy.
+
+If you can't use `az login`, generate a PAT at `https://dev.azure.com/YOUR_ORG/_usersSettings/tokens` with **Code (Read & Write)** scope.
 
 ## Offline Mode
 
