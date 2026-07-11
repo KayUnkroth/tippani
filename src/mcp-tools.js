@@ -124,5 +124,51 @@ export function buildTools(http) {
       inputSchema: { fileIndex: z.number().describe("0-based index into the PR's changed files") },
       handler: ({ fileIndex }) => http.get(`/api/v1/specs/${fileIndex}`),
     },
+    {
+      name: "stage_spec_edit",
+      description:
+        "Stage a proposed whole-file edit for the user to review in tippani's " +
+        "editor before committing. The user sees your version loaded in the " +
+        "editor with a diff, adjusts it, and either commits themselves or tells " +
+        "you to commit_spec. You never commit without the user. Returns 409 if " +
+        "the user is currently editing that file (try again in ~10s).",
+      inputSchema: {
+        fileIndex: z.number().describe("0-based index into the PR's changed files"),
+        content: z.string().describe("Full proposed markdown for the file"),
+        source: z.string().optional().describe("Free-form attribution e.g. model name"),
+      },
+      handler: ({ fileIndex, content, source }) =>
+        http.put(`/api/v1/specs/${fileIndex}/draft`, { content, source }),
+    },
+    {
+      name: "get_spec_draft",
+      description:
+        "Read the current staged spec draft for a file, including any edits the " +
+        "user made in the portal. Use before commit_spec to commit the user's " +
+        "adjusted version.",
+      inputSchema: { fileIndex: z.number() },
+      handler: ({ fileIndex }) => http.get(`/api/v1/specs/${fileIndex}/draft`),
+    },
+    {
+      name: "clear_spec_edit",
+      description: "Remove a staged spec edit. Idempotent.",
+      inputSchema: { fileIndex: z.number() },
+      handler: ({ fileIndex }) => http.delete(`/api/v1/specs/${fileIndex}/draft`),
+    },
+    {
+      name: "commit_spec",
+      description:
+        "Commit a spec file to the PR's source branch. Omit content to commit " +
+        "the current staged draft (with the user's edits); pass content to " +
+        "commit an explicit version. Use only after the user approves. Returns " +
+        "409 if the branch moved since load (reload and retry).",
+      inputSchema: {
+        fileIndex: z.number(),
+        content: z.string().optional().describe("Explicit markdown; omit to commit the staged draft"),
+        message: z.string().optional().describe("Commit message"),
+      },
+      handler: ({ fileIndex, content, message }) =>
+        http.post(`/api/v1/specs/${fileIndex}/commit`, { content, message }),
+    },
   ];
 }

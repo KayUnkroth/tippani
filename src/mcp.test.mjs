@@ -87,8 +87,9 @@ try {
     "list_threads", "get_thread", "focus_thread",
     "stage_draft", "clear_draft", "post_reply",
     "resolve_thread", "get_spec",
+    "stage_spec_edit", "get_spec_draft", "clear_spec_edit", "commit_spec",
   ];
-  check("tools: exactly 8 registered", tools.length === 8);
+  check("tools: exactly 12 registered", tools.length === 12);
   for (const n of expected) {
     check(`tools: includes ${n}`, !!byName[n]);
     check(`tools: ${n} has description`, typeof byName[n].description === "string" && byName[n].description.length > 20);

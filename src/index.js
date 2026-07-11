@@ -38,7 +38,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- Config ---
 const CONFIG_DIR = path.join(os.homedir(), ".tippani");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
-const PORT = 3847;
+let PORT = 3847;
 
 function loadConfig() {
   try {
@@ -1529,6 +1529,7 @@ window.tippani = (function () {
 </script>
 <script>
 const SPEC_PATH = ${JSON.stringify(specPath)};
+const CURRENT_FILE_INDEX = ${JSON.stringify(currentFileIndex)};
 const SOURCE_MAP = ${JSON.stringify(sourceMap)};
 const TOC_DATA = ${JSON.stringify(toc)};
 const THREADS_DATA = ${JSON.stringify(allThreads.map(t => ({
@@ -1840,6 +1841,39 @@ document.addEventListener('keydown', (e) => {
   const seenDraftKey = (id, d) => id + ':' + (d ? d.updatedAt : '0');
   const lastDraftSeen = new Map();
 
+  // Spec-edit drafts: an agent stages a whole-file proposal; load it into the
+  // editor for the user to review/adjust before committing.
+  let _specDraftSeen = null; // updatedAt of the last applied agent proposal
+  window.__specDraftActive = () => _specDraftSeen !== null;
+  function showSpecDraftBadge(source) {
+    let b = document.getElementById('specDraftBadge');
+    if (!b) {
+      b = document.createElement('div');
+      b.id = 'specDraftBadge';
+      b.className = 'reply-external-badge';
+      b.style.margin = '10px 40px 0';
+      const main = document.getElementById('mainContent');
+      if (main) main.insertBefore(b, main.firstChild);
+    }
+    b.textContent = '\u2728 Proposed edit from ' + (source || 'external client') + ' \u2014 review, adjust, then Save (or tell it to commit)';
+  }
+  function clearSpecDraftBadge() {
+    const b = document.getElementById('specDraftBadge');
+    if (b) b.remove();
+  }
+  function applyExternalSpecDraft(specDrafts) {
+    const d = specDrafts[String(CURRENT_FILE_INDEX)];
+    if (!d) { _specDraftSeen = null; clearSpecDraftBadge(); return; }
+    if (d.source === 'user-mirror') return;      // our own echo of the user's edits
+    if (_specDraftSeen === d.updatedAt) return;  // already applied this proposal
+    if (!window.tippani || !window.tippani.getEditor) return;
+    _specDraftSeen = d.updatedAt;
+    try { window.tippani.enterEdit(); } catch {}
+    const ed = window.tippani.getEditor();
+    if (ed && ed.setMarkdown) ed.setMarkdown(d.content);
+    showSpecDraftBadge(d.source);
+  }
+
   function applyExternalDraft(threadId, draft) {
     const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
     if (!form) return;
@@ -1900,6 +1934,8 @@ document.addEventListener('keydown', (e) => {
             clearExternalBadge(tid);
           }
         }
+        // Apply an externally-staged spec edit for THIS file.
+        try { applyExternalSpecDraft(s.specDrafts || {}); } catch {}
       }
     } catch {}
   }
@@ -1925,6 +1961,29 @@ document.addEventListener('keydown', (e) => {
     lastTouchAt = now;
     fetch('/api/v1/threads/' + tid + '/lock', { method: 'POST' }).catch(() => {});
   });
+})();
+
+// Spec-edit mirror + lock: while an agent's proposal is loaded in the editor
+// and the user edits it, mirror the buffer back to the draft store (source
+// 'user-mirror', ignored by our own poll) and hold the file edit lock so the
+// agent can't clobber. Debounced ~1.5s so commit_spec sees the user's edits.
+(function() {
+  let last = null;
+  setInterval(async () => {
+    if (typeof window.__specDraftActive !== 'function' || !window.__specDraftActive()) return;
+    const ed = window.tippani && window.tippani.getEditor && window.tippani.getEditor();
+    if (!ed || !ed.getMarkdown) return;
+    const cur = ed.getMarkdown();
+    if (cur === last) return;
+    last = cur;
+    try {
+      await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/lock', { method: 'POST' });
+      await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: cur, source: 'user-mirror' })
+      });
+    } catch {}
+  }, 1500);
 })();
 
 async function resolveThread(threadId) {
@@ -2052,6 +2111,11 @@ let _conn, _pr, _prId, _branch, _changedFiles, _otherChangedFiles = [], _cache, 
 const _focus = createFocusStore();
 const _drafts = createDraftStore({ onChange: () => _focus.bumpVersion() });
 const _locks = createLockStore({ ttlMs: 10_000 });
+// Proposed spec-edit drafts, keyed by fileIndex (mirrors the reply-draft
+// store): an external client stages a whole-file markdown proposal the user
+// reviews/edits in the portal editor before committing.
+const _specDrafts = createDraftStore({ onChange: () => _focus.bumpVersion() });
+const _specLocks = createLockStore({ ttlMs: 10_000 });
 const _inflight = createInflightStore();
 // Session token authorises external (non-browser-same-origin) mutations.
 // Generated fresh per process and printed to stdout at startup.
@@ -2076,6 +2140,9 @@ async function main() {
     console.log("  --refresh         Force re-fetch from ADO (ignore cache)");
     console.log("  --offline         Work from cache only, no ADO connection needed");
     console.log("  --save-config     Save --org/--project/--repo to ~/.tippani/config.json");
+    console.log("  --port=<n>        Serve on a specific port (default 3847)");
+    console.log("  --headless        Don't open a browser (agent-only session)");
+    console.log("  --ado-token=<t>   Use a bearer token for ADO (skip PAT / az CLI)");
     console.log("");
     console.log("Examples:");
     console.log("  tippani 992661");
@@ -2109,6 +2176,16 @@ async function main() {
   const forceRefresh = args.includes("--refresh");
   _isOffline = args.includes("--offline");
 
+  // Coforce 2 integration: --port / --headless / --ado-token (or the
+  // TIPPANI_* env equivalents). Port lets multiple PRs run at once; headless
+  // skips opening a browser (agent-only sessions); ado-token accepts a bearer
+  // (e.g. an Entra token) so no PAT / az CLI is needed.
+  const portArg = args.find(a => a.startsWith("--port="));
+  const portVal = portArg ? parseInt(portArg.split("=")[1], 10) : parseInt(process.env.TIPPANI_PORT || "", 10);
+  if (Number.isFinite(portVal) && portVal > 0) PORT = portVal;
+  const headless = args.includes("--headless") || process.env.TIPPANI_HEADLESS === "1";
+  const adoToken = (args.find(a => a.startsWith("--ado-token="))?.split("=").slice(1).join("=")) || process.env.TIPPANI_ADO_TOKEN || null;
+
   // Try cache first
   _cache = loadCache(_prId);
 
@@ -2128,7 +2205,9 @@ async function main() {
 
     // Establish connection for live actions (comment sync etc.)
     let pat = loadPat();
-    if (pat) {
+    if (adoToken) {
+      _conn = getAdoConnectionBearer(adoToken);
+    } else if (pat) {
       _conn = getAdoConnection(pat);
     } else {
       const token = await getTokenFromAzCli();
@@ -2150,7 +2229,10 @@ async function main() {
     // Need to fetch from ADO
     let pat = loadPat();
 
-    if (pat) {
+    if (adoToken) {
+      console.log("Authenticated via provided ADO token.");
+      _conn = getAdoConnectionBearer(adoToken);
+    } else if (pat) {
       console.log("Using saved PAT...");
       _conn = getAdoConnection(pat);
     } else {
@@ -2264,6 +2346,11 @@ async function main() {
 
   // CSRF protection: reject cross-origin mutations
   app.use((req, res, next) => {
+    // The token-gated control API (/api/v1/*) does its own bearer-token auth
+    // in requireAuth(), so external (non-browser) clients like the MCP shim —
+    // which send Authorization + X-Tippani-Client but no browser Origin — must
+    // be allowed past this browser-origin CSRF gate.
+    if (req.path.startsWith("/api/v1/")) return next();
     if (req.method !== "GET" && req.method !== "HEAD") {
       const origin = req.headers.origin || req.headers.referer || "";
       if (!origin.startsWith(`http://localhost:${PORT}`) && !origin.startsWith(`http://127.0.0.1:${PORT}`)) {
@@ -2421,6 +2508,45 @@ async function main() {
     return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
   }
 
+  // Commit a proposed spec edit (control API): push the given content (or the
+  // current staged spec draft when content is omitted) to the PR source
+  // branch, then clear the draft. Lets an agent commit what the user adjusted
+  // in the portal after reviewing the proposal.
+  async function doCommitSpec(fileIndex, content, message) {
+    const files = _changedFiles || [];
+    const idx = Number(fileIndex);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) {
+      return { ok: false, status: 404, body: { error: "file index out of range" } };
+    }
+    const filePath = files[idx].path;
+    let bodyContent = content;
+    if (typeof bodyContent !== "string") {
+      const d = _specDrafts.get(idx);
+      bodyContent = d?.content;
+    }
+    if (typeof bodyContent !== "string") {
+      return { ok: false, status: 400, body: { error: "no content provided and no staged draft to commit" } };
+    }
+    const commitMessage = (message && String(message).trim()) || `tippani: update ${filePath.split("/").pop()}`;
+    if (_isOffline || !_conn) {
+      addPending(_prId, { type: "save", filePath, content: bodyContent, message: commitMessage });
+      _specDrafts.delete(idx);
+      return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+    }
+    try {
+      const commitId = await pushFileToBranch(_conn, _branch, filePath, bodyContent, commitMessage);
+      if (_cache && _cache.fileContents) { _cache.fileContents[filePath] = bodyContent; saveCache(_prId, _cache); }
+      _specDrafts.delete(idx);
+      _specLocks.release(idx);
+      return { ok: true, status: 200, body: { ok: true, synced: true, commitId } };
+    } catch (e) {
+      if (isConflict(e)) {
+        return { ok: false, status: 409, body: { conflict: true, error: "branch moved; reload before committing" } };
+      }
+      return { ok: false, status: 502, body: { error: friendlyAdoError(e, "commit spec") } };
+    }
+  }
+
   app.post("/api/reply", async (req, res) => {
     const r = await doReply(req.body.threadId, req.body.content);
     res.status(r.status).json(r.body);
@@ -2553,32 +2679,32 @@ async function main() {
     },
     postReply: doReply,
     resolveThread: doResolve,
+    specDrafts: _specDrafts,
+    specLocks: _specLocks,
+    commitSpec: doCommitSpec,
   });
-
-  // Persist session token to ~/.tippani/session-token so the MCP shim
-  // (and other local helpers) can authenticate without copy/paste.
-  // 0600 perms; overwritten on each startup.
-  try {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    const tokenPath = path.join(CONFIG_DIR, "session-token");
-    fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
-    // Best-effort cleanup on graceful shutdown so the token doesn't outlive
-    // the server process for any meaningful window.
-    const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} };
-    process.on("exit", cleanup);
-    process.on("SIGINT", () => { cleanup(); process.exit(0); });
-    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-  } catch (e) {
-    console.warn(`  Warning: could not persist session token: ${e.message}`);
-  }
 
   const server = app.listen(PORT, "127.0.0.1", () => {
     const base = `http://localhost:${PORT}`;
     const url = openIndex !== null ? `${base}/file/${openIndex}` : base;
+    // Persist the session token ONLY after we own the port, so an instance
+    // that fails to bind (EADDRINUSE) never deletes the running server's
+    // token on exit. 0600 perms; overwritten on each successful startup.
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      const tokenPath = path.join(CONFIG_DIR, "session-token");
+      fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
+      const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} };
+      process.on("exit", cleanup);
+      process.on("SIGINT", () => { cleanup(); process.exit(0); });
+      process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+    } catch (e) {
+      console.warn(`  Warning: could not persist session token: ${e.message}`);
+    }
     console.log(`\n  Tippani running at ${base}`);
     console.log(`  Control API token: ${_sessionToken}`);
     console.log(`  External clients: set Authorization: Bearer <token> and X-Tippani-Client: <name>\n`);
-    open(url);
+    if (!headless) open(url);
   });
   server.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
