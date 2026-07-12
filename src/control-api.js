@@ -14,9 +14,12 @@ export function registerControlApi(app, deps) {
     locks,
     getThreads,         // () => Array<thread>
     getChangedFiles,    // () => Array<{path, changeType}>
+    getTriage,          // async () => {counts, threads} (optional)
     readFileMarkdown,   // async (filePath) => string
     postReply,          // async (threadId, content) => {ok, status, body}
     resolveThread: doResolveDep, // async (threadId) => {ok, status, body}
+    stageResolve,       // (threadId) => {ok, status, body} — queue a resolve, no push (optional)
+    setViewed,          // async (threadId, commentId|null) => {ok, status, body}
     specDrafts,         // draft store keyed by fileIndex (optional)
     specLocks,          // lock store keyed by fileIndex (optional)
     commitSpec,         // async (fileIndex, content, message) => {ok, status, body}
@@ -90,6 +93,17 @@ export function registerControlApi(app, deps) {
   app.get("/api/v1/threads", requireAuth(), (_req, res) => {
     const all = (getThreads() || []).filter((t) => t.comments?.length > 0);
     res.json({ threads: all.map(summarizeThread), focus: focus.get() });
+  });
+
+  app.get("/api/v1/triage", requireAuth(), async (_req, res) => {
+    if (typeof getTriage !== "function") {
+      return res.status(501).json({ error: "triage not wired in this deployment" });
+    }
+    try {
+      res.json(await getTriage());
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
   });
 
   app.get("/api/v1/threads/:id", requireAuth(), (req, res) => {
@@ -253,6 +267,40 @@ export function registerControlApi(app, deps) {
       return res.status(501).json({ error: "resolve not wired in this deployment" });
     }
     const r = await doResolveDep(t.id);
+    res.status(r.status).json(r.body);
+  });
+
+  // POST /api/v1/threads/:id/stage-resolve — queue a resolve locally (pending),
+  // NOT pushed to ADO until Finalize. Mirrors stage_draft/stage_spec_edit.
+  app.post("/api/v1/threads/:id/stage-resolve", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof stageResolve !== "function") {
+      return res.status(501).json({ error: "stage-resolve not wired in this deployment" });
+    }
+    const r = await stageResolve(t.id);
+    res.status(r.status).json(r.body);
+  });
+
+  // POST /api/v1/threads/:id/viewed — mark the thread viewed at its current last
+  // comment (durable ADO thread property). DELETE un-views it.
+  app.post("/api/v1/threads/:id/viewed", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof setViewed !== "function") {
+      return res.status(501).json({ error: "viewed not wired in this deployment" });
+    }
+    const lastId = (t.comments || []).reduce((m, c) => Math.max(m, c.id || 0), 0);
+    const r = await setViewed(t.id, lastId);
+    res.status(r.status).json(r.body);
+  });
+  app.delete("/api/v1/threads/:id/viewed", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof setViewed !== "function") {
+      return res.status(501).json({ error: "viewed not wired in this deployment" });
+    }
+    const r = await setViewed(t.id, null);
     res.status(r.status).json(r.body);
   });
 }

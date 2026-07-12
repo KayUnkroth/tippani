@@ -56,7 +56,12 @@ async function fakeResolve(threadId) {
   resolvedThreads.push(threadId);
   return { ok: true, status: 200, body: { ok: true, synced: true } };
 }
-
+const viewedCalls = [];
+const stageResolveCalls = [];
+async function fakeSetViewed(threadId, commentId) {
+  viewedCalls.push({ threadId, commentId });
+  return { ok: true, status: 200, body: { ok: true, viewedCommentId: commentId == null ? null : String(commentId) } };
+}
 const app = express();
 app.use(express.json());
 registerControlApi(app, {
@@ -68,6 +73,8 @@ registerControlApi(app, {
   readFileMarkdown: async () => SPEC_MD,
   postReply: fakePostReply,
   resolveThread: fakeResolve,
+  stageResolve: (threadId) => { stageResolveCalls.push(threadId); return { ok: true, status: 200, body: { ok: true, staged: true, synced: false } }; },
+  setViewed: fakeSetViewed,
 });
 
 const server = await new Promise((res) => {
@@ -78,21 +85,42 @@ const BASE = `http://127.0.0.1:${port}`;
 
 // --- MCP tool surface under test ---
 const http = createHttpClient({ baseUrl: BASE, token: TOKEN, clientName: "mcp-test", fetch });
-const tools = buildTools(http);
+// Stub portal session: open_pr calls ensurePortal (recorded) instead of
+// spawning a real portal, then reads threads through the live control API.
+const ensurePortalCalls = [];
+const openUrlCalls = [];
+const stubSession = {
+  ensurePortal: async (opts) => { ensurePortalCalls.push(opts); return { reused: false, prId: opts.prId }; },
+  openUrl: async (path) => { openUrlCalls.push(path); },
+};
+const tools = buildTools(http, stubSession);
 const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
 try {
   // --- Surface checks ---
   const expected = [
-    "list_threads", "get_thread", "focus_thread",
+    "open_pr",
+    "list_threads", "triage_summary", "show_feedback",
+    "open_thread", "open_file", "get_thread", "focus_thread",
     "stage_draft", "clear_draft", "post_reply",
-    "resolve_thread", "get_spec",
+    "resolve_thread", "stage_resolve_thread", "mark_viewed", "get_spec",
     "stage_spec_edit", "get_spec_draft", "clear_spec_edit", "commit_spec",
   ];
-  check("tools: exactly 12 registered", tools.length === 12);
+  check("tools: exactly 19 registered", tools.length === 19);
   for (const n of expected) {
     check(`tools: includes ${n}`, !!byName[n]);
     check(`tools: ${n} has description`, typeof byName[n].description === "string" && byName[n].description.length > 20);
+  }
+
+  // --- open_pr ---
+  {
+    const r = await byName.open_pr.handler({ prId: 952607, org: "https://dev.azure.com/o", project: "P" });
+    check("open_pr: calls ensurePortal with prId", ensurePortalCalls.length === 1 && ensurePortalCalls[0].prId === 952607);
+    check("open_pr: forwards org/project", ensurePortalCalls[0].org === "https://dev.azure.com/o" && ensurePortalCalls[0].project === "P");
+    check("open_pr: returns threads after launch", r.threads.length === 2);
+    check("open_pr: carries no embedded instructions (driving is via skills/instructions)",
+      r.instructions === undefined);
+    check("open_pr: reports open thread count", r.openThreadCount === 2);
   }
 
   // --- list_threads ---
@@ -100,6 +128,21 @@ try {
     const r = await byName.list_threads.handler({});
     check("list_threads: returns both threads", r.threads.length === 2);
     check("list_threads: focus reported", r.focus.focusedThreadId === null);
+  }
+
+  // --- open_file ---
+  {
+    const r1 = await byName.open_file.handler({ fileIndex: 2 });
+    check("open_file: opens /file/<idx>", r1.opened === "/file/2" && openUrlCalls.includes("/file/2"));
+    const r2 = await byName.open_file.handler({ fileIndex: 0, line: 47 });
+    check("open_file: appends ?line when given", r2.opened === "/file/0?line=47" && openUrlCalls.includes("/file/0?line=47"));
+  }
+
+  // --- stage_resolve_thread ---
+  {
+    const r = await byName.stage_resolve_thread.handler({ threadId: 201 });
+    check("stage_resolve_thread: stages locally (no ADO push)", r.staged === true && r.synced === false);
+    check("stage_resolve_thread: calls stageResolve, not resolve", stageResolveCalls.includes(201) && !resolvedThreads.includes(201));
   }
 
   // --- get_thread ---
@@ -168,6 +211,24 @@ try {
     const r = await byName.resolve_thread.handler({ threadId: 202 });
     check("resolve_thread: ok+synced", r.ok === true && r.synced === true);
     check("resolve_thread: backend received resolve", resolvedThreads.includes(202));
+  }
+
+  // --- mark_viewed ---
+  {
+    const r = await byName.mark_viewed.handler({ threadId: 202 });
+    check("mark_viewed: ok", r.ok === true);
+    // thread 202's last comment id is 12 → viewed at 12
+    check("mark_viewed: backend viewed at last comment id",
+      viewedCalls.some((c) => c.threadId === 202 && c.commentId === 12));
+    const r2 = await byName.mark_viewed.handler({ threadId: 202, clear: true });
+    check("mark_viewed: clear un-views (commentId null)",
+      r2.ok === true && viewedCalls.some((c) => c.threadId === 202 && c.commentId === null));
+  }
+
+  // --- open_thread ---
+  {
+    const r = await byName.open_thread.handler({ threadId: 14974588 });
+    check("open_thread: opens /goto/thread url in browser", r.ok === true && openUrlCalls.includes("/goto/thread/14974588"));
   }
 
   // --- get_spec ---

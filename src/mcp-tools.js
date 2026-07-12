@@ -14,11 +14,21 @@ export function loadSessionToken(tokenPath) {
   }
 }
 
-export function createHttpClient({ baseUrl, token, clientName, fetch: fetchImpl = fetch }) {
+export function createHttpClient({ baseUrl, getBaseUrl, token, getToken, clientName, fetch: fetchImpl = fetch }) {
+  const resolveToken = typeof getToken === "function" ? getToken : () => token;
+  const resolveBaseUrl = typeof getBaseUrl === "function" ? getBaseUrl : () => baseUrl;
   function headers(extra = {}) {
+    const t = resolveToken();
+    if (!t) {
+      const err = new Error(
+        "No tippani session yet — call open_pr first to launch the review portal."
+      );
+      err.status = 0;
+      throw err;
+    }
     return {
       "X-Tippani-Client": clientName,
-      "Authorization": `Bearer ${token}`,
+      "Authorization": `Bearer ${t}`,
       ...extra,
     };
   }
@@ -28,7 +38,7 @@ export function createHttpClient({ baseUrl, token, clientName, fetch: fetchImpl 
       init.headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(body);
     }
-    const r = await fetchImpl(baseUrl + path, init);
+    const r = await fetchImpl(resolveBaseUrl() + path, init);
     let parsed = null;
     try { parsed = await r.json(); } catch {}
     if (!r.ok) {
@@ -48,8 +58,44 @@ export function createHttpClient({ baseUrl, token, clientName, fetch: fetchImpl 
   };
 }
 
-export function buildTools(http) {
+export function buildTools(http, session) {
   return [
+    {
+      name: "open_pr",
+      description:
+        "Open a spec PR in the tippani review portal — launches a VISIBLE " +
+        "browser window so the user watches the review — and load its comment " +
+        "threads and changed files. Call this FIRST, before any other tippani " +
+        "tool; every other tool operates on the PR opened here. Returns the " +
+        "open comment threads. This is the only supported way to review a spec " +
+        "PR; do not use the Azure DevOps MCP or git for PR review.",
+      inputSchema: {
+        prId: z.number().describe("Azure DevOps pull request id"),
+        org: z.string().optional().describe(
+          "ADO org URL, e.g. https://dev.azure.com/myorg (falls back to saved config)"),
+        project: z.string().optional().describe(
+          "ADO project name (falls back to saved config)"),
+        repo: z.string().optional().describe(
+          "ADO repo name (optional; auto-detected from the PR)"),
+        refresh: z.boolean().optional().describe(
+          "Force re-fetch from ADO, ignoring any cache"),
+      },
+      handler: async ({ prId, org, project, repo, refresh }) => {
+        if (!session || typeof session.ensurePortal !== "function") {
+          throw new Error("Portal launcher unavailable in this context.");
+        }
+        const bind = await session.ensurePortal({ prId, org, project, repo, refresh });
+        const data = await http.get("/api/v1/threads");
+        const threads = (data && data.threads) || [];
+        const openThreads = threads.filter((t) => !t.resolved);
+        return {
+          prId: Number(prId),
+          portalUrl: bind && bind.url,
+          openThreadCount: openThreads.length,
+          threads,
+        };
+      },
+    },
     {
       name: "list_threads",
       description:
@@ -57,6 +103,66 @@ export function buildTools(http) {
         "and comment count. Use this first to see what's open.",
       inputSchema: {},
       handler: () => http.get("/api/v1/threads"),
+    },
+    {
+      name: "triage_summary",
+      description:
+        "Get a categorized triage summary of every thread on the PR: counts of " +
+        "needs-your-reply / awaiting-reviewer / viewed / for-your-information / resolved, " +
+        "plus a per-thread list (anchor, category, gist). Use right after show_feedback to " +
+        "give the user a brief spoken summary (e.g. 'X resolved, Y need your reply, Z can be " +
+        "ignored') and offer to mark the ignorable (FYI) threads as viewed via mark_viewed.",
+      inputSchema: {},
+      handler: () => http.get("/api/v1/triage"),
+    },
+    {
+      name: "open_thread",
+      description:
+        "Open a specific comment thread in the user's browser — a single-thread view " +
+        "with the comments and a reply box that shows any staged draft. Use to bring the " +
+        "user to a thread you want them to look at, or right after stage_draft so they can " +
+        "review and post your proposed reply.",
+      inputSchema: { threadId: z.number() },
+      handler: async ({ threadId }) => {
+        if (session && typeof session.openUrl === "function") {
+          await session.openUrl(`/goto/thread/${threadId}`);
+        }
+        return { ok: true, opened: `/goto/thread/${threadId}` };
+      },
+    },
+    {
+      name: "show_feedback",
+      description:
+        "Open the Feedback page in the user's browser — a cross-thread triage list of every " +
+        "comment thread on the PR with its status (needs your reply / awaiting reviewer / " +
+        "viewed / resolved) and expandable full threads. Use when the user wants to triage " +
+        "the whole PR at a glance rather than drilling into a single file or thread.",
+      inputSchema: {},
+      handler: async () => {
+        if (session && typeof session.openUrl === "function") {
+          await session.openUrl(`/feedback`);
+        }
+        return { ok: true, opened: `/feedback` };
+      },
+    },
+    {
+      name: "open_file",
+      description:
+        "Open a changed file in the user's browser at the file view, optionally scrolled to a " +
+        "line. Use to bring the user to a file or section that isn't tied to a comment (e.g. " +
+        "\"show me the Meta-programming section\") — resolve a heading to its line with get_spec " +
+        "first. Read-only: opens the view, changes nothing.",
+      inputSchema: {
+        fileIndex: z.number().describe("0-based index into the PR's changed files"),
+        line: z.number().optional().describe("1-based line to scroll to"),
+      },
+      handler: async ({ fileIndex, line }) => {
+        const path = `/file/${fileIndex}` + (line ? `?line=${line}` : "");
+        if (session && typeof session.openUrl === "function") {
+          await session.openUrl(path);
+        }
+        return { ok: true, opened: path };
+      },
     },
     {
       name: "get_thread",
@@ -114,6 +220,32 @@ export function buildTools(http) {
       inputSchema: { threadId: z.number() },
       handler: ({ threadId }) =>
         http.post(`/api/v1/threads/${threadId}/resolve`, {}),
+    },
+    {
+      name: "stage_resolve_thread",
+      description:
+        "Stage a thread resolution LOCALLY without pushing to ADO — it shows as resolved " +
+        "(pending) in the portal and is pushed only at Finalize. Use this (not resolve_thread) " +
+        "during review so resolves stay local and undoable until the user finalizes.",
+      inputSchema: { threadId: z.number() },
+      handler: ({ threadId }) =>
+        http.post(`/api/v1/threads/${threadId}/stage-resolve`, {}),
+    },
+    {
+      name: "mark_viewed",
+      description:
+        "Mark a comment thread as viewed/acknowledged WITHOUT resolving it: it drops out " +
+        "of the \"needs your reply\" triage but stays open in ADO, and resurfaces if a newer " +
+        "comment is added. Durable (stored as an ADO thread property). Use for threads the " +
+        "user has read and intentionally left open. Pass clear=true to un-view.",
+      inputSchema: {
+        threadId: z.number(),
+        clear: z.boolean().optional().describe("Un-view the thread instead of marking it viewed"),
+      },
+      handler: ({ threadId, clear }) =>
+        clear
+          ? http.delete(`/api/v1/threads/${threadId}/viewed`)
+          : http.post(`/api/v1/threads/${threadId}/viewed`, {}),
     },
     {
       name: "get_spec",
