@@ -31,12 +31,12 @@ const fetchImpl = async (url) => {
 };
 
 function fakeSpawn(bin, args, opts) {
-  spawnCalls.push({ bin, args, opts });
   const port = Number(args.find((a) => a.startsWith("--port=")).split("=")[1]);
   const prId = Number(args[1]);
   const child = new EventEmitter();
   child.killed = false;
   child.kill = () => { child.killed = true; child.emit("exit", 0); };
+  spawnCalls.push({ bin, args, opts, child });
   setTimeout(() => {
     if (busyPorts.has(port)) { child.emit("exit", 1); return; } // EADDRINUSE
     registry.push({ port, prId, token: `tok-${port}`, url: `http://localhost:${port}` });
@@ -57,6 +57,8 @@ function newSession(overrides = {}) {
     listInstancesFn,
     openBrowserFn: (url) => { openedUrls.push(url); },
     readyTimeoutMs: 3000,
+    // A busy port is reported as not-free so the launcher skips it without spawning.
+    isPortFreeFn: (port) => !busyPorts.has(port),
     ...overrides,
   });
 }
@@ -100,17 +102,43 @@ try {
   // --- different PR launches on the NEXT free port (base port held) ---
   {
     reset();
-    // PR 111 is live on 3847, and 3847 is held (a new launch there fails).
+    // PR 111 is live on 3847, and 3847 is held (in use).
     registry.push({ port: 3847, prId: 111, token: "t111", url: "http://localhost:3847" });
     busyPorts.add(3847);
     const s = newSession();
     const r = await s.ensurePortal({ prId: 222 });
     check("parallel: launched (not adopted)", r.reused === false && r.prId === 222);
     check("parallel: on next port 3848", s.getBaseUrl() === "http://localhost:3848");
-    check("parallel: tried 3847 then 3848", spawnCalls.length === 2 &&
-      spawnCalls[0].args.includes("--port=3847") && spawnCalls[1].args.includes("--port=3848"));
+    // Fast pre-check skips the busy base port WITHOUT spawning a doomed child.
+    check("parallel: only spawned on the free port 3848",
+      spawnCalls.length === 1 && spawnCalls[0].args.includes("--port=3848"));
     check("parallel: left PR 111 portal alone", registry.some((i) => i.port === 3847 && i.prId === 111));
     s.stop();
+  }
+
+  // --- multi-PR session: every launched portal is torn down on stop() ---
+  {
+    reset();
+    const s = newSession();
+    await s.ensurePortal({ prId: 111 }); // launches on 3847
+    await s.ensurePortal({ prId: 222 }); // launches on 3848 (A not adopted, different PR)
+    const childA = spawnCalls.find((c) => c.args.includes("--port=3847")).child;
+    const childB = spawnCalls.find((c) => c.args.includes("--port=3848")).child;
+    check("multi-pr: launched two portals", !!childA && !!childB && childA !== childB);
+    check("multi-pr: neither killed before stop", !childA.killed && !childB.killed);
+    s.stop();
+    check("multi-pr: stop killed BOTH owned portals (no orphan)", childA.killed && childB.killed);
+  }
+
+  // --- adopted portals are NOT killed on stop (they belong to others) ---
+  {
+    reset();
+    registry.push({ port: 3849, prId: 555, token: "other", url: "http://localhost:3849" });
+    const s = newSession();
+    await s.ensurePortal({ prId: 555 }); // adopts, no spawn
+    check("adopt-stop: no spawn on adopt", spawnCalls.length === 0);
+    s.stop(); // must not throw and must not touch the adopted portal's registry entry
+    check("adopt-stop: adopted portal left in registry", registry.some((i) => i.port === 3849 && i.prId === 555));
   }
 
   // --- reuse the already-bound portal on a repeat open_pr ---

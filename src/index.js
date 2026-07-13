@@ -26,6 +26,9 @@ import {
   createInflightStore,
 } from "./api-state.js";
 import { registerControlApi } from "./control-api.js";
+import { renderSpecBody } from "./spec-source-map.js";
+import { isTableBlock, computeTableDiff } from "./table-diff.js";
+import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
 import {
   decodeConfigValue,
@@ -313,17 +316,26 @@ async function resolveThread(conn, prId, threadId) {
 // dedicated API, so this is durable + shared in ADO (not a machine-local file).
 // A newer comment id makes a thread resurface as unread.
 const VIEWED_PR_PROP = "tippani.viewed";
+// Strict read: returns {} only when the property is genuinely absent, and THROWS
+// on a transient/corrupt read so a caller doing read-modify-write never wipes
+// existing markers by writing an empty map after a failed read.
+async function readViewedMap(conn, prId) {
+  const gitApi = await conn.getGitApi();
+  const props = await gitApi.getPullRequestProperties(ADO_REPO, prId, ADO_PROJECT);
+  const raw = props?.value?.[VIEWED_PR_PROP]?.$value ?? props?.[VIEWED_PR_PROP]?.$value ?? null;
+  return parseViewedMap(raw);
+}
+// Lenient read for DISPLAY only: on any failure fall back to no-markers so the
+// page still renders (threads just show as unread). NEVER use this result to
+// write back — use readViewedMap for read-modify-write.
 async function getViewedMap(conn, prId) {
-  try {
-    const gitApi = await conn.getGitApi();
-    const props = await gitApi.getPullRequestProperties(ADO_REPO, prId, ADO_PROJECT);
-    const raw = props?.value?.[VIEWED_PR_PROP]?.$value ?? props?.[VIEWED_PR_PROP]?.$value ?? null;
-    const m = raw ? JSON.parse(raw) : {};
-    return (m && typeof m === "object") ? m : {};
-  } catch { return {}; }
+  try { return await readViewedMap(conn, prId); } catch { return {}; }
 }
 async function setViewedMap(conn, prId, map) {
   const gitApi = await conn.getGitApi();
+  // NOTE: op:add replaces the whole property; there is no ETag/version guard, so
+  // concurrent writers are last-write-wins. Acceptable for the single-user flow;
+  // the guard that matters (never write after a failed read) is in updateViewed.
   const patch = [{ op: "add", path: "/" + VIEWED_PR_PROP, value: JSON.stringify(map) }];
   return gitApi.updatePullRequestProperties(
     { "Content-Type": "application/json-patch+json" }, patch, ADO_REPO, prId, ADO_PROJECT);
@@ -432,6 +444,10 @@ async function renderMarkdown(content) {
   return String(result);
 }
 
+// renderSpecBody (imported) renders the spec body AND captures per-block source
+// line ranges from the render tree itself, so the diff overlay / comment anchors
+// map to the exact rendered blocks. See spec-source-map.js.
+
 // --- Spec-edit diff (GitHub-style) ---------------------------------------
 // Split markdown into blocks separated by blank lines, tracking 1-based line
 // ranges so a hunk can be mapped back to a rendered block via the source map.
@@ -474,59 +490,40 @@ function diffMdBlocks(oldBlocks, newBlocks) {
 // plus server-rendered HTML for the removed ("current") and added ("proposed")
 // blocks. When a hunk is a single table on both sides, it is rendered as ONE
 // merged table with per-row red/green so only the changed rows stand out.
-function isTableBlock(text) {
-  const lines = (text || "").split("\n").map((l) => l.trim()).filter(Boolean);
-  return lines.length >= 2 && lines[0].startsWith("|") && /^\|?[\s:|-]+\|?$/.test(lines[1]) && lines[1].includes("-");
-}
-function tableRows(text) {
-  return text.split("\n").map((l) => l.trim()).filter((l) => l.startsWith("|"));
-}
-function tableCells(rowLine) {
-  let s = rowLine.trim();
-  if (s.startsWith("|")) s = s.slice(1);
-  if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map((c) => c.trim());
-}
-// LCS diff over an array of strings → ordered ops {type:'same'|'del'|'add', val}.
-function lcsStringDiff(a, b) {
-  const n = a.length, m = b.length;
-  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
-  for (let i = n - 1; i >= 0; i--)
-    for (let j = m - 1; j >= 0; j--)
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-  const ops = [];
-  let i = 0, j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) { ops.push({ type: "same", val: a[i] }); i++; j++; }
-    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ type: "del", val: a[i] }); i++; }
-    else { ops.push({ type: "add", val: b[j] }); j++; }
-  }
-  while (i < n) { ops.push({ type: "del", val: a[i] }); i++; }
-  while (j < m) { ops.push({ type: "add", val: b[j] }); j++; }
-  return ops;
-}
+// isTableBlock / computeTableDiff live in table-diff.js (render-free + tested).
 async function renderCellHtml(md) {
   const h = await renderMarkdown(md || "");
   return h.replace(/^\s*<p>/, "").replace(/<\/p>\s*$/, "").trim();
 }
 // Render two markdown tables as ONE table with changed rows flagged del/add.
+// The row structure (column count, header-change detection, per-row del/add)
+// comes from computeTableDiff so it stays render-free and unit-tested.
 async function renderTableDiff(oldText, newText) {
-  const oldRows = tableRows(oldText), newRows = tableRows(newText);
-  const header = newRows[0] || oldRows[0];
-  const headCells = tableCells(header);
-  const cols = headCells.length;
-  const ops = lcsStringDiff(oldRows.slice(2), newRows.slice(2)); // skip header + separator
-  let html = '<table class="docdiff-table"><thead><tr>';
-  for (const c of headCells) html += "<th>" + (await renderCellHtml(c)) + "</th>";
-  html += "</tr></thead><tbody>";
-  for (const op of ops) {
-    const cls = op.type === "del" ? ' class="row-del"' : op.type === "add" ? ' class="row-add"' : "";
-    const cells = tableCells(op.val);
-    html += "<tr" + cls + ">";
-    for (let k = 0; k < cols; k++) html += "<td>" + (await renderCellHtml(cells[k] || "")) + "</td>";
-    html += "</tr>";
+  const { rows, headerChanged } = computeTableDiff(oldText, newText);
+  const renderRowCells = async (cells, tag) => {
+    let out = "";
+    for (const c of cells) out += "<" + tag + ">" + (await renderCellHtml(c)) + "</" + tag + ">";
+    return out;
+  };
+  let html = '<table class="docdiff-table">';
+  if (headerChanged) {
+    // Header changed: render it inline as del/add rows so the rename is marked.
+    html += "<tbody>";
+    for (const r of rows) {
+      const cls = r.cls ? ' class="' + r.cls + '"' : "";
+      html += "<tr" + cls + ">" + (await renderRowCells(r.cells, "td")) + "</tr>";
+    }
+    html += "</tbody>";
+  } else {
+    const head = rows[0];
+    html += "<thead><tr>" + (await renderRowCells(head.cells, "th")) + "</tr></thead><tbody>";
+    for (const r of rows.slice(1)) {
+      const cls = r.cls ? ' class="' + r.cls + '"' : "";
+      html += "<tr" + cls + ">" + (await renderRowCells(r.cells, "td")) + "</tr>";
+    }
+    html += "</tbody>";
   }
-  html += "</tbody></table>";
+  html += "</table>";
   return html;
 }
 async function computeSpecDiffHunks(originalBody, draftBody) {
@@ -1895,6 +1892,15 @@ window.tippani = (function () {
     });
   }
 
+  // Once the user commits their own buffer, any staged agent proposal is stale:
+  // drop it server-side and clear the diff overlay so a later commit_spec or
+  // page reload can't resurface the superseded proposal.
+  async function dropStagedProposal() {
+    try { await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft', { method: 'DELETE' }); } catch {}
+    if (typeof clearDiffOverlay === 'function') clearDiffOverlay();
+    const b = el('discardProposalBtn'); if (b) b.style.display = 'none';
+  }
+
   // Save (#48): diff preview (with editable commit message) → commit to PR branch.
   async function save() {
     if (saving || !isDirty()) return;
@@ -1922,12 +1928,14 @@ window.tippani = (function () {
       const data = await r.json();
       if (data.ok && data.synced) {
         RAW_MARKDOWN = newMd; // new saved baseline → no longer dirty
+        await dropStagedProposal(); // committed buffer supersedes any staged proposal
         toast("Saved — commit " + (data.commitId ? String(data.commitId).slice(0, 8) : "ok"));
       } else if (data.conflict) {
         // Branch moved underneath us — never overwrite blindly (#49).
         showConflict();
       } else if (data.queued) {
         RAW_MARKDOWN = newMd; // safely persisted to the queue; will retry on sync
+        await dropStagedProposal(); // committed buffer supersedes any staged proposal
         toast(data.error ? "Push failed (" + data.error + ") — queued, will retry on sync" : (data.message || "Saved locally — will sync"));
       } else {
         toast("Save failed: " + (data.error || "unknown") + " — your edits are kept");
@@ -2054,6 +2062,8 @@ window.tippani = (function () {
     // editor was never opened).
     getMarkdown: () => (editor ? editor.getMarkdown() : RAW_MARKDOWN),
     getEditor: () => editor,
+    // True while the spec editor is open — drives the edit lock heartbeat.
+    isEditing: () => editMode,
   };
 })();
 </script>
@@ -2113,9 +2123,10 @@ const commentableSelector = '.spec p, .spec li, .spec blockquote, .spec table, .
 const commentableEls = [];
 document.querySelectorAll(commentableSelector).forEach((el, i) => {
   if (el.closest('.commentable')) return;
+  const blockIdx = commentableEls.length;
   el.classList.add('commentable');
   el.style.position = 'relative';
-  el.dataset.blockIdx = commentableEls.length;
+  el.dataset.blockIdx = blockIdx;
   commentableEls.push(el);
   const btn = document.createElement('button');
   btn.className = 'comment-btn';
@@ -2124,7 +2135,7 @@ document.querySelectorAll(commentableSelector).forEach((el, i) => {
   btn.title = 'Add comment';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const mapping = SOURCE_MAP[i];
+    const mapping = SOURCE_MAP[blockIdx];
     commentLine = mapping ? mapping.startLine : 1;
     // Set context in modal
     const heading = findNearestHeading(el);
@@ -2575,33 +2586,11 @@ document.addEventListener('keydown', (e) => {
   const seenDraftKey = (id, d) => id + ':' + (d ? d.updatedAt : '0');
   const lastDraftSeen = new Map();
 
-  // Spec-edit drafts: an agent stages a whole-file proposal; load it into the
-  // editor for the user to review/adjust before committing.
-  let _specDraftSeen = null; // updatedAt of the last applied agent proposal
-  window.__specDraftActive = () => _specDraftSeen !== null;
-  function showSpecDraftBadge(source) {
-    let b = document.getElementById('specDraftBadge');
-    if (!b) {
-      b = document.createElement('div');
-      b.id = 'specDraftBadge';
-      b.className = 'reply-external-badge';
-      b.style.margin = '10px 40px 0';
-      const main = document.getElementById('mainContent');
-      if (main) main.insertBefore(b, main.firstChild);
-    }
-    b.textContent = '\u2728 Proposed edit from ' + (source || 'external client') + ' \u2014 review, adjust, then Save (or tell it to commit)';
-  }
-  function clearSpecDraftBadge() {
-    const b = document.getElementById('specDraftBadge');
-    if (b) b.remove();
-  }
-  function applyExternalSpecDraft(specDrafts) {
-    // Proposed spec edits are intentionally NOT surfaced in the file view for now:
-    // show the document normally. Staged drafts still live server-side (commit flow
-    // handles them); the review/diff presentation is TBD ("the fun parts").
-    clearSpecDraftBadge();
-    _specDraftSeen = null;
-  }
+  // Spec-edit drafts are presentation-only in the file view: the staged
+  // proposal drives the diff overlay (applyDiffOverlay) and seeds the editor
+  // for accept-&-refine (maybeSeedProposal). It is never auto-committed — the
+  // user commits their refinements via Save, and an agent commits explicit
+  // content via commit_spec. There is no buffer-to-draft mirror.
 
   function applyExternalDraft(threadId, draft) {
     const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
@@ -2700,26 +2689,20 @@ document.addEventListener('keydown', (e) => {
   });
 })();
 
-// Spec-edit mirror + lock: while an agent's proposal is loaded in the editor
-// and the user edits it, mirror the buffer back to the draft store (source
-// 'user-mirror', ignored by our own poll) and hold the file edit lock so the
-// agent can't clobber. Debounced ~1.5s so commit_spec sees the user's edits.
+// Spec-edit lock heartbeat: while the user is refining a spec in edit mode,
+// touch the server-side file lock every ~3s so a concurrent agent stage_spec_edit
+// gets a 409 instead of swapping the proposal under review. The staged draft is
+// presentation-only — the user's edits live in the editor and are committed by
+// Save, never mirrored back to the draft store.
 (function() {
-  let last = null;
-  setInterval(async () => {
-    if (typeof window.__specDraftActive !== 'function' || !window.__specDraftActive()) return;
-    const ed = window.tippani && window.tippani.getEditor && window.tippani.getEditor();
-    if (!ed || !ed.getMarkdown) return;
-    const cur = ed.getMarkdown();
-    if (cur === last) return;
-    last = cur;
-    try {
-      await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/lock', { method: 'POST' });
-      await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft', {
-        method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: cur, source: 'user-mirror' })
-      });
-    } catch {}
+  let lastTouch = 0;
+  setInterval(() => {
+    const t = window.tippani;
+    if (!t || typeof t.isEditing !== 'function' || !t.isEditing()) return;
+    const now = Date.now();
+    if (now - lastTouch < 3000) return;
+    lastTouch = now;
+    fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/lock', { method: 'POST' }).catch(() => {});
   }, 1500);
 })();
 
@@ -3186,8 +3169,8 @@ async function main() {
       }
 
       const { metadata, body } = stripFrontmatter(raw);
-      const { toc, sourceMap } = buildSourceMap(body);
-      const specHtml = await renderMarkdown(body);
+      const { toc } = buildSourceMap(body);
+      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema);
 
       // Merge cached threads + pending local comments
       let threads = _cache?.threads || [];
@@ -3241,28 +3224,25 @@ async function main() {
   // GitHub-style diff of a staged spec edit for one file. Returns change hunks
   // (rendered "current" + "proposed" HTML, anchored to original line ranges) so
   // the file view can overlay red/green boxes without swapping the whole doc.
-  app.get("/api/v1/specs/:index/diff", async (req, res) => {
-    try {
-      const files = _changedFiles || [];
-      const idx = parseInt(req.params.index, 10);
-      if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) return res.json({ hunks: [] });
-      const draft = _specDrafts.get(idx);
-      if (!draft || !draft.content || draft.source === "user-mirror") return res.json({ hunks: [] });
-      const filePath = files[idx].path;
-      let raw = _cache?.fileContents?.[filePath];
-      if (!raw && !_isOffline && _conn) {
-        try { raw = await getFileContent(_conn, filePath, _branch); } catch { /* fall through */ }
-      }
-      if (!raw) return res.json({ hunks: [] });
-      const { body } = stripFrontmatter(raw);
-      const { body: draftBody } = stripFrontmatter(draft.content);
-      if (body === draftBody) return res.json({ hunks: [] });
-      const hunks = await computeSpecDiffHunks(body, draftBody);
-      res.json({ hunks, source: draft.source || null, updatedAt: draft.updatedAt || null });
-    } catch (e) {
-      res.status(500).json({ error: String(e?.message || e) });
+  // Registered on the control API (with requireAuth) via the specDiff dep below;
+  // this is the closure that does the work.
+  async function computeSpecDiff(idx) {
+    const files = _changedFiles || [];
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) return { hunks: [] };
+    const draft = _specDrafts.get(idx);
+    if (!draft || !draft.content || draft.source === "user-mirror") return { hunks: [] };
+    const filePath = files[idx].path;
+    let raw = _cache?.fileContents?.[filePath];
+    if (!raw && !_isOffline && _conn) {
+      try { raw = await getFileContent(_conn, filePath, _branch); } catch { /* fall through */ }
     }
-  });
+    if (!raw) return { hunks: [] };
+    const { body } = stripFrontmatter(raw);
+    const { body: draftBody } = stripFrontmatter(draft.content);
+    if (body === draftBody) return { hunks: [] };
+    const hunks = await computeSpecDiffHunks(body, draftBody);
+    return { hunks, source: draft.source || null, updatedAt: draft.updatedAt || null };
+  }
 
   app.post("/api/comment", async (req, res) => {
     const action = addPending(_prId, { type: 'comment', filePath: req.body.filePath, line: req.body.line, content: req.body.content });
@@ -3358,20 +3338,27 @@ async function main() {
       return { ok: false, status: 503, body: { error: "offline: viewed state needs a live Azure DevOps connection" } };
     }
     try {
-      const map = await getViewedMap(_conn, _prId);
-      if (commentId == null) delete map[String(threadId)];
-      else map[String(threadId)] = Number(commentId);
-      await setViewedMap(_conn, _prId, map);
-      return { ok: true, status: 200, body: { ok: true, viewedCommentId: commentId == null ? null : String(commentId) } };
+      // Strict read: if the read fails, updateViewed propagates and NO write
+      // happens, so a transient failure can't erase other threads' markers.
+      const viewedCommentId = commentId == null ? null : String(commentId);
+      await updateViewed({
+        read: () => readViewedMap(_conn, _prId),
+        write: (map) => setViewedMap(_conn, _prId, map),
+        threadId,
+        commentId,
+      });
+      return { ok: true, status: 200, body: { ok: true, viewedCommentId } };
     } catch (e) {
       return { ok: false, status: 502, body: { error: friendlyAdoError(e, "mark viewed") } };
     }
   }
 
 
-  // current staged spec draft when content is omitted) to the PR source
-  // branch, then clear the draft. Lets an agent commit what the user adjusted
-  // in the portal after reviewing the proposal.
+  // Commit an explicit spec version to the PR source branch, then clear any
+  // staged draft for that file. Commit is ALWAYS explicit: the caller passes the
+  // exact content to commit. The staged draft is review-only (drives the diff
+  // overlay and seeds the editor); it is never committed implicitly, so a stale
+  // proposal can't silently overwrite the user's saved edits.
   async function doCommitSpec(fileIndex, content, message) {
     const files = _changedFiles || [];
     const idx = Number(fileIndex);
@@ -3379,13 +3366,9 @@ async function main() {
       return { ok: false, status: 404, body: { error: "file index out of range" } };
     }
     const filePath = files[idx].path;
-    let bodyContent = content;
+    const bodyContent = content;
     if (typeof bodyContent !== "string") {
-      const d = _specDrafts.get(idx);
-      bodyContent = d?.content;
-    }
-    if (typeof bodyContent !== "string") {
-      return { ok: false, status: 400, body: { error: "no content provided and no staged draft to commit" } };
+      return { ok: false, status: 400, body: { error: "commit_spec requires explicit content (the staged draft is review-only)" } };
     }
     const commitMessage = (message && String(message).trim()) || `tippani: update ${filePath.split("/").pop()}`;
     if (_isOffline || !_conn) {
@@ -3567,6 +3550,7 @@ async function main() {
     specDrafts: _specDrafts,
     specLocks: _specLocks,
     commitSpec: doCommitSpec,
+    specDiff: computeSpecDiff,
   });
 
   const server = app.listen(PORT, "127.0.0.1", () => {
@@ -3575,9 +3559,13 @@ async function main() {
     // Persist the session token ONLY after we own the port, so an instance
     // that fails to bind (EADDRINUSE) never deletes the running server's
     // token on exit. 0600 perms; overwritten on each successful startup.
+    // Per-PORT filename: a shared path would be clobbered by a second portal
+    // and unlink'd out from under a still-running one under the multi-portal
+    // model. The MCP shim discovers tokens via the per-port registry, not this
+    // file; this file is the external-client affordance.
     try {
       fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-      const tokenPath = path.join(CONFIG_DIR, "session-token");
+      const tokenPath = path.join(CONFIG_DIR, `session-token-${PORT}`);
       fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
       // Register this portal so MCP clients can discover it by PR/port and
       // adopt it instead of colliding on the port (multi-PR parallelism).
@@ -3594,6 +3582,7 @@ async function main() {
     }
     console.log(`\n  Tippani running at ${base}`);
     console.log(`  Control API token: ${_sessionToken}`);
+    console.log(`  Token file: ${path.join(CONFIG_DIR, `session-token-${PORT}`)}`);
     console.log(`  External clients: set Authorization: Bearer <token> and X-Tippani-Client: <name>\n`);
     if (!headless) open(url);
   });

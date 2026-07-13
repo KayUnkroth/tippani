@@ -23,6 +23,7 @@ export function registerControlApi(app, deps) {
     specDrafts,         // draft store keyed by fileIndex (optional)
     specLocks,          // lock store keyed by fileIndex (optional)
     commitSpec,         // async (fileIndex, content, message) => {ok, status, body}
+    specDiff,           // async (fileIndex) => {hunks, source?, updatedAt?} (optional)
   } = deps;
 
   const LOCAL_PREFIXES = [
@@ -183,6 +184,21 @@ export function registerControlApi(app, deps) {
 
   // ----- Spec-edit drafts (agent proposes a file edit; user reviews/edits
   // in the portal before committing) --------------------------------------
+  // GitHub-style diff of a staged spec edit for one file: rendered change hunks
+  // anchored to original line ranges. requireAuth() keeps it consistent with the
+  // rest of the control API (the CSRF middleware early-returns for /api/v1/*, so
+  // without this a local process could read the staged draft with no headers).
+  app.get("/api/v1/specs/:fileIndex/diff", requireAuth(), async (req, res) => {
+    if (typeof specDiff !== "function") return res.status(501).json({ error: "spec diff not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.json({ hunks: [] });
+    try {
+      res.json(await specDiff(idx));
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   app.get("/api/v1/specs/:fileIndex/draft", requireAuth(), (req, res) => {
     const idx = validSpecIndex(req.params.fileIndex);
     if (idx === null) return res.status(404).json({ error: "file index out of range" });

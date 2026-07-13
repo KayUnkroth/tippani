@@ -260,10 +260,11 @@ export function buildTools(http, session) {
       name: "stage_spec_edit",
       description:
         "Stage a proposed whole-file edit for the user to review in tippani's " +
-        "editor before committing. The user sees your version loaded in the " +
-        "editor with a diff, adjusts it, and either commits themselves or tells " +
-        "you to commit_spec. You never commit without the user. Returns 409 if " +
-        "the user is currently editing that file (try again in ~10s).",
+        "editor before committing. The staged draft is review-only: the user sees " +
+        "your version as a diff and can load it into the editor to refine, then " +
+        "either commits their own version via Save or tells you to commit_spec with " +
+        "explicit content. You never commit without the user. Returns 409 if the " +
+        "user is currently editing that file (try again in ~10s).",
       inputSchema: {
         fileIndex: z.number().describe("0-based index into the PR's changed files"),
         content: z.string().describe("Full proposed markdown for the file"),
@@ -275,9 +276,10 @@ export function buildTools(http, session) {
     {
       name: "get_spec_draft",
       description:
-        "Read the current staged spec draft for a file, including any edits the " +
-        "user made in the portal. Use before commit_spec to commit the user's " +
-        "adjusted version.",
+        "Read the current staged spec proposal for a file (the version you staged " +
+        "via stage_spec_edit). Review-only — it does not reflect unsaved edits the " +
+        "user is making in the portal editor. To commit, pass explicit content to " +
+        "commit_spec.",
       inputSchema: { fileIndex: z.number() },
       handler: ({ fileIndex }) => http.get(`/api/v1/specs/${fileIndex}/draft`),
     },
@@ -290,13 +292,14 @@ export function buildTools(http, session) {
     {
       name: "commit_spec",
       description:
-        "Commit a spec file to the PR's source branch. Omit content to commit " +
-        "the current staged draft (with the user's edits); pass content to " +
-        "commit an explicit version. Use only after the user approves. Returns " +
-        "409 if the branch moved since load (reload and retry).",
+        "Commit a spec file to the PR's source branch. You must pass the full " +
+        "content to commit — the staged draft is review-only and is never committed " +
+        "implicitly (this prevents a stale proposal from overwriting the user's " +
+        "saved edits). Use only after the user approves. Returns 409 if the branch " +
+        "moved since load (reload and retry).",
       inputSchema: {
         fileIndex: z.number(),
-        content: z.string().optional().describe("Explicit markdown; omit to commit the staged draft"),
+        content: z.string().describe("Full markdown to commit (required)"),
         message: z.string().optional().describe("Commit message"),
       },
       handler: ({ fileIndex, content, message }) =>

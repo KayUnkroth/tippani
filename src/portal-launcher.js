@@ -15,6 +15,7 @@
 // on the command line.
 
 import { spawn as defaultSpawn } from "child_process";
+import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
 import openDefault from "open";
@@ -22,6 +23,18 @@ import { listInstances } from "./portal-registry.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORTAL_ENTRY = path.join(HERE, "index.js");
+
+// Fast check whether a TCP port is free on the loopback the portal binds to
+// (127.0.0.1). Used to skip already-occupied ports WITHOUT spawning a portal
+// that would run a full ADO fetch before discovering EADDRINUSE.
+function defaultIsPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port, "127.0.0.1");
+  });
+}
 
 /**
  * Create a portal session the MCP shim uses to discover, adopt, or launch a
@@ -40,11 +53,15 @@ export function createPortalSession({
   listInstancesFn = listInstances,
   openBrowserFn = (url) => openDefault(url),
   readyTimeoutMs = Number(process.env.TIPPANI_READY_TIMEOUT_MS) || 60_000,
+  isPortFreeFn = defaultIsPortFree,
 } = {}) {
   // active = the portal we're currently bound to:
   //   { port, url, token, prId, owned }  (owned = we launched it)
   let active = null;
-  let child = null;
+  // Every portal WE launched, tracked by port so stop() can tear them ALL down.
+  // A single `child` var lost the handle to earlier portals across a multi-PR
+  // session (open PR A then B), leaking A's process and its held port.
+  const ownedChildren = new Map(); // port -> child process
   // The portal URL we last opened a browser to — so repeated open_pr calls in
   // one session don't spam browser tabs, but every NEW binding (launch or
   // adopt) does bring the review portal up for the user.
@@ -114,9 +131,17 @@ export function createPortalSession({
   async function launchNew({ prId, org, project, repo, refresh }) {
     let lastErr = null;
     for (let port = basePort; port < basePort + portSpan; port++) {
+      // Fast pre-check: skip ports already in use WITHOUT spawning. A spawned
+      // portal runs the full ADO fetch before it binds and hits EADDRINUSE, so
+      // probing here avoids a full fetch (or the ready timeout) per busy port.
+      if (!(await isPortFreeFn(port))) { lastErr = `port ${port} in use`; continue; }
       const res = await tryLaunchOnPort(port, { prId, org, project, repo, refresh });
       if (res.ok) {
-        child = res.child; // track so stop() can tear down a portal we own
+        // Track so stop() can tear down every portal we own, not just the last.
+        ownedChildren.set(port, res.child);
+        res.child.on("exit", () => {
+          if (ownedChildren.get(port) === res.child) ownedChildren.delete(port);
+        });
         return { port, url: `http://localhost:${port}`, token: res.token, prId, owned: true };
       }
       lastErr = res.error;
@@ -147,8 +172,9 @@ export function createPortalSession({
     return new Promise((resolve) => {
       const deadline = Date.now() + readyTimeoutMs;
       const poll = async () => {
-        // Port in use (another PR's portal) or auth rejected → the portal
-        // exits fast; move on to the next candidate port.
+        // We pre-checked the port as free before spawning, so an early exit here
+        // means a lost race for the port or an auth rejection at startup → move
+        // on to the next candidate port.
         if (exited) { resolve({ ok: false, error: `port ${port} unavailable` }); return; }
         // Match OUR portal: same port AND our prId. A different PR already on
         // this port must NOT be adopted here — our child will hit EADDRINUSE
@@ -174,11 +200,14 @@ export function createPortalSession({
   function getBaseUrl() { return active?.url ?? `http://localhost:${basePort}`; }
 
   function stop() {
-    // Only tear down a portal we launched; adopted portals belong to others.
-    if (child && active?.owned) {
-      try { child.kill(); } catch {}
+    // Tear down every portal WE launched (adopted portals belong to others).
+    // Snapshot + clear first so each child's exit handler (which deletes its
+    // own entry) doesn't perturb the iteration.
+    const procs = [...ownedChildren.values()];
+    ownedChildren.clear();
+    for (const proc of procs) {
+      try { proc.kill(); } catch {}
     }
-    child = null;
   }
 
   return {
