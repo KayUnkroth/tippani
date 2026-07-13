@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.4.0 (2026-07-13)
+
+Promotes the 1.4.0 beta line (AI/MCP integration) to stable and adds the MCP-driven review portal from [#65](https://github.com/mavaali/tippani/pull/65).
+
+### Added — MCP-driven review portal & stage-then-review
+- **Self-bootstrapping MCP shim.** `tippani-mcp` no longer requires a portal to already be running — the new `open_pr` tool launches (or adopts) a portal per PR on demand and opens a visible browser for the user, so an agent can start a review from cold. Portals are discovered across processes via a per-port registry under `~/.tippani/instances/`, so multiple PRs can run at once on separate ports. The tool surface grew from 8 to 19.
+- **Stage-then-review workflow.** The LLM stages fixes and replies for review *before* anything is posted or committed — `stage_draft`, `stage_spec_edit`, `stage_resolve_thread`. Nothing reaches Azure DevOps until an explicit finalize (`post_reply` / `commit_spec` / `resolve_thread`). Staged work is local and easy to undo.
+- **Spec-edit diff overlay.** A GitHub-style inline diff for a staged whole-file proposal: block-level diff with a row-level merged table diff, Current/Proposed boxes, right-gutter change markers, and an "accept & refine" path that seeds the editor with the proposal. Source ranges are derived from the render tree so the overlay anchors to the correct block.
+- **Durable "Viewed" state.** Mark a thread viewed (acknowledged) without resolving it — it drops out of the "needs your reply" triage but stays open and resurfaces if a newer comment arrives. Backed by a pull-request property so it's durable and shared. A new cross-PR **Feedback** triage page and `triage_summary` tool categorize every thread (needs-you / awaiting-reviewer / viewed / FYI / resolved).
+- **Headless mode and token pass-in.** `--headless` for agent-only sessions; `--port=<n>` to run multiple portals; `--ado-token` / `TIPPANI_ADO_TOKEN` to pass a bearer token directly (with an offline audience check) instead of relying on the PAT or az-CLI caches.
+
+### Notes
+- Extracted, unit-tested modules for the diff/source-map, table diff, and viewed-state logic (`spec-source-map`, `table-diff`, `viewed-map`), plus portal launcher/registry and ADO-token-check suites.
+- The AI/MCP path (beta since 1.4.0-beta.0) is now considered stable; test on non-critical PRs first if adopting the MCP workflow.
+
 ## 1.4.0-beta.1 (2026-07-10)
 
 ### Fixed — PR file detection (reported by Kay Unkroth)
