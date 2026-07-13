@@ -1,6 +1,6 @@
 # tippani
 
-[![npm](https://img.shields.io/npm/v/tippani)](https://www.npmjs.com/package/tippani)
+[![npm](https://img.shields.io/npm/v/tippani?cacheSeconds=3600)](https://www.npmjs.com/package/tippani)
 [![GitHub release](https://img.shields.io/github/v/release/mavaali/tippani)](https://github.com/mavaali/tippani/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
