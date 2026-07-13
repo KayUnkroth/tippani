@@ -1,49 +1,46 @@
 #!/usr/bin/env node
-// Tippani MCP shim — exposes the control API (#42 Phase 2) as an MCP
-// stdio server so LLM clients (Claude Desktop, GitHub Copilot, etc.)
-// can drive tippani via tool calls.
+// Tippani MCP shim — exposes the control API as an MCP stdio server so LLM
+// clients (Claude Desktop, GitHub Copilot, etc.) can drive tippani
+// via tool calls.
 //
-// Architecture: this is a thin client. The real state lives in the running
-// tippani process (default http://localhost:3847). The shim reads the
-// session token from ~/.tippani/session-token (written by tippani at
-// startup) and proxies every tool call to an HTTP endpoint under
-// /api/v1/*. No business logic here.
+// Architecture: this is a thin HTTP client. The real state lives in a tippani
+// portal process (default http://localhost:3847). Unlike the original shim,
+// this one does NOT require a portal to already be running — it launches and
+// owns one on demand via the `open_pr` tool (see portal-launcher.js), so the
+// MCP tool surface always exists and an agent can start a review from cold.
+// The portal opens a visible browser for the user; the shim drives it.
 //
-// Usage in Claude Desktop config:
-//   {
-//     "mcpServers": {
-//       "tippani": { "command": "npx", "args": ["-y", "tippani-mcp"] }
-//     }
-//   }
+// Auth: the embedding host injects the ADO REST/git token as TIPPANI_ADO_TOKEN.
+// The launcher forwards it to the portal via env. The host may also set
+// TIPPANI_ADO_AUDIENCE to have the shim verify the token's audience on startup.
+//
+// Usage in an MCP client config:
+//   { "mcpServers": { "tippani": { "command": "tippani-mcp" } } }
 
-import fs from "fs";
-import path from "path";
-import os from "os";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import {
-  buildTools,
-  createHttpClient,
-  loadSessionToken,
-} from "./mcp-tools.js";
+import { buildTools, createHttpClient } from "./mcp-tools.js";
+import { createPortalSession } from "./portal-launcher.js";
+import { inspectAdoToken, tokenRejectionMessage } from "./ado-token-check.js";
 
-const BASE_URL = process.env.TIPPANI_URL || "http://localhost:3847";
-const TOKEN_PATH = process.env.TIPPANI_TOKEN_FILE
-  || path.join(os.homedir(), ".tippani", "session-token");
-const CLIENT_NAME = process.env.TIPPANI_CLIENT_NAME || "tippani-mcp";
-
-const token = loadSessionToken(TOKEN_PATH);
-if (!token) {
-  console.error(
-    `tippani-mcp: no session token at ${TOKEN_PATH}.\n` +
-    `Start tippani first (it writes the token at boot).`
-  );
+// Give MCP "Test connection" real meaning: validate the bound account's ADO
+// token before serving. If it isn't an Azure DevOps git/REST token (wrong
+// account bound, e.g. GitHub), exit so Test fails with a clear reason instead
+// of a false success.
+const adoCheck = inspectAdoToken(process.env.TIPPANI_ADO_TOKEN, process.env.TIPPANI_ADO_AUDIENCE);
+if (!adoCheck.ok) {
+  console.error(tokenRejectionMessage(adoCheck));
   process.exit(1);
 }
 
-const http = createHttpClient({ baseUrl: BASE_URL, token, clientName: CLIENT_NAME, fetch });
-const tools = buildTools(http);
+const session = createPortalSession();
+const http = createHttpClient({
+  getBaseUrl: session.getBaseUrl,
+  getToken: session.getToken,
+  clientName: session.clientName,
+  fetch,
+});
+const tools = buildTools(http, session);
 
 const server = new McpServer(
   { name: "tippani", version: "0.1.0" },
@@ -69,6 +66,9 @@ for (const t of tools) {
     }
   );
 }
+
+process.on("SIGINT", () => { session.stop(); process.exit(0); });
+process.on("SIGTERM", () => { session.stop(); process.exit(0); });
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

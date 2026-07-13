@@ -467,6 +467,9 @@ function mount(el, markdownText, opts = {}) {
     view,
     // Read the current markdown buffer (byte-identical to the file when unedited).
     getMarkdown: () => view.state.doc.toString(),
+    // Replace the entire buffer (used to load an externally-staged proposal).
+    setMarkdown: (md) =>
+      view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: String(md ?? "") } }),
     destroy: () => view.destroy(),
   };
 }

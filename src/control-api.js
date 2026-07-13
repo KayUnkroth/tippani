@@ -14,9 +14,16 @@ export function registerControlApi(app, deps) {
     locks,
     getThreads,         // () => Array<thread>
     getChangedFiles,    // () => Array<{path, changeType}>
+    getTriage,          // async () => {counts, threads} (optional)
     readFileMarkdown,   // async (filePath) => string
     postReply,          // async (threadId, content) => {ok, status, body}
     resolveThread: doResolveDep, // async (threadId) => {ok, status, body}
+    stageResolve,       // (threadId) => {ok, status, body} — queue a resolve, no push (optional)
+    setViewed,          // async (threadId, commentId|null) => {ok, status, body}
+    specDrafts,         // draft store keyed by fileIndex (optional)
+    specLocks,          // lock store keyed by fileIndex (optional)
+    commitSpec,         // async (fileIndex, content, message) => {ok, status, body}
+    specDiff,           // async (fileIndex) => {hunks, source?, updatedAt?} (optional)
   } = deps;
 
   const LOCAL_PREFIXES = [
@@ -76,9 +83,28 @@ export function registerControlApi(app, deps) {
     return (getThreads() || []).find((t) => t.id === tid) || null;
   }
 
+  // Validate a spec file index against the PR's changed-file list.
+  function validSpecIndex(raw) {
+    const files = getChangedFiles() || [];
+    const idx = parseInt(raw);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) return null;
+    return idx;
+  }
+
   app.get("/api/v1/threads", requireAuth(), (_req, res) => {
     const all = (getThreads() || []).filter((t) => t.comments?.length > 0);
     res.json({ threads: all.map(summarizeThread), focus: focus.get() });
+  });
+
+  app.get("/api/v1/triage", requireAuth(), async (_req, res) => {
+    if (typeof getTriage !== "function") {
+      return res.status(501).json({ error: "triage not wired in this deployment" });
+    }
+    try {
+      res.json(await getTriage());
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
   });
 
   app.get("/api/v1/threads/:id", requireAuth(), (req, res) => {
@@ -156,12 +182,79 @@ export function registerControlApi(app, deps) {
     });
   });
 
+  // ----- Spec-edit drafts (agent proposes a file edit; user reviews/edits
+  // in the portal before committing) --------------------------------------
+  // GitHub-style diff of a staged spec edit for one file: rendered change hunks
+  // anchored to original line ranges. requireAuth() keeps it consistent with the
+  // rest of the control API (the CSRF middleware early-returns for /api/v1/*, so
+  // without this a local process could read the staged draft with no headers).
+  app.get("/api/v1/specs/:fileIndex/diff", requireAuth(), async (req, res) => {
+    if (typeof specDiff !== "function") return res.status(501).json({ error: "spec diff not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.json({ hunks: [] });
+    try {
+      res.json(await specDiff(idx));
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.get("/api/v1/specs/:fileIndex/draft", requireAuth(), (req, res) => {
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const d = specDrafts ? specDrafts.get(idx) : null;
+    res.json({ fileIndex: idx, draft: d });
+  });
+
+  app.put("/api/v1/specs/:fileIndex/draft", requireAuth({ mutation: true }), (req, res) => {
+    if (!specDrafts) return res.status(501).json({ error: "spec drafts not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const { content, source } = req.body || {};
+    // The user's own mirror writes (source 'user-mirror') bypass the lock —
+    // the lock exists to block an external agent while the user is editing.
+    if (specLocks && specLocks.isLocked(idx) && source !== "user-mirror") {
+      return res.status(409).json({ error: "user is editing this file", retryAfterMs: 10_000 });
+    }
+    if (typeof content !== "string") {
+      return res.status(400).json({ error: "content (string) required" });
+    }
+    const d = specDrafts.put(idx, content, { source: source || "external" });
+    res.json({ ok: true, fileIndex: idx, draft: d, version: focus.get().version });
+  });
+
+  app.delete("/api/v1/specs/:fileIndex/draft", requireAuth({ mutation: true }), (req, res) => {
+    if (!specDrafts) return res.status(501).json({ error: "spec drafts not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const had = specDrafts.delete(idx);
+    res.json({ ok: true, removed: had, version: focus.get().version });
+  });
+
+  app.post("/api/v1/specs/:fileIndex/lock", requireAuth({ mutation: true }), (req, res) => {
+    if (!specLocks) return res.status(501).json({ error: "spec locks not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const exp = specLocks.touch(idx);
+    res.json({ ok: true, fileIndex: idx, expiresAt: exp });
+  });
+
+  app.post("/api/v1/specs/:fileIndex/commit", requireAuth({ mutation: true }), async (req, res) => {
+    if (typeof commitSpec !== "function") return res.status(501).json({ error: "commit not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const { content, message } = req.body || {};
+    const r = await commitSpec(idx, content, message);
+    res.status(r.status).json(r.body);
+  });
+
   app.get("/api/v1/state", requireAuth(), (_req, res) => {
     const f = focus.get();
     res.json({
       focusedThreadId: f.focusedThreadId,
       version: f.version,
       drafts: drafts.list(),
+      specDrafts: specDrafts ? specDrafts.list() : {},
     });
   });
 
@@ -190,6 +283,40 @@ export function registerControlApi(app, deps) {
       return res.status(501).json({ error: "resolve not wired in this deployment" });
     }
     const r = await doResolveDep(t.id);
+    res.status(r.status).json(r.body);
+  });
+
+  // POST /api/v1/threads/:id/stage-resolve — queue a resolve locally (pending),
+  // NOT pushed to ADO until Finalize. Mirrors stage_draft/stage_spec_edit.
+  app.post("/api/v1/threads/:id/stage-resolve", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof stageResolve !== "function") {
+      return res.status(501).json({ error: "stage-resolve not wired in this deployment" });
+    }
+    const r = await stageResolve(t.id);
+    res.status(r.status).json(r.body);
+  });
+
+  // POST /api/v1/threads/:id/viewed — mark the thread viewed at its current last
+  // comment (durable ADO thread property). DELETE un-views it.
+  app.post("/api/v1/threads/:id/viewed", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof setViewed !== "function") {
+      return res.status(501).json({ error: "viewed not wired in this deployment" });
+    }
+    const lastId = (t.comments || []).reduce((m, c) => Math.max(m, c.id || 0), 0);
+    const r = await setViewed(t.id, lastId);
+    res.status(r.status).json(r.body);
+  });
+  app.delete("/api/v1/threads/:id/viewed", requireAuth({ mutation: true }), async (req, res) => {
+    const t = findThread(req.params.id);
+    if (!t) return res.status(404).json({ error: "thread not found" });
+    if (typeof setViewed !== "function") {
+      return res.status(501).json({ error: "viewed not wired in this deployment" });
+    }
+    const r = await setViewed(t.id, null);
     res.status(r.status).json(r.body);
   });
 }

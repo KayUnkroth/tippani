@@ -61,6 +61,7 @@ registerControlApi(app, {
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
   readFileMarkdown: async (p) => (p === "/docs/spec.md" ? SPEC_MD : ""),
+  specDiff: async (idx) => ({ hunks: [{ startLine: 3, endLine: 3, oldHtml: "<p>a</p>", newHtml: "<p>b</p>" }], source: "test", updatedAt: 1 }),
 });
 
 const server = await new Promise((resolve) => {
@@ -113,6 +114,21 @@ try {
       headers: { Origin: `http://localhost:${PORT_FOR_PREFIXES}` },
     });
     check("auth: same-origin bypass (no X-Tippani-Client needed)", r.status === 200);
+  }
+
+  // --- GET /api/v1/specs/:fileIndex/diff (now behind requireAuth) ---
+  {
+    const r = await fetch(BASE + "/api/v1/specs/0/diff");
+    check("diff: missing X-Tippani-Client -> 403", r.status === 403);
+  }
+  {
+    const r = await call("/api/v1/specs/0/diff");
+    check("diff: with client header -> 200", r.status === 200);
+    check("diff: returns hunks", Array.isArray(r.body.hunks) && r.body.hunks.length === 1);
+  }
+  {
+    const r = await call("/api/v1/specs/99/diff");
+    check("diff: out-of-range index -> empty hunks", r.status === 200 && Array.isArray(r.body.hunks) && r.body.hunks.length === 0);
   }
 
   // --- GET /api/v1/threads ---

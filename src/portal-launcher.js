@@ -1,0 +1,227 @@
+// Portal lifecycle for the tippani MCP shim.
+//
+// The MCP shim is a thin HTTP client of a running tippani portal. Historically
+// it *required* an already-running portal and exited if none was found, which
+// left the MCP server with zero tools — so an agent given the tippani MCP had
+// nothing to call and fell back to raw ADO. This module lets the shim launch
+// (and own) its own portal on demand: the `open_pr` tool calls `ensurePortal`,
+// which spawns the portal as a child process, waits for it to write a fresh
+// session token and answer an authenticated request, then hands the shim a
+// live token. The portal is launched *visible* (not headless) so the user
+// watches the review in a browser while the agent drives it via tool calls.
+//
+// Auth: the ADO REST/git token is passed to the portal via the
+// TIPPANI_ADO_TOKEN env var (the embedding host injects it). It is never placed
+// on the command line.
+
+import { spawn as defaultSpawn } from "child_process";
+import net from "net";
+import path from "path";
+import { fileURLToPath } from "url";
+import openDefault from "open";
+import { listInstances } from "./portal-registry.js";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const PORTAL_ENTRY = path.join(HERE, "index.js");
+
+// Fast check whether a TCP port is free on the loopback the portal binds to
+// (127.0.0.1). Used to skip already-occupied ports WITHOUT spawning a portal
+// that would run a full ADO fetch before discovering EADDRINUSE.
+function defaultIsPortFree(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once("error", () => resolve(false));
+    srv.once("listening", () => srv.close(() => resolve(true)));
+    srv.listen(port, "127.0.0.1");
+  });
+}
+
+/**
+ * Create a portal session the MCP shim uses to discover, adopt, or launch a
+ * tippani portal per PR. Returns { ensurePortal, getToken, getBaseUrl, stop,
+ * clientName }.
+ */
+export function createPortalSession({
+  basePort = Number(process.env.TIPPANI_PORT) || 3847,
+  portSpan = 20,
+  adoToken = process.env.TIPPANI_ADO_TOKEN || null,
+  clientName = process.env.TIPPANI_CLIENT_NAME || "tippani-mcp",
+  nodeBin = process.execPath,
+  portalEntry = PORTAL_ENTRY,
+  spawnFn = defaultSpawn,
+  fetchImpl = fetch,
+  listInstancesFn = listInstances,
+  openBrowserFn = (url) => openDefault(url),
+  readyTimeoutMs = Number(process.env.TIPPANI_READY_TIMEOUT_MS) || 60_000,
+  isPortFreeFn = defaultIsPortFree,
+} = {}) {
+  // active = the portal we're currently bound to:
+  //   { port, url, token, prId, owned }  (owned = we launched it)
+  let active = null;
+  // Every portal WE launched, tracked by port so stop() can tear them ALL down.
+  // A single `child` var lost the handle to earlier portals across a multi-PR
+  // session (open PR A then B), leaking A's process and its held port.
+  const ownedChildren = new Map(); // port -> child process
+  // The portal URL we last opened a browser to — so repeated open_pr calls in
+  // one session don't spam browser tabs, but every NEW binding (launch or
+  // adopt) does bring the review portal up for the user.
+  let lastOpenedUrl = null;
+
+  async function healthyAt(url, token) {
+    if (!url || !token) return false;
+    try {
+      const r = await fetchImpl(url + "/api/v1/threads", {
+        headers: { Authorization: `Bearer ${token}`, "X-Tippani-Client": clientName },
+      });
+      return r.ok;
+    } catch {
+      return false;
+    }
+  }
+
+  // A live portal already open for this PR (any process), or null.
+  async function findLivePortalForPr(prId) {
+    for (const inst of listInstancesFn()) {
+      if (Number(inst.prId) !== prId) continue;
+      const url = inst.url || `http://localhost:${inst.port}`;
+      if (await healthyAt(url, inst.token)) {
+        return { port: Number(inst.port), url, token: inst.token, prId, owned: false };
+      }
+    }
+    return null;
+  }
+
+  async function ensurePortal({ prId, org, project, repo, refresh } = {}) {
+    const id = Number(prId);
+    if (!id) throw new Error("open_pr requires a numeric prId.");
+
+    let result;
+    // 1. Already bound to a live portal for this PR.
+    if (active && active.prId === id && (await healthyAt(active.url, active.token))) {
+      result = { reused: true, prId: id, url: active.url };
+    } else {
+      // 2. Adopt another process's live portal already open for this PR — don't
+      //    spawn a duplicate or collide on its port.
+      const found = await findLivePortalForPr(id);
+      if (found) {
+        active = found;
+        result = { reused: true, adopted: true, prId: id, url: found.url };
+      } else {
+        // 3. Launch a new portal on a free port, leaving other PRs' portals alone.
+        active = await launchNew({ prId: id, org, project, repo, refresh });
+        result = { reused: false, prId: id, url: active.url };
+      }
+    }
+
+    // Bring the review portal up in the browser for the user on every NEW
+    // binding (launch or adopt). Adopting reuses another panel's portal
+    // process, which won't re-open a browser on its own — so the shim does it.
+    await maybeOpenBrowser();
+    return result;
+  }
+
+  // Open the browser to the active portal once per binding.
+  async function maybeOpenBrowser() {
+    if (active && active.url && active.url !== lastOpenedUrl) {
+      lastOpenedUrl = active.url;
+      try { await openBrowserFn(active.url); } catch { /* best effort */ }
+    }
+  }
+
+  async function launchNew({ prId, org, project, repo, refresh }) {
+    let lastErr = null;
+    for (let port = basePort; port < basePort + portSpan; port++) {
+      // Fast pre-check: skip ports already in use WITHOUT spawning. A spawned
+      // portal runs the full ADO fetch before it binds and hits EADDRINUSE, so
+      // probing here avoids a full fetch (or the ready timeout) per busy port.
+      if (!(await isPortFreeFn(port))) { lastErr = `port ${port} in use`; continue; }
+      const res = await tryLaunchOnPort(port, { prId, org, project, repo, refresh });
+      if (res.ok) {
+        // Track so stop() can tear down every portal we own, not just the last.
+        ownedChildren.set(port, res.child);
+        res.child.on("exit", () => {
+          if (ownedChildren.get(port) === res.child) ownedChildren.delete(port);
+        });
+        return { port, url: `http://localhost:${port}`, token: res.token, prId, owned: true };
+      }
+      lastErr = res.error;
+      // Port busy (another PR's portal or a stale entry) → try the next one.
+    }
+    throw new Error(
+      `could not start a tippani portal on ports ${basePort}-${basePort + portSpan - 1}` +
+      (lastErr ? ` (${lastErr})` : "")
+    );
+  }
+
+  function tryLaunchOnPort(port, { prId, org, project, repo, refresh }) {
+    // The portal launches headless — the shim owns browser-opening (see
+    // maybeOpenBrowser) so both launch and adopt bring the portal up uniformly.
+    const args = [portalEntry, String(prId), `--port=${port}`, "--headless"];
+    if (org) args.push(`--org=${org}`);
+    if (project) args.push(`--project=${project}`);
+    if (repo) args.push(`--repo=${repo}`);
+    if (refresh) args.push("--refresh");
+
+    const env = { ...process.env };
+    if (adoToken) env.TIPPANI_ADO_TOKEN = adoToken;
+
+    const proc = spawnFn(nodeBin, args, { env, stdio: "ignore", detached: false });
+    let exited = false;
+    proc.on("exit", () => { exited = true; });
+
+    return new Promise((resolve) => {
+      const deadline = Date.now() + readyTimeoutMs;
+      const poll = async () => {
+        // We pre-checked the port as free before spawning, so an early exit here
+        // means a lost race for the port or an auth rejection at startup → move
+        // on to the next candidate port.
+        if (exited) { resolve({ ok: false, error: `port ${port} unavailable` }); return; }
+        // Match OUR portal: same port AND our prId. A different PR already on
+        // this port must NOT be adopted here — our child will hit EADDRINUSE
+        // and exit, and we move on.
+        const inst = listInstancesFn().find(
+          (i) => Number(i.port) === port && Number(i.prId) === prId);
+        if (inst && (await healthyAt(inst.url || `http://localhost:${port}`, inst.token))) {
+          resolve({ ok: true, token: inst.token, child: proc });
+          return;
+        }
+        if (Date.now() > deadline) {
+          try { proc.kill(); } catch {}
+          resolve({ ok: false, error: `portal on ${port} not ready within ${readyTimeoutMs}ms` });
+          return;
+        }
+        setTimeout(poll, 400);
+      };
+      poll();
+    });
+  }
+
+  function getToken() { return active?.token ?? null; }
+  function getBaseUrl() { return active?.url ?? `http://localhost:${basePort}`; }
+
+  function stop() {
+    // Tear down every portal WE launched (adopted portals belong to others).
+    // Snapshot + clear first so each child's exit handler (which deletes its
+    // own entry) doesn't perturb the iteration.
+    const procs = [...ownedChildren.values()];
+    ownedChildren.clear();
+    for (const proc of procs) {
+      try { proc.kill(); } catch {}
+    }
+  }
+
+  return {
+    ensurePortal,
+    getToken,
+    getBaseUrl,
+    stop,
+    // Open a specific portal path in the user's browser (e.g. "/thread/123").
+    openUrl: (path) => {
+      const base = (getBaseUrl() || "").replace(/\/+$/, "");
+      const p = String(path || "/").startsWith("/") ? path : "/" + path;
+      try { return Promise.resolve(openBrowserFn(base + p)).catch(() => {}); }
+      catch { return Promise.resolve(); }
+    },
+    get clientName() { return clientName; },
+  };
+}

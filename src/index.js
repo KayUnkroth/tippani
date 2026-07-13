@@ -26,6 +26,10 @@ import {
   createInflightStore,
 } from "./api-state.js";
 import { registerControlApi } from "./control-api.js";
+import { renderSpecBody } from "./spec-source-map.js";
+import { isTableBlock, computeTableDiff } from "./table-diff.js";
+import { parseViewedMap, updateViewed } from "./viewed-map.js";
+import { writeInstance, removeInstance } from "./portal-registry.js";
 import {
   decodeConfigValue,
   extOf,
@@ -38,7 +42,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // --- Config ---
 const CONFIG_DIR = path.join(os.homedir(), ".tippani");
 const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
-const PORT = 3847;
+let PORT = 3847;
 
 function loadConfig() {
   try {
@@ -170,10 +174,14 @@ function friendlyAdoError(e, context) {
 }
 
 async function getTokenFromAzCli() {
+  // Dev fallback for standalone use: mint an ADO access token via the az CLI for
+  // the host-configured resource. No resource configured → no token.
+  const resource = process.env.TIPPANI_ADO_AUDIENCE;
+  if (!resource) return null;
   const { execSync } = await import("child_process");
   try {
     const token = execSync(
-      'az account get-access-token --resource "499b84ac-1321-427f-aa17-267ca6975798" --query accessToken -o tsv',
+      `az account get-access-token --resource "${resource}" --query accessToken -o tsv`,
       { encoding: "utf-8", timeout: 15000 }
     ).trim();
     return token;
@@ -301,6 +309,38 @@ async function resolveThread(conn, prId, threadId) {
   return gitApi.updateThread({ status: 2 }, ADO_REPO, prId, threadId, ADO_PROJECT);
 }
 
+// Durable "viewed" state: ADO comment-thread properties are NOT updatable
+// ("Comment thread properties cannot be updated"), so per-thread viewed markers
+// live in a single PULL-REQUEST property (tippani.viewed = JSON map
+// { threadId: lastViewedCommentId }). PR properties ARE updatable via a
+// dedicated API, so this is durable + shared in ADO (not a machine-local file).
+// A newer comment id makes a thread resurface as unread.
+const VIEWED_PR_PROP = "tippani.viewed";
+// Strict read: returns {} only when the property is genuinely absent, and THROWS
+// on a transient/corrupt read so a caller doing read-modify-write never wipes
+// existing markers by writing an empty map after a failed read.
+async function readViewedMap(conn, prId) {
+  const gitApi = await conn.getGitApi();
+  const props = await gitApi.getPullRequestProperties(ADO_REPO, prId, ADO_PROJECT);
+  const raw = props?.value?.[VIEWED_PR_PROP]?.$value ?? props?.[VIEWED_PR_PROP]?.$value ?? null;
+  return parseViewedMap(raw);
+}
+// Lenient read for DISPLAY only: on any failure fall back to no-markers so the
+// page still renders (threads just show as unread). NEVER use this result to
+// write back — use readViewedMap for read-modify-write.
+async function getViewedMap(conn, prId) {
+  try { return await readViewedMap(conn, prId); } catch { return {}; }
+}
+async function setViewedMap(conn, prId, map) {
+  const gitApi = await conn.getGitApi();
+  // NOTE: op:add replaces the whole property; there is no ETag/version guard, so
+  // concurrent writers are last-write-wins. Acceptable for the single-user flow;
+  // the guard that matters (never write after a failed read) is in updateViewed.
+  const patch = [{ op: "add", path: "/" + VIEWED_PR_PROP, value: JSON.stringify(map) }];
+  return gitApi.updatePullRequestProperties(
+    { "Content-Type": "application/json-patch+json" }, patch, ADO_REPO, prId, ADO_PROJECT);
+}
+
 // Current tip commit (objectId) of a branch ref like "refs/heads/feature/x".
 async function getBranchTip(conn, branchRef) {
   const gitApi = await conn.getGitApi();
@@ -402,6 +442,117 @@ async function renderMarkdown(content) {
     .use(rehypeStringify)
     .process(content);
   return String(result);
+}
+
+// renderSpecBody (imported) renders the spec body AND captures per-block source
+// line ranges from the render tree itself, so the diff overlay / comment anchors
+// map to the exact rendered blocks. See spec-source-map.js.
+
+// --- Spec-edit diff (GitHub-style) ---------------------------------------
+// Split markdown into blocks separated by blank lines, tracking 1-based line
+// ranges so a hunk can be mapped back to a rendered block via the source map.
+function splitMdBlocks(md) {
+  const lines = (md || "").split("\n");
+  const blocks = [];
+  let cur = null;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === "") { if (cur) { blocks.push(cur); cur = null; } continue; }
+    if (!cur) cur = { text: lines[i], startLine: i + 1, endLine: i + 1 };
+    else { cur.text += "\n" + lines[i]; cur.endLine = i + 1; }
+  }
+  if (cur) blocks.push(cur);
+  return blocks;
+}
+
+// LCS block diff → ordered ops (same/del/add), matching blocks by exact text.
+function diffMdBlocks(oldBlocks, newBlocks) {
+  const n = oldBlocks.length, m = newBlocks.length;
+  const dp = Array.from({ length: n + 1 }, () => new Array(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--)
+      dp[i][j] = oldBlocks[i].text === newBlocks[j].text
+        ? dp[i + 1][j + 1] + 1
+        : Math.max(dp[i + 1][j], dp[i][j + 1]);
+  const ops = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (oldBlocks[i].text === newBlocks[j].text) { ops.push({ type: "same", o: oldBlocks[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { ops.push({ type: "del", o: oldBlocks[i] }); i++; }
+    else { ops.push({ type: "add", d: newBlocks[j] }); j++; }
+  }
+  while (i < n) { ops.push({ type: "del", o: oldBlocks[i] }); i++; }
+  while (j < m) { ops.push({ type: "add", d: newBlocks[j] }); j++; }
+  return ops;
+}
+
+// Compute GitHub-style change hunks between the original and the staged draft.
+// Each hunk carries the original line range (to anchor it in the rendered doc)
+// plus server-rendered HTML for the removed ("current") and added ("proposed")
+// blocks. When a hunk is a single table on both sides, it is rendered as ONE
+// merged table with per-row red/green so only the changed rows stand out.
+// isTableBlock / computeTableDiff live in table-diff.js (render-free + tested).
+async function renderCellHtml(md) {
+  const h = await renderMarkdown(md || "");
+  return h.replace(/^\s*<p>/, "").replace(/<\/p>\s*$/, "").trim();
+}
+// Render two markdown tables as ONE table with changed rows flagged del/add.
+// The row structure (column count, header-change detection, per-row del/add)
+// comes from computeTableDiff so it stays render-free and unit-tested.
+async function renderTableDiff(oldText, newText) {
+  const { rows, headerChanged } = computeTableDiff(oldText, newText);
+  const renderRowCells = async (cells, tag) => {
+    let out = "";
+    for (const c of cells) out += "<" + tag + ">" + (await renderCellHtml(c)) + "</" + tag + ">";
+    return out;
+  };
+  let html = '<table class="docdiff-table">';
+  if (headerChanged) {
+    // Header changed: render it inline as del/add rows so the rename is marked.
+    html += "<tbody>";
+    for (const r of rows) {
+      const cls = r.cls ? ' class="' + r.cls + '"' : "";
+      html += "<tr" + cls + ">" + (await renderRowCells(r.cells, "td")) + "</tr>";
+    }
+    html += "</tbody>";
+  } else {
+    const head = rows[0];
+    html += "<thead><tr>" + (await renderRowCells(head.cells, "th")) + "</tr></thead><tbody>";
+    for (const r of rows.slice(1)) {
+      const cls = r.cls ? ' class="' + r.cls + '"' : "";
+      html += "<tr" + cls + ">" + (await renderRowCells(r.cells, "td")) + "</tr>";
+    }
+    html += "</tbody>";
+  }
+  html += "</table>";
+  return html;
+}
+async function computeSpecDiffHunks(originalBody, draftBody) {
+  const ops = diffMdBlocks(splitMdBlocks(originalBody), splitMdBlocks(draftBody));
+  const hunks = [];
+  let idx = 0, lastSameEnd = 0;
+  while (idx < ops.length) {
+    if (ops[idx].type === "same") { lastSameEnd = ops[idx].o.endLine; idx++; continue; }
+    const dels = [], adds = [];
+    while (idx < ops.length && ops[idx].type !== "same") {
+      if (ops[idx].type === "del") dels.push(ops[idx].o);
+      else adds.push(ops[idx].d);
+      idx++;
+    }
+    const oldText = dels.map((b) => b.text).join("\n\n");
+    const newText = adds.map((b) => b.text).join("\n\n");
+    const hunk = {
+      startLine: dels.length ? dels[0].startLine : lastSameEnd,
+      endLine: dels.length ? dels[dels.length - 1].endLine : lastSameEnd,
+    };
+    if (oldText && newText && isTableBlock(oldText) && isTableBlock(newText)) {
+      hunk.mergedHtml = await renderTableDiff(oldText, newText);
+    } else {
+      hunk.oldHtml = oldText ? await renderMarkdown(oldText) : "";
+      hunk.newHtml = newText ? await renderMarkdown(newText) : "";
+    }
+    hunks.push(hunk);
+  }
+  return hunks;
 }
 
 // Safe renderer for user-authored content (comments). Uses rehype-sanitize
@@ -552,11 +703,13 @@ function stripMarkdown(s) {
 }
 
 // --- File picker landing page ---
-function buildPickerPage(pr, changedFiles) {
+function buildPickerPage(pr, changedFiles, threads = []) {
   const prTitle = escHtml(pr.title || "Pull Request");
   const author = escHtml(pr.createdBy?.displayName || "Unknown");
   const prId = pr.pullRequestId;
   const descExcerpt = escHtml(stripMarkdown((pr.description || "").slice(0, 300)).slice(0, 200));
+  const openThreadCount = (threads || []).filter(
+    (t) => (t.comments?.length || 0) > 0 && !(t.status === 2 || t.status === 4)).length;
 
   const fileCardsHtml = changedFiles
     .map((f, i) => {
@@ -637,6 +790,17 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
       </div>
       ${descExcerpt ? `<div class="pr-desc">${descExcerpt}</div>` : ""}
     </div>
+    <div class="section-label">Feedback</div>
+    <div class="file-list" style="margin-bottom: 24px;">
+      <a href="/feedback" class="file-card">
+        <div class="file-icon">💬</div>
+        <div class="file-info">
+          <div class="file-name">Review feedback</div>
+          <div class="file-path">${openThreadCount} open thread${openThreadCount !== 1 ? "s" : ""} across this PR</div>
+        </div>
+        <span class="badge badge-accent">${openThreadCount}</span>
+      </a>
+    </div>
     <div class="section-label">Changed Files</div>
     <div class="file-list">
       ${fileCardsHtml}
@@ -646,8 +810,293 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
 </html>`;
 }
 
+// --- Cross-PR feedback triage page ---
+// Lists every comment thread across the PR on one screen (no file drill-in),
+// with a "waiting on" badge computed from the last commenter vs the PR author.
+// Classify a thread for triage. Single source of truth shared by the Feedback
+// page and the /api/v1/triage summary so chat counts match the page exactly.
+// Precedence: Resolved (ADO) > Viewed (ack) > FYI (system) > needs-you > awaiting-reviewer.
+function classifyThread(t, authorName, viewedMap = {}) {
+  const comments = t.comments || [];
+  const resolved = t.status === 2 || t.status === 4;
+  const system = comments.length > 0 && comments.every((c) => c.commentType === 3);
+  const last = comments[comments.length - 1];
+  const lastBy = last?.author?.displayName || "Unknown";
+  const lastId = comments.reduce((m, c) => Math.max(m, c.id || 0), 0);
+  const viewedId = viewedMap[String(t.id)];
+  const viewed = viewedId != null && Number(viewedId) === lastId;
+  let waiting;
+  if (resolved) waiting = "resolved";
+  else if (viewed) waiting = "viewed";
+  else if (system) waiting = "fyi";
+  else if (lastBy !== authorName) waiting = "you";
+  else waiting = "reviewer";
+  return { resolved, system, lastBy, lastId, viewed, waiting };
+}
+
+function buildFeedbackPage(pr, threads, changedFiles, viewedMap = {}) {
+  const prId = pr.pullRequestId;
+  const prTitle = escHtml(pr.title || "Pull Request");
+  const author = pr.createdBy?.displayName || "";
+  const fileIndexOf = (path) => (changedFiles || []).findIndex((f) => f.path === path);
+
+  const rows = (threads || [])
+    .filter((t) => (t.comments?.length || 0) > 0)
+    .map((t) => {
+      const comments = t.comments || [];
+      const file = t.threadContext?.filePath || null;
+      const line = t.threadContext?.rightFileStart?.line || null;
+      const last = comments[comments.length - 1];
+      const { resolved, waiting, lastBy } = classifyThread(t, author, viewedMap);
+      const gist = stripMarkdown((last?.content || "").replace(/\s+/g, " ")).slice(0, 180);
+      const idx = file ? fileIndexOf(file) : -1;
+      const anchor = file ? `${file.split("/").pop()}${line ? ":" + line : ""}` : "PR-level";
+      return { id: t.id, resolved, lastBy, waiting, gist, idx, anchor, comments, count: comments.length };
+    });
+
+  const rank = (w) => (w === "you" ? 0 : w === "reviewer" ? 1 : w === "viewed" ? 2 : w === "fyi" ? 3 : 4);
+  rows.sort((a, b) => rank(a.waiting) - rank(b.waiting) || (a.anchor > b.anchor ? 1 : a.anchor < b.anchor ? -1 : 0));
+
+  const openCount = rows.filter((r) => !r.resolved && r.waiting !== "fyi").length;
+  const needCount = rows.filter((r) => r.waiting === "you").length;
+
+  const badgeFor = (w) =>
+    w === "you" ? '<span class="fb-badge fb-need">Needs your reply</span>'
+      : w === "reviewer" ? '<span class="fb-badge fb-wait">Awaiting reviewer</span>'
+      : w === "viewed" ? '<span class="fb-badge fb-viewed">Viewed</span>'
+      : w === "fyi" ? '<span class="fb-badge fb-fyi">For your information</span>'
+      : '<span class="fb-badge fb-done">Resolved</span>';
+
+  const commentHtml = (c) =>
+    `<div class="fb-comment">
+      <div class="fb-comment-meta"><span class="fb-comment-author">${escHtml(c.author?.displayName || "Unknown")}</span><span class="fb-comment-date">${c.publishedDate ? new Date(c.publishedDate).toLocaleDateString() : ""}</span></div>
+      <div class="fb-comment-body">${c.renderedContent || escHtml(c.content || "")}</div>
+    </div>`;
+
+  const cardsHtml = rows.map((r) => {
+    const threadHtml = (r.comments || []).map(commentHtml).join("");
+    return `<div class="fb-card">
+      <div class="fb-top"><span class="fb-anchor">${escHtml(r.anchor)}</span>${badgeFor(r.waiting)}<button type="button" class="fb-toggle" aria-expanded="false" onclick="toggleCard(this)">Expand</button></div>
+      <div class="fb-gist">${escHtml(r.gist)}</div>
+      <div class="fb-meta">last by ${escHtml(r.lastBy)} \u00b7 ${r.count} comment${r.count !== 1 ? "s" : ""}</div>
+      <div class="fb-thread" hidden>
+        ${threadHtml}
+        <a class="fb-open" href="/goto/thread/${r.id}">Open thread &rarr;</a>
+      </div>
+    </div>`;
+  }).join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tippani — PR #${prId} — Feedback</title>
+<style>
+${cssVariables()}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { height: 100%; }
+body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--cp-bg); color: var(--cp-text); min-height: 100%; display: flex; flex-direction: column; align-items: center; padding: 48px 24px; }
+.brand-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+.logo { width: 32px; height: 32px; border-radius: 8px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-size: 12px; font-weight: 700; }
+.brand-text { font-size: 15px; font-weight: 600; }
+.brand-text-sub { font-size: 13px; font-weight: 400; color: var(--cp-text-muted); }
+.container { width: 100%; max-width: 760px; }
+.fb-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 6px; }
+.fb-head h1 { font-size: 19px; font-weight: 700; }
+.back { font-size: 13px; color: var(--cp-accent); text-decoration: none; }
+.fb-sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 20px; }
+.fb-list { display: flex; flex-direction: column; gap: 8px; }
+.fb-card { display: block; padding: 14px 18px; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 12px; text-decoration: none; color: var(--cp-text); transition: all 0.15s; }
+.fb-card:hover { border-color: var(--cp-accent); box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+.fb-static { cursor: default; opacity: 0.85; }
+.fb-top { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+.fb-anchor { font-size: 13px; font-weight: 600; color: var(--cp-text-soft); }
+.fb-badge { display: inline-block; padding: 2px 10px; border-radius: 99px; font-size: 11px; font-weight: 600; }
+.fb-need { background: rgba(220,38,38,0.12); color: #dc2626; }
+.fb-wait { background: var(--cp-accent-soft); color: var(--cp-accent); }
+.fb-viewed { background: var(--cp-border); color: var(--cp-text-muted); }
+.fb-fyi { background: rgba(100,116,139,0.14); color: var(--cp-text-muted); }
+.fb-done { background: rgba(22,163,74,0.1); color: var(--cp-success); }
+.fb-gist { font-size: 13px; color: var(--cp-text); line-height: 1.45; }
+.fb-meta { font-size: 12px; color: var(--cp-text-muted); margin-top: 6px; }
+.fb-toggle { margin-left: auto; background: none; border: none; padding: 0; font-family: inherit; font-size: 12px; font-weight: 600; color: var(--cp-text-muted); cursor: pointer; white-space: nowrap; }
+.fb-toggle:hover { text-decoration: underline; }
+.fb-thread { margin-top: 12px; border-top: 1px solid var(--cp-border); padding-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.fb-thread[hidden] { display: none; }
+.fb-comment-meta { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; }
+.fb-comment-author { font-size: 12px; font-weight: 600; }
+.fb-comment-date { font-size: 11px; color: var(--cp-text-muted); }
+.fb-comment-body { font-size: 13px; line-height: 1.5; color: var(--cp-text); }
+.fb-comment-body p { margin: 0 0 6px; }
+.fb-comment-body p:last-child { margin-bottom: 0; }
+.fb-open { align-self: flex-start; font-size: 12px; color: var(--cp-accent); text-decoration: none; font-weight: 600; }
+.fb-empty { font-size: 14px; color: var(--cp-text-muted); padding: 24px; text-align: center; }
+<\/style>
+<script>
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+  function toggleCard(btn) {
+    const card = btn.closest('.fb-card');
+    const body = card && card.querySelector('.fb-thread');
+    if (!body) return;
+    const willOpen = body.hasAttribute('hidden');
+    if (willOpen) { body.removeAttribute('hidden'); btn.textContent = 'Collapse'; btn.setAttribute('aria-expanded', 'true'); }
+    else { body.setAttribute('hidden', ''); btn.textContent = 'Expand'; btn.setAttribute('aria-expanded', 'false'); }
+  }
+<\/script>
+</head>
+<body>
+  <div class="brand-bar">
+    <div class="logo">FS</div>
+    <span class="brand-text">Tippani</span><span class="brand-text-sub"> · feedback</span>
+  </div>
+  <div class="container">
+    <div class="fb-head">
+      <h1>Feedback — ${prTitle}</h1>
+      <a class="back" href="/">← PR overview</a>
+    </div>
+    <div class="fb-sub">PR #${prId} · ${openCount} open thread${openCount !== 1 ? "s" : ""}${needCount ? ` · ${needCount} need${needCount !== 1 ? "" : "s"} your reply` : ""}</div>
+    <div class="fb-list">
+      ${cardsHtml || '<div class="fb-empty">No comment threads on this PR.</div>'}
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+// --- Single-thread view + reply page (PR-level threads) ---
+function buildThreadPage(pr, thread, draft, isViewed = false) {
+  const prId = pr.pullRequestId;
+  const tid = thread.id;
+  const file = thread.threadContext?.filePath || null;
+  const line = thread.threadContext?.rightFileStart?.line || null;
+  const anchor = file ? `${file.split("/").pop()}${line ? ":" + line : ""}` : "PR-level comment";
+  const resolved = thread.status === 2 || thread.status === 4;
+  const draftContent = (draft && draft.content) || "";
+
+  const commentsHtml = (thread.comments || []).map((c) => {
+    const who = escHtml(c.author?.displayName || "Unknown");
+    const when = c.publishedDate ? escHtml(new Date(c.publishedDate).toLocaleString()) : "";
+    const body = escHtml(c.content || "");
+    return `<div class="tc">
+      <div class="tc-head"><span class="tc-who">${who}</span><span class="tc-when">${when}</span></div>
+      <div class="tc-body">${body}</div>
+    </div>`;
+  }).join("\n");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tippani \u2014 PR #${prId} \u2014 Thread ${tid}</title>
+<style>
+${cssVariables()}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { height: 100%; }
+body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif; background: var(--cp-bg); color: var(--cp-text); min-height: 100%; display: flex; flex-direction: column; align-items: center; padding: 48px 24px; }
+.brand-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 24px; }
+.logo { width: 32px; height: 32px; border-radius: 8px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-size: 12px; font-weight: 700; }
+.brand-text { font-size: 15px; font-weight: 600; }
+.brand-text-sub { font-size: 13px; font-weight: 400; color: var(--cp-text-muted); }
+.container { width: 100%; max-width: 720px; }
+.th-head { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 4px; }
+.th-head h1 { font-size: 18px; font-weight: 700; }
+.back { font-size: 13px; color: var(--cp-accent); text-decoration: none; }
+.th-sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 18px; }
+.tc { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 12px; padding: 14px 18px; margin-bottom: 8px; }
+.tc-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.tc-who { font-size: 13px; font-weight: 600; }
+.tc-when { font-size: 12px; color: var(--cp-text-muted); }
+.tc-body { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-wrap: break-word; }
+.reply-wrap { margin-top: 18px; }
+.reply-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cp-text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.reply-hint { font-size: 12px; color: var(--cp-text-muted); margin-top: 6px; }
+.draft-badge { display: none; padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 600; background: var(--cp-accent-soft); color: var(--cp-accent); }
+textarea { width: 100%; min-height: 120px; padding: 12px 14px; border: 1px solid var(--cp-border-strong); border-radius: 10px; background: var(--cp-surface); color: var(--cp-text); font-family: inherit; font-size: 13px; line-height: 1.5; resize: vertical; }
+textarea:focus { outline: 2px solid var(--cp-accent); outline-offset: 1px; }
+.actions { display: flex; gap: 10px; margin-top: 12px; }
+.btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; border: 1px solid var(--cp-border-strong); background: var(--cp-surface); color: var(--cp-text); cursor: pointer; }
+.btn-primary { background: var(--cp-accent); color: var(--cp-accent-fg); border-color: var(--cp-accent); }
+.btn:disabled { opacity: 0.6; cursor: default; }
+<\/style>
+<script>
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+<\/script>
+</head>
+<body>
+  <div class="brand-bar">
+    <div class="logo">FS</div>
+    <span class="brand-text">Tippani</span><span class="brand-text-sub"> \u00b7 thread</span>
+  </div>
+  <div class="container">
+    <div class="th-head">
+      <h1>${escHtml(anchor)}</h1>
+      <a class="back" href="/feedback">\u2190 Feedback</a>
+    </div>
+    <div class="th-sub">PR #${prId} \u00b7 thread ${tid}${resolved ? " \u00b7 resolved" : ""}${isViewed ? " \u00b7 viewed" : ""}</div>
+    ${commentsHtml}
+    <div class="reply-wrap">
+      <div class="reply-label">Your reply <span class="draft-badge" id="draftBadge">staged by agent</span></div>
+      <textarea id="reply" placeholder="Write a reply\u2026">${escHtml(draftContent)}</textarea>
+      <div class="reply-hint">Posted replies appear above. Text here is a draft \u2014 nothing is sent until you press Post reply.</div>
+      <div class="actions">
+        <button class="btn btn-primary" id="postBtn">Post reply</button>
+        <button class="btn" id="viewedBtn">${isViewed ? "Viewed \u2713" : "Mark viewed"}</button>
+        <button class="btn" id="resolveBtn"${resolved ? " disabled" : ""}>${resolved ? "Resolved" : "Resolve"}</button>
+        <button class="btn" id="clearBtn" style="display:${draftContent ? "inline-block" : "none"};">Discard draft</button>
+      </div>
+    </div>
+  </div>
+<script>
+  const TID = ${tid};
+  const box = document.getElementById('reply');
+  const draftBadge = document.getElementById('draftBadge');
+  const clearBtn = document.getElementById('clearBtn');
+  let dirty = false;
+  if (box.value) draftBadge.style.display = 'inline-block';
+  box.addEventListener('input', () => { dirty = true; draftBadge.style.display = 'none'; if (clearBtn) clearBtn.style.display = 'none'; });
+  async function post() {
+    const content = box.value.trim();
+    if (!content) return;
+    const btn = document.getElementById('postBtn');
+    btn.disabled = true; btn.textContent = 'Posting\u2026';
+    try {
+      const r = await fetch('/api/v1/threads/' + TID + '/reply', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content }) });
+      if (r.ok) { try { await fetch('/api/v1/threads/' + TID + '/draft', { method: 'DELETE' }); } catch {} location.reload(); }
+      else { const e = await r.json().catch(() => ({})); alert('Post failed: ' + (e.error || r.status)); btn.disabled = false; btn.textContent = 'Post reply'; }
+    } catch (e) { alert('Post failed: ' + e); btn.disabled = false; btn.textContent = 'Post reply'; }
+  }
+  async function clearDraft() {
+    try { await fetch('/api/v1/threads/' + TID + '/draft', { method: 'DELETE' }); } catch {}
+    box.value = ''; dirty = true; draftBadge.style.display = 'none'; if (clearBtn) clearBtn.style.display = 'none';
+  }
+  document.getElementById('postBtn').onclick = post;
+  document.getElementById('clearBtn').onclick = clearDraft;
+  async function act(path, verb) {
+    try {
+      const r = await fetch('/api/v1/threads/' + TID + path, { method: verb });
+      if (r.ok) { location.href = '/feedback'; }
+      else { const e = await r.json().catch(() => ({})); alert('Failed: ' + (e.error || r.status)); }
+    } catch (e) { alert('Failed: ' + e); }
+  }
+  const vb = document.getElementById('viewedBtn'); if (vb) vb.onclick = () => act('/viewed', ${isViewed ? "'DELETE'" : "'POST'"});
+  const rb = document.getElementById('resolveBtn'); if (rb && !rb.disabled) rb.onclick = () => act('/resolve', 'POST');
+  async function poll() {
+    try {
+      const r = await fetch('/api/v1/threads/' + TID);
+      if (r.ok) { const t = await r.json(); const c = t.draft && t.draft.content;
+        if (c && !dirty && box.value !== c) { box.value = c; draftBadge.style.display = 'inline-block'; if (clearBtn) clearBtn.style.display = 'inline-block'; } }
+    } catch {}
+  }
+  setInterval(poll, 1500);
+<\/script>
+</body>
+</html>`;
+}
+
 // --- Spec review page (3-column layout) ---
-function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown, canEdit, baseObjectId) {
+function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown, canEdit, baseObjectId, viewedMap = {}) {
   const tocHtml = toc
     .map(
       (t) =>
@@ -667,7 +1116,7 @@ function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap
   function buildThreadHtml(t, isResolved) {
     const anchor = t.threadContext?.filePath
       ? t.threadContext.filePath.split("/").pop() + (t.threadContext.rightFileStart ? `:${t.threadContext.rightFileStart.line}` : "")
-      : "";
+      : (t.comments?.[0]?.author?.displayName || "");
     const commentsHtml = t.comments
       .map(
         (c, i) =>
@@ -681,21 +1130,40 @@ function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap
       )
       .join("");
     const statusClass = isResolved ? "thread-resolved" : "thread-active";
+    const lastId = (t.comments || []).reduce((m, c) => Math.max(m, c.id || 0), 0);
+    const viewed = viewedMap[String(t.id)] != null && Number(viewedMap[String(t.id)]) === lastId;
+    // If the last comment is mine (the PR author), I've obviously seen the thread —
+    // "Mark viewed" is nonsense there.
+    const lastComment = (t.comments || [])[t.comments.length - 1];
+    const mineLast = !!(lastComment?.author?.displayName && pr.createdBy?.displayName
+      && lastComment.author.displayName === pr.createdBy.displayName);
+    // Status tag in the thread header. "Replied" = my comment is last (I responded);
+    // "Viewed" = I explicitly acknowledged the latest comment.
+    const tagStyle = "margin-left:6px;padding:1px 8px;border-radius:99px;font-size:10px;font-weight:600;background:var(--cp-border);color:var(--cp-text-muted);";
+    const statusTag = isResolved
+      ? ""
+      : mineLast
+        ? `<span style="${tagStyle}">Replied</span>`
+        : viewed
+          ? `<span style="${tagStyle}">Viewed</span>`
+          : "";
     const actions = isResolved
       ? ``
       : `<div class="thread-actions">
           <button class="btn-thread-reply" onclick="openReply(${t.id})">Reply</button>
+          ${(viewed || mineLast) ? "" : `<button class="btn-thread-reply" onclick="toggleViewed(${t.id}, false)">Mark viewed</button>`}
           <button class="btn-thread-resolve" onclick="resolveThread(${t.id})">✓ Resolve</button>
         </div>
         <form class="reply-form" data-thread-id="${t.id}" onsubmit="return false;">
           <textarea class="reply-textarea" rows="3" placeholder="Reply… (⌘/Ctrl+Enter to post and advance, Esc to cancel)"></textarea>
           <div class="reply-form-actions">
             <button type="button" class="reply-btn-post" onclick="submitReply(${t.id})">Post & next</button>
-            <button type="button" class="reply-btn-cancel" onclick="closeReply(${t.id})">Cancel</button>
+            <button type="button" class="reply-btn-cancel reply-btn-discard" style="display:none;" onclick="discardDraft(${t.id})">Discard draft</button>
+            <button type="button" class="reply-btn-cancel reply-btn-close" onclick="closeReply(${t.id})">Cancel</button>
           </div>
         </form>`;
     return `<div class="comment-thread ${statusClass}" data-thread-id="${t.id}" data-thread-line="${t.threadContext?.rightFileStart?.line || ""}">
-      ${anchor ? `<div class="comment-anchor">${isResolved ? "✓ " : ""}${escHtml(anchor)}</div>` : ""}
+      ${(anchor || statusTag) ? `<div class="comment-anchor">${isResolved ? "✓ " : ""}${escHtml(anchor)}${statusTag}</div>` : ""}
       ${isResolved ? `<details><summary class="resolved-summary">${escHtml(t.comments[0]?.author?.displayName || "Comment")} — resolved</summary>` : ""}
       ${commentsHtml}
       ${actions}
@@ -944,6 +1412,28 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .diff-del { background: color-mix(in srgb, #d93f0b 14%, transparent); }
 .diff-del .diff-gutter { color: #d93f0b; }
 .diff-empty { padding: 24px; text-align: center; color: var(--cp-text-muted); }
+/* Spec-edit diff overlay (GitHub-style current/proposed boxes + right gutter marker) */
+.docdiff-hidden { display: none !important; }
+.docdiff-widget { position: relative; margin: 6px 0 16px; }
+.docdiff-widget::after { content: ''; position: absolute; top: 2px; bottom: 2px; right: -18px; width: 4px; border-radius: 2px; background: var(--cp-text-muted); opacity: .45; }
+.docdiff-widget.docdiff-active::after { background: var(--cp-accent); opacity: 1; }
+.proposal-source { font-size: 12px; color: var(--cp-text-muted); align-self: center; margin-right: 2px; white-space: nowrap; }
+.docdiff-box { border-radius: 8px; border: 1px solid; padding: 4px 14px 8px; }
+.docdiff-box > :first-child { margin-top: 6px; }
+.docdiff-box::before { display: block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; margin: 6px 0 2px; }
+.docdiff-old { background: color-mix(in srgb, #d93f0b 12%, transparent); border-color: color-mix(in srgb, #d93f0b 34%, transparent); }
+.docdiff-old::before { content: 'Current'; color: #d93f0b; }
+.docdiff-new { background: color-mix(in srgb, var(--cp-success) 12%, transparent); border-color: color-mix(in srgb, var(--cp-success) 34%, transparent); margin-top: 6px; }
+.docdiff-new::before { content: 'Proposed'; color: var(--cp-success); }
+.docdiff-merged { padding: 0 0 0 22px; border: none; background: transparent; overflow: visible; }
+.docdiff-merged::before { display: none; }
+.docdiff-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.docdiff-table th, .docdiff-table td { border: 1px solid var(--cp-border); padding: 6px 10px; text-align: left; vertical-align: top; background: transparent; }
+.docdiff-table tr.row-del > td { background: color-mix(in srgb, #d93f0b 14%, transparent); }
+.docdiff-table tr.row-add > td { background: color-mix(in srgb, var(--cp-success) 16%, transparent); }
+.docdiff-table tr.row-del > td:first-child, .docdiff-table tr.row-add > td:first-child { position: relative; }
+.docdiff-table tr.row-del > td:first-child::before { content: '−'; position: absolute; left: -20px; color: #d93f0b; font-weight: 700; }
+.docdiff-table tr.row-add > td:first-child::before { content: '+'; position: absolute; left: -20px; color: var(--cp-success); font-weight: 700; }
 .diff-msg-row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
 .diff-msg-row label { font-size: 12px; font-weight: 600; color: var(--cp-text-muted); white-space: nowrap; }
 .diff-msg-row input { flex: 1; font-family: inherit; font-size: 13px; padding: 7px 10px; border-radius: 8px; border: 1px solid var(--cp-border); background: var(--cp-bg); color: var(--cp-text); }
@@ -988,6 +1478,8 @@ details[open] .resolved-summary::before { content: '▾ '; }
     </div>` : ""}
     ${canEdit ? `<button class="edit-toggle save-btn" id="saveBtn" onclick="tippani.save()" style="display:none" disabled>Save</button>` : ""}
     ${canEdit ? `<button class="edit-toggle" id="editToggle" onclick="tippani.toggle()" title="Toggle edit mode (${"⌘"}/Ctrl+E)">Edit</button>` : ""}
+    <span id="proposalSource" class="proposal-source" style="display:none"></span>
+    <button class="edit-toggle" id="discardProposalBtn" onclick="tippani.discardProposal()" style="display:none" title="Discard the staged proposed edit for this file">Discard proposal</button>
   </div>
 </div>
 
@@ -1332,6 +1824,7 @@ window.tippani = (function () {
     updateDirtyIndicator();
     editMode = true;
     applyEditPaneState();
+    maybeSeedProposal();
     editor.view.focus();
   }
   function exitEdit() {
@@ -1399,6 +1892,15 @@ window.tippani = (function () {
     });
   }
 
+  // Once the user commits their own buffer, any staged agent proposal is stale:
+  // drop it server-side and clear the diff overlay so a later commit_spec or
+  // page reload can't resurface the superseded proposal.
+  async function dropStagedProposal() {
+    try { await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft', { method: 'DELETE' }); } catch {}
+    if (typeof clearDiffOverlay === 'function') clearDiffOverlay();
+    const b = el('discardProposalBtn'); if (b) b.style.display = 'none';
+  }
+
   // Save (#48): diff preview (with editable commit message) → commit to PR branch.
   async function save() {
     if (saving || !isDirty()) return;
@@ -1426,12 +1928,14 @@ window.tippani = (function () {
       const data = await r.json();
       if (data.ok && data.synced) {
         RAW_MARKDOWN = newMd; // new saved baseline → no longer dirty
+        await dropStagedProposal(); // committed buffer supersedes any staged proposal
         toast("Saved — commit " + (data.commitId ? String(data.commitId).slice(0, 8) : "ok"));
       } else if (data.conflict) {
         // Branch moved underneath us — never overwrite blindly (#49).
         showConflict();
       } else if (data.queued) {
         RAW_MARKDOWN = newMd; // safely persisted to the queue; will retry on sync
+        await dropStagedProposal(); // committed buffer supersedes any staged proposal
         toast(data.error ? "Push failed (" + data.error + ") — queued, will retry on sync" : (data.message || "Saved locally — will sync"));
       } else {
         toast("Save failed: " + (data.error || "unknown") + " — your edits are kept");
@@ -1501,6 +2005,39 @@ window.tippani = (function () {
     true
   );
 
+  // If a whole-file proposal is staged and the editor is still pristine, seed
+  // the editor with the proposal so Edit mode becomes "accept & refine". Guarded
+  // so it never clobbers the user's own unsaved edits.
+  async function maybeSeedProposal() {
+    if (isDirty()) return;
+    try {
+      const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft');
+      if (!r.ok) return;
+      const data = await r.json();
+      const content = data && data.draft && data.draft.content;
+      if (content && content !== RAW_MARKDOWN && !isDirty() && editor && editor.setMarkdown) {
+        editor.setMarkdown(content);
+        updateSaveState();
+        updateDirtyIndicator();
+      }
+    } catch {}
+  }
+
+  // Reject a staged proposal: clear the server-side draft and drop the overlay.
+  async function discardProposal() {
+    if (!confirm('Discard the proposed edit for this file? The document returns to its committed version.')) return;
+    try { await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft', { method: 'DELETE' }); } catch {}
+    if (typeof clearDiffOverlay === 'function') clearDiffOverlay();
+    const b = el('discardProposalBtn'); if (b) b.style.display = 'none';
+    // If we're in edit mode the editor still holds the seeded proposal — reset it
+    // to the committed baseline so "returns to its committed version" is true.
+    if (editMode && editor && editor.setMarkdown) {
+      editor.setMarkdown(RAW_MARKDOWN);
+      updateSaveState();
+      updateDirtyIndicator();
+    }
+  }
+
   // ?edit=1 still auto-enters edit mode (convenient for testing).
   if (new URLSearchParams(location.search).get("edit") === "1") {
     if (document.readyState === "loading")
@@ -1518,17 +2055,21 @@ window.tippani = (function () {
     showDiff,
     showConflict,
     updateDirtyIndicator,
+    discardProposal,
     // Original (last-loaded) markdown — the baseline a save diffs against.
     getOriginal: () => RAW_MARKDOWN,
     // For the write path (#48): current editor buffer (or the original if the
     // editor was never opened).
     getMarkdown: () => (editor ? editor.getMarkdown() : RAW_MARKDOWN),
     getEditor: () => editor,
+    // True while the spec editor is open — drives the edit lock heartbeat.
+    isEditing: () => editMode,
   };
 })();
 </script>
 <script>
 const SPEC_PATH = ${JSON.stringify(specPath)};
+const CURRENT_FILE_INDEX = ${JSON.stringify(currentFileIndex)};
 const SOURCE_MAP = ${JSON.stringify(sourceMap)};
 const TOC_DATA = ${JSON.stringify(toc)};
 const THREADS_DATA = ${JSON.stringify(allThreads.map(t => ({
@@ -1582,9 +2123,10 @@ const commentableSelector = '.spec p, .spec li, .spec blockquote, .spec table, .
 const commentableEls = [];
 document.querySelectorAll(commentableSelector).forEach((el, i) => {
   if (el.closest('.commentable')) return;
+  const blockIdx = commentableEls.length;
   el.classList.add('commentable');
   el.style.position = 'relative';
-  el.dataset.blockIdx = commentableEls.length;
+  el.dataset.blockIdx = blockIdx;
   commentableEls.push(el);
   const btn = document.createElement('button');
   btn.className = 'comment-btn';
@@ -1593,7 +2135,7 @@ document.querySelectorAll(commentableSelector).forEach((el, i) => {
   btn.title = 'Add comment';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
-    const mapping = SOURCE_MAP[i];
+    const mapping = SOURCE_MAP[blockIdx];
     commentLine = mapping ? mapping.startLine : 1;
     // Set context in modal
     const heading = findNearestHeading(el);
@@ -1610,15 +2152,31 @@ document.querySelectorAll(commentableSelector).forEach((el, i) => {
 // Place inline comment bubbles on content blocks that have threads
 THREADS_DATA.forEach(td => {
   if (!td.line) return;
-  // Find the commentable block whose source map range contains this line
-  let targetEl = null;
+  const threadEl = document.querySelector('.comment-thread[data-thread-id="' + td.id + '"]');
+  const header = threadEl ? (threadEl.querySelector('.comment-anchor') || threadEl) : null;
+
+  // Thread on another file: header navigates to that file (and focuses the thread).
+  const sameFile = !td.file || !SPEC_PATH || td.file === SPEC_PATH;
+  if (!sameFile) {
+    if (header) {
+      header.style.cursor = 'pointer';
+      header.title = 'Open this file and thread';
+      header.addEventListener('click', () => { location.href = '/goto/thread/' + td.id; });
+    }
+    return;
+  }
+
+  // Find the commentable block whose source-map range contains this line; if the
+  // exact line isn't inside a block (e.g. a heading or blank line), fall back to
+  // the nearest block so the thread still scrolls somewhere sensible.
+  let targetEl = null, bestKey = null, bestDist = Infinity;
   for (const key of Object.keys(SOURCE_MAP)) {
     const sm = SOURCE_MAP[key];
-    if (td.line >= sm.startLine && td.line <= sm.endLine) {
-      targetEl = commentableEls[parseInt(key)];
-      break;
-    }
+    if (td.line >= sm.startLine && td.line <= sm.endLine) { targetEl = commentableEls[parseInt(key)]; break; }
+    const dist = td.line < sm.startLine ? sm.startLine - td.line : td.line - sm.endLine;
+    if (dist < bestDist) { bestDist = dist; bestKey = key; }
   }
+  if (!targetEl && bestKey != null) targetEl = commentableEls[parseInt(bestKey)];
   if (!targetEl) return;
   const bubble = document.createElement('button');
   bubble.className = 'inline-bubble ' + (td.resolved ? 'inline-bubble-resolved' : 'inline-bubble-active');
@@ -1627,7 +2185,6 @@ THREADS_DATA.forEach(td => {
   bubble.setAttribute('aria-label', (td.resolved ? 'Resolved' : 'Active') + ' thread, ' + td.count + ' comment' + (td.count > 1 ? 's' : ''));
   bubble.addEventListener('click', (e) => {
     e.stopPropagation();
-    const threadEl = document.querySelector('.comment-thread[data-thread-id="' + td.id + '"]');
     if (threadEl) {
       threadEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
       threadEl.style.boxShadow = '0 0 0 2px ' + (td.resolved ? 'var(--cp-success)' : 'var(--cp-accent)');
@@ -1635,7 +2192,157 @@ THREADS_DATA.forEach(td => {
     }
   });
   targetEl.appendChild(bubble);
+
+  // Reverse direction: clicking the thread header scrolls the document to the
+  // corresponding content block and flashes it.
+  if (header) {
+    header.style.cursor = 'pointer';
+    header.title = 'Jump to this location in the document';
+    header.addEventListener('click', () => { scrollDocToThread(td.id); });
+  }
 });
+
+// GitHub-style diff overlay for a staged spec edit: for each change hunk, hide
+// the affected rendered block and show a red "Current" box + green "Proposed"
+// box in its place, with a change marker in the right gutter. Server renders
+// the HTML; we only place it against the source-mapped block.
+function clearDiffOverlay() {
+  document.querySelectorAll('.docdiff-widget').forEach((e) => e.remove());
+  document.querySelectorAll('.docdiff-hidden').forEach((e) => { e._diffDest = null; e.classList.remove('docdiff-hidden'); });
+}
+async function applyDiffOverlay() {
+  try {
+    const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/diff');
+    if (!r.ok) return;
+    const data = await r.json();
+    clearDiffOverlay();
+    const hunks = (data && data.hunks) || [];
+    const db0 = document.getElementById('discardProposalBtn');
+    const ps0 = document.getElementById('proposalSource');
+    if (!hunks.length) { if (db0) db0.style.display = 'none'; if (ps0) ps0.style.display = 'none'; return; }
+    for (const h of hunks) {
+      // Find the rendered block overlapping the hunk's original line range;
+      // fall back to the nearest block if the exact line isn't in a block.
+      let target = null, bestKey = null, bestDist = Infinity;
+      for (const key of Object.keys(SOURCE_MAP)) {
+        const sm = SOURCE_MAP[key];
+        if (h.startLine <= sm.endLine && h.endLine >= sm.startLine) { target = commentableEls[parseInt(key)]; break; }
+        const dist = Math.min(Math.abs(sm.startLine - h.endLine), Math.abs(h.startLine - sm.endLine));
+        if (dist < bestDist) { bestDist = dist; bestKey = key; }
+      }
+      if (!target && bestKey != null) target = commentableEls[parseInt(bestKey)];
+
+      const wrap = document.createElement('div');
+      wrap.className = 'docdiff-widget';
+      wrap.dataset.start = h.startLine;
+      wrap.dataset.end = h.endLine;
+      if (h.mergedHtml) {
+        const box = document.createElement('div');
+        box.className = 'docdiff-box docdiff-merged';
+        box.innerHTML = h.mergedHtml;
+        wrap.appendChild(box);
+      } else {
+        if (h.oldHtml) {
+          const oldBox = document.createElement('div');
+          oldBox.className = 'docdiff-box docdiff-old';
+          oldBox.innerHTML = h.oldHtml;
+          wrap.appendChild(oldBox);
+        }
+        if (h.newHtml) {
+          const newBox = document.createElement('div');
+          newBox.className = 'docdiff-box docdiff-new';
+          newBox.innerHTML = h.newHtml;
+          wrap.appendChild(newBox);
+        }
+      }
+      if (target && target.parentNode) {
+        target.classList.add('docdiff-hidden');
+        target.parentNode.insertBefore(wrap, target.nextSibling);
+        target._diffDest = wrap;
+      } else {
+        const spec = document.getElementById('spec-content');
+        if (spec) spec.appendChild(wrap);
+      }
+    }
+    updateDiffMarkers();
+    const db = document.getElementById('discardProposalBtn');
+    if (db) db.style.display = hunks.length ? '' : 'none';
+    const ps = document.getElementById('proposalSource');
+    if (ps) {
+      const who = /user/i.test(data.source || '') ? 'you' : 'the agent';
+      ps.textContent = 'Proposed by ' + who;
+      ps.title = data.updatedAt ? ('Last updated ' + new Date(data.updatedAt).toLocaleString()) : '';
+      ps.style.display = '';
+    }
+  } catch {}
+}
+// Color each diff widget's right-gutter marker: pink for the change tied to the
+// active (focused) thread, gray for the rest. A thread is tied to a hunk when
+// its line falls within the hunk's line range.
+function updateDiffMarkers() {
+  let line = null;
+  const act = THREADS_DATA.find((t) => Number(t.id) === Number(_focusedThreadId));
+  if (act) line = act.line;
+  document.querySelectorAll('.docdiff-widget').forEach((w) => {
+    const s = Number(w.dataset.start), e = Number(w.dataset.end);
+    const on = line != null && line >= s && line <= e;
+    w.classList.toggle('docdiff-active', on);
+  });
+}
+// Scroll the document content to a source line (respecting the diff overlay's
+// replacement widget). In edit mode, scroll the CodeMirror editor to that line.
+function scrollToLine(line) {
+  if (!Number.isFinite(line)) return;
+  const main = document.getElementById('mainContent');
+  if (main && main.classList.contains('editing')) { scrollEditorToLine(line); return; }
+  let target = null, bestKey = null, bestDist = Infinity;
+  for (const key of Object.keys(SOURCE_MAP)) {
+    const sm = SOURCE_MAP[key];
+    if (line >= sm.startLine && line <= sm.endLine) { target = commentableEls[parseInt(key)]; break; }
+    const dist = line < sm.startLine ? sm.startLine - line : line - sm.endLine;
+    if (dist < bestDist) { bestDist = dist; bestKey = key; }
+  }
+  if (!target && bestKey != null) target = commentableEls[parseInt(bestKey)];
+  if (!target) return;
+  const dest = target._diffDest || target;
+  dest.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  dest.style.boxShadow = '0 0 0 2px var(--cp-accent)';
+  setTimeout(() => { dest.style.boxShadow = ''; }, 1500);
+}
+// Scroll the document to a thread's location so opening/focusing a thread syncs the doc.
+function scrollDocToThread(threadId) {
+  const td = THREADS_DATA.find((t) => Number(t.id) === Number(threadId));
+  if (!td || !td.line) return;
+  if (td.file && SPEC_PATH && td.file !== SPEC_PATH) return;
+  scrollToLine(td.line);
+}
+// Edit mode uses a CodeMirror 6 editor showing the markdown source. Its
+// .cm-scroller isn't the overflow element (#mainContent is), so scroll
+// #mainContent to the target line using the line block's geometry.
+function scrollEditorToLine(lineNo) {
+  const ed = window.tippani && window.tippani.getEditor && window.tippani.getEditor();
+  const view = ed && ed.view;
+  const main = document.getElementById('mainContent');
+  if (!view || !view.state || !view.contentDOM || !main || !Number.isFinite(lineNo)) return;
+  try {
+    const n = Math.max(1, Math.min(lineNo, view.state.doc.lines));
+    const pos = view.state.doc.line(n).from;
+    const block = view.lineBlockAt(pos);
+    const lineViewportTop = view.contentDOM.getBoundingClientRect().top + block.top;
+    const mainRect = main.getBoundingClientRect();
+    const delta = lineViewportTop - mainRect.top - main.clientHeight / 2 + block.height / 2;
+    main.scrollBy({ top: delta, behavior: 'smooth' });
+  } catch {}
+}
+applyDiffOverlay();
+
+// open_file deep-link: /file/<idx>?line=N scrolls to that line once the view settles.
+(function () {
+  const q = new URLSearchParams(location.search).get('line');
+  const n = q ? parseInt(q, 10) : NaN;
+  if (Number.isFinite(n)) setTimeout(() => { try { scrollToLine(n); } catch {} }, 400);
+})();
+
 
 function closeModal() {
   document.getElementById('commentModal').classList.remove('active');
@@ -1707,7 +2414,9 @@ function focusThread(threadId, { scroll = true } = {}) {
   if (!el) return false;
   el.classList.add('thread-focused');
   if (scroll) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  if (scroll && typeof scrollDocToThread === 'function') scrollDocToThread(threadId);
   _focusedThreadId = threadId;
+  if (typeof updateDiffMarkers === 'function') updateDiffMarkers();
   return true;
 }
 
@@ -1736,12 +2445,49 @@ function openReply(threadId) {
   if (ta) { ta.focus(); ta.selectionStart = ta.selectionEnd = ta.value.length; }
 }
 
+// Clicking anywhere on a thread makes it the active/focused thread (and repaints
+// the diff-gutter markers so only the active thread's edit shows pink).
+document.addEventListener('click', (e) => {
+  const th = e.target.closest && e.target.closest('.comment-thread');
+  if (!th) return;
+  const id = Number(th.getAttribute('data-thread-id'));
+  if (!Number.isFinite(id)) return;
+  document.querySelectorAll('.comment-thread.thread-focused').forEach((el) => el.classList.remove('thread-focused'));
+  th.classList.add('thread-focused');
+  _focusedThreadId = id;
+  if (typeof updateDiffMarkers === 'function') updateDiffMarkers();
+});
+
 function closeReply(threadId) {
   const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
   if (!form) return;
   form.classList.remove('open');
   const ta = form.querySelector('.reply-textarea');
   if (ta) ta.value = '';
+}
+
+// Discard an agent-staged reply draft: delete it server-side and clear the form.
+async function discardDraft(threadId) {
+  try { await fetch('/api/v1/threads/' + threadId + '/draft', { method: 'DELETE' }); } catch (e) {}
+  const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
+  if (!form) return;
+  const ta = form.querySelector('.reply-textarea');
+  if (ta) { ta.value = ''; delete ta.dataset.externalContent; }
+  const badge = form.querySelector('.reply-external-badge');
+  if (badge) badge.remove();
+  const db = form.querySelector('.reply-btn-discard');
+  if (db) db.style.display = 'none';
+  const cb = form.querySelector('.reply-btn-close');
+  if (cb) cb.style.display = '';
+}
+
+// Toggle a thread's durable "viewed" marker, then reload to reflect the tag.
+async function toggleViewed(threadId, isViewed) {
+  try {
+    const r = await fetch('/api/v1/threads/' + threadId + '/viewed', { method: isViewed ? 'DELETE' : 'POST' });
+    if (r.ok) { location.reload(); }
+    else { const e = await r.json().catch(() => ({})); alert('Failed: ' + (e.error || r.status)); }
+  } catch (e) { alert('Failed: ' + e); }
 }
 
 async function submitReply(threadId) {
@@ -1840,6 +2586,12 @@ document.addEventListener('keydown', (e) => {
   const seenDraftKey = (id, d) => id + ':' + (d ? d.updatedAt : '0');
   const lastDraftSeen = new Map();
 
+  // Spec-edit drafts are presentation-only in the file view: the staged
+  // proposal drives the diff overlay (applyDiffOverlay) and seeds the editor
+  // for accept-&-refine (maybeSeedProposal). It is never auto-committed — the
+  // user commits their refinements via Save, and an agent commits explicit
+  // content via commit_spec. There is no buffer-to-draft mirror.
+
   function applyExternalDraft(threadId, draft) {
     const form = document.querySelector('.reply-form[data-thread-id="' + threadId + '"]');
     if (!form) return;
@@ -1860,6 +2612,10 @@ document.addEventListener('keydown', (e) => {
       badge.textContent = '✨ Draft from external client — edit or post';
       form.insertBefore(badge, form.firstChild);
     }
+    const discardBtn = form.querySelector('.reply-btn-discard');
+    if (discardBtn) discardBtn.style.display = '';
+    const closeBtn = form.querySelector('.reply-btn-close');
+    if (closeBtn) closeBtn.style.display = 'none';
   }
 
   function clearExternalBadge(threadId) {
@@ -1869,6 +2625,10 @@ document.addEventListener('keydown', (e) => {
     if (badge) badge.remove();
     const ta = form.querySelector('.reply-textarea');
     if (ta) delete ta.dataset.externalContent;
+    const discardBtn = form.querySelector('.reply-btn-discard');
+    if (discardBtn) discardBtn.style.display = 'none';
+    const closeBtn = form.querySelector('.reply-btn-close');
+    if (closeBtn) closeBtn.style.display = '';
   }
 
   async function poll() {
@@ -1900,6 +2660,8 @@ document.addEventListener('keydown', (e) => {
             clearExternalBadge(tid);
           }
         }
+        // Apply an externally-staged spec edit for THIS file.
+        try { applyDiffOverlay(); } catch {}
       }
     } catch {}
   }
@@ -1925,6 +2687,23 @@ document.addEventListener('keydown', (e) => {
     lastTouchAt = now;
     fetch('/api/v1/threads/' + tid + '/lock', { method: 'POST' }).catch(() => {});
   });
+})();
+
+// Spec-edit lock heartbeat: while the user is refining a spec in edit mode,
+// touch the server-side file lock every ~3s so a concurrent agent stage_spec_edit
+// gets a 409 instead of swapping the proposal under review. The staged draft is
+// presentation-only — the user's edits live in the editor and are committed by
+// Save, never mirrored back to the draft store.
+(function() {
+  let lastTouch = 0;
+  setInterval(() => {
+    const t = window.tippani;
+    if (!t || typeof t.isEditing !== 'function' || !t.isEditing()) return;
+    const now = Date.now();
+    if (now - lastTouch < 3000) return;
+    lastTouch = now;
+    fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/lock', { method: 'POST' }).catch(() => {});
+  }, 1500);
 })();
 
 async function resolveThread(threadId) {
@@ -2052,6 +2831,11 @@ let _conn, _pr, _prId, _branch, _changedFiles, _otherChangedFiles = [], _cache, 
 const _focus = createFocusStore();
 const _drafts = createDraftStore({ onChange: () => _focus.bumpVersion() });
 const _locks = createLockStore({ ttlMs: 10_000 });
+// Proposed spec-edit drafts, keyed by fileIndex (mirrors the reply-draft
+// store): an external client stages a whole-file markdown proposal the user
+// reviews/edits in the portal editor before committing.
+const _specDrafts = createDraftStore({ onChange: () => _focus.bumpVersion() });
+const _specLocks = createLockStore({ ttlMs: 10_000 });
 const _inflight = createInflightStore();
 // Session token authorises external (non-browser-same-origin) mutations.
 // Generated fresh per process and printed to stdout at startup.
@@ -2076,6 +2860,9 @@ async function main() {
     console.log("  --refresh         Force re-fetch from ADO (ignore cache)");
     console.log("  --offline         Work from cache only, no ADO connection needed");
     console.log("  --save-config     Save --org/--project/--repo to ~/.tippani/config.json");
+    console.log("  --port=<n>        Serve on a specific port (default 3847)");
+    console.log("  --headless        Don't open a browser (agent-only session)");
+    console.log("  --ado-token=<t>   Use a bearer token for ADO (skip PAT / az CLI)");
     console.log("");
     console.log("Examples:");
     console.log("  tippani 992661");
@@ -2109,6 +2896,16 @@ async function main() {
   const forceRefresh = args.includes("--refresh");
   _isOffline = args.includes("--offline");
 
+  // Host integration: --port / --headless / --ado-token (or the
+  // TIPPANI_* env equivalents). Port lets multiple PRs run at once; headless
+  // skips opening a browser (agent-only sessions); ado-token accepts a bearer
+  // (e.g. an Entra token) so no PAT / az CLI is needed.
+  const portArg = args.find(a => a.startsWith("--port="));
+  const portVal = portArg ? parseInt(portArg.split("=")[1], 10) : parseInt(process.env.TIPPANI_PORT || "", 10);
+  if (Number.isFinite(portVal) && portVal > 0) PORT = portVal;
+  const headless = args.includes("--headless") || process.env.TIPPANI_HEADLESS === "1";
+  const adoToken = (args.find(a => a.startsWith("--ado-token="))?.split("=").slice(1).join("=")) || process.env.TIPPANI_ADO_TOKEN || null;
+
   // Try cache first
   _cache = loadCache(_prId);
 
@@ -2128,7 +2925,9 @@ async function main() {
 
     // Establish connection for live actions (comment sync etc.)
     let pat = loadPat();
-    if (pat) {
+    if (adoToken) {
+      _conn = getAdoConnectionBearer(adoToken);
+    } else if (pat) {
       _conn = getAdoConnection(pat);
     } else {
       const token = await getTokenFromAzCli();
@@ -2150,7 +2949,10 @@ async function main() {
     // Need to fetch from ADO
     let pat = loadPat();
 
-    if (pat) {
+    if (adoToken) {
+      console.log("Authenticated via provided ADO token.");
+      _conn = getAdoConnectionBearer(adoToken);
+    } else if (pat) {
       console.log("Using saved PAT...");
       _conn = getAdoConnection(pat);
     } else {
@@ -2264,6 +3066,11 @@ async function main() {
 
   // CSRF protection: reject cross-origin mutations
   app.use((req, res, next) => {
+    // The token-gated control API (/api/v1/*) does its own bearer-token auth
+    // in requireAuth(), so external (non-browser) clients like the MCP shim —
+    // which send Authorization + X-Tippani-Client but no browser Origin — must
+    // be allowed past this browser-origin CSRF gate.
+    if (req.path.startsWith("/api/v1/")) return next();
     if (req.method !== "GET" && req.method !== "HEAD") {
       const origin = req.headers.origin || req.headers.referer || "";
       if (!origin.startsWith(`http://localhost:${PORT}`) && !origin.startsWith(`http://127.0.0.1:${PORT}`)) {
@@ -2278,7 +3085,63 @@ async function main() {
     if (_changedFiles.length === 1) {
       return res.redirect("/file/0");
     }
-    res.type("html").send(buildPickerPage(_pr, _changedFiles));
+    res.type("html").send(buildPickerPage(_pr, _changedFiles, _cache?.threads || []));
+  });
+
+  // Cross-PR feedback triage page (all threads across the PR, no file drill-in).
+  app.get("/feedback", async (_req, res) => {
+    let threads = _cache?.threads || [];
+    if (!_isOffline && _conn) {
+      try {
+        threads = await getCommentThreads(_conn, _prId);
+        if (_cache) { _cache.threads = threads; saveCache(_prId, _cache); }
+      } catch { /* use cached threads */ }
+    }
+    const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
+    res.type("html").send(buildFeedbackPage(_pr, applyPendingResolves(threads), _changedFiles, viewedMap));
+  });
+
+  // Single-thread view + reply page (used for PR-level threads that have no
+  // file anchor, so they still get a "jump in and reply" experience).
+  app.get("/thread/:id", async (req, res) => {
+    let threads = _cache?.threads || [];
+    if (!_isOffline && _conn) {
+      try {
+        threads = await getCommentThreads(_conn, _prId);
+        if (_cache) { _cache.threads = threads; saveCache(_prId, _cache); }
+      } catch { /* use cached threads */ }
+    }
+    const t = (threads || []).find((x) => x.id === Number(req.params.id));
+    if (!t) return res.redirect("/feedback");
+    const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
+    const lastId = (t.comments || []).reduce((m, c) => Math.max(m, c.id || 0), 0);
+    const isViewed = viewedMap[String(t.id)] != null && Number(viewedMap[String(t.id)]) === lastId;
+    res.type("html").send(buildThreadPage(_pr, t, _drafts.get(t.id), isViewed));
+  });
+
+  // Route a thread to the right view: a FILE thread opens in the file view,
+  // focused on that thread (so it shows in the context of the file, with any
+  // staged draft inline); a PR-level thread opens the standalone thread page.
+  app.get("/goto/thread/:id", async (req, res) => {
+    let threads = _cache?.threads || [];
+    if (!_isOffline && _conn) {
+      try {
+        threads = await getCommentThreads(_conn, _prId);
+        if (_cache) { _cache.threads = threads; saveCache(_prId, _cache); }
+      } catch { /* use cached threads */ }
+    }
+    const id = Number(req.params.id);
+    const t = (threads || []).find((x) => x.id === id);
+    if (!t) return res.redirect("/feedback");
+    const filePath = t.threadContext?.filePath || null;
+    const idx = filePath ? (_changedFiles || []).findIndex((f) => f.path === filePath) : -1;
+    if (idx >= 0) {
+      // Focus the thread so the freshly-loaded file page scrolls to it and
+      // fills any staged draft on its first control-API poll.
+      try { _focus.set(id); } catch { /* best effort */ }
+      return res.redirect(`/file/${idx}`);
+    }
+    return res.redirect(`/thread/${id}`);
   });
 
   // Spec view for a specific file
@@ -2306,8 +3169,8 @@ async function main() {
       }
 
       const { metadata, body } = stripFrontmatter(raw);
-      const { toc, sourceMap } = buildSourceMap(body);
-      const specHtml = await renderMarkdown(body);
+      const { toc } = buildSourceMap(body);
+      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema);
 
       // Merge cached threads + pending local comments
       let threads = _cache?.threads || [];
@@ -2330,7 +3193,7 @@ async function main() {
           comments: [{ author: { displayName: 'You (pending sync)' }, publishedDate: p.createdAt, content: p.content, renderedContent: null }]
         }));
 
-      const allThreads = [...threads, ...pendingThreads];
+      const allThreads = applyPendingResolves([...threads, ...pendingThreads]);
 
       // Pre-render comment markdown (always use safe renderer, ignore ADO's renderedContent)
       for (const t of allThreads) {
@@ -2350,12 +3213,36 @@ async function main() {
       if (!_isOffline && _conn) {
         try { baseObjectId = await getBranchTip(_conn, _branch); } catch { /* non-fatal */ }
       }
-      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body, canEdit, baseObjectId));
+      const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
+      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body, canEdit, baseObjectId, viewedMap));
     } catch (e) {
       res.status(500).send("Error rendering spec. Check the server console for details.");
       console.error("Spec render error:", e.message);
     }
   });
+
+  // GitHub-style diff of a staged spec edit for one file. Returns change hunks
+  // (rendered "current" + "proposed" HTML, anchored to original line ranges) so
+  // the file view can overlay red/green boxes without swapping the whole doc.
+  // Registered on the control API (with requireAuth) via the specDiff dep below;
+  // this is the closure that does the work.
+  async function computeSpecDiff(idx) {
+    const files = _changedFiles || [];
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) return { hunks: [] };
+    const draft = _specDrafts.get(idx);
+    if (!draft || !draft.content || draft.source === "user-mirror") return { hunks: [] };
+    const filePath = files[idx].path;
+    let raw = _cache?.fileContents?.[filePath];
+    if (!raw && !_isOffline && _conn) {
+      try { raw = await getFileContent(_conn, filePath, _branch); } catch { /* fall through */ }
+    }
+    if (!raw) return { hunks: [] };
+    const { body } = stripFrontmatter(raw);
+    const { body: draftBody } = stripFrontmatter(draft.content);
+    if (body === draftBody) return { hunks: [] };
+    const hunks = await computeSpecDiffHunks(body, draftBody);
+    return { hunks, source: draft.source || null, updatedAt: draft.updatedAt || null };
+  }
 
   app.post("/api/comment", async (req, res) => {
     const action = addPending(_prId, { type: 'comment', filePath: req.body.filePath, line: req.body.line, content: req.body.content });
@@ -2419,6 +3306,88 @@ async function main() {
       }
     }
     return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+  }
+
+  // Queue a resolve locally (pending) WITHOUT pushing to ADO. Finalize's sync
+  // pushes it via the existing type:'resolve' handler. Mirrors stage_draft.
+  function doStageResolve(threadId) {
+    addPending(_prId, { type: 'resolve', threadId });
+    return { ok: true, status: 200, body: { ok: true, staged: true, synced: false } };
+  }
+  // Thread ids with an unsynced pending resolve (staged, not yet pushed).
+  function pendingResolvedIds() {
+    const set = new Set();
+    try {
+      for (const p of loadPending(_prId)) {
+        if (p.type === 'resolve' && !p.synced) set.add(Number(p.threadId));
+      }
+    } catch { /* best effort */ }
+    return set;
+  }
+  // Overlay staged resolves onto a thread list so the portal shows them as
+  // resolved (pending) before Finalize pushes them.
+  function applyPendingResolves(threads) {
+    const ids = pendingResolvedIds();
+    if (!ids.size) return threads || [];
+    return (threads || []).map((t) => ids.has(Number(t.id)) ? { ...t, status: 2, pendingResolve: true } : t);
+  }
+  // Requires a live connection — this is deliberately NOT queued offline since
+  // the whole point is durable, shared state.
+  async function doSetViewed(threadId, commentId) {
+    if (_isOffline || !_conn) {
+      return { ok: false, status: 503, body: { error: "offline: viewed state needs a live Azure DevOps connection" } };
+    }
+    try {
+      // Strict read: if the read fails, updateViewed propagates and NO write
+      // happens, so a transient failure can't erase other threads' markers.
+      const viewedCommentId = commentId == null ? null : String(commentId);
+      await updateViewed({
+        read: () => readViewedMap(_conn, _prId),
+        write: (map) => setViewedMap(_conn, _prId, map),
+        threadId,
+        commentId,
+      });
+      return { ok: true, status: 200, body: { ok: true, viewedCommentId } };
+    } catch (e) {
+      return { ok: false, status: 502, body: { error: friendlyAdoError(e, "mark viewed") } };
+    }
+  }
+
+
+  // Commit an explicit spec version to the PR source branch, then clear any
+  // staged draft for that file. Commit is ALWAYS explicit: the caller passes the
+  // exact content to commit. The staged draft is review-only (drives the diff
+  // overlay and seeds the editor); it is never committed implicitly, so a stale
+  // proposal can't silently overwrite the user's saved edits.
+  async function doCommitSpec(fileIndex, content, message) {
+    const files = _changedFiles || [];
+    const idx = Number(fileIndex);
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) {
+      return { ok: false, status: 404, body: { error: "file index out of range" } };
+    }
+    const filePath = files[idx].path;
+    const bodyContent = content;
+    if (typeof bodyContent !== "string") {
+      return { ok: false, status: 400, body: { error: "commit_spec requires explicit content (the staged draft is review-only)" } };
+    }
+    const commitMessage = (message && String(message).trim()) || `tippani: update ${filePath.split("/").pop()}`;
+    if (_isOffline || !_conn) {
+      addPending(_prId, { type: "save", filePath, content: bodyContent, message: commitMessage });
+      _specDrafts.delete(idx);
+      return { ok: true, status: 200, body: { ok: true, synced: false, queued: true } };
+    }
+    try {
+      const commitId = await pushFileToBranch(_conn, _branch, filePath, bodyContent, commitMessage);
+      if (_cache && _cache.fileContents) { _cache.fileContents[filePath] = bodyContent; saveCache(_prId, _cache); }
+      _specDrafts.delete(idx);
+      _specLocks.release(idx);
+      return { ok: true, status: 200, body: { ok: true, synced: true, commitId } };
+    } catch (e) {
+      if (isConflict(e)) {
+        return { ok: false, status: 409, body: { conflict: true, error: "branch moved; reload before committing" } };
+      }
+      return { ok: false, status: 502, body: { error: friendlyAdoError(e, "commit spec") } };
+    }
   }
 
   app.post("/api/reply", async (req, res) => {
@@ -2541,6 +3510,29 @@ async function main() {
     locks: _locks,
     getThreads: () => _cache?.threads || [],
     getChangedFiles: () => _changedFiles || [],
+    getTriage: async () => {
+      const threads = applyPendingResolves((_cache?.threads || []).filter((t) => (t.comments?.length || 0) > 0));
+      const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
+      const author = _pr?.createdBy?.displayName || "";
+      const items = threads.map((t) => {
+        const { resolved, waiting, lastBy } = classifyThread(t, author, viewedMap);
+        const file = t.threadContext?.filePath || null;
+        const line = t.threadContext?.rightFileStart?.line || null;
+        const anchor = file ? `${file.split("/").pop()}${line ? ":" + line : ""}` : "PR-level";
+        const last = (t.comments || [])[t.comments.length - 1];
+        const gist = stripMarkdown((last?.content || "").replace(/\s+/g, " ")).slice(0, 160);
+        return { id: t.id, anchor, waiting, resolved, lastBy, gist };
+      });
+      const counts = { total: items.length, needsYou: 0, awaitingReviewer: 0, viewed: 0, fyi: 0, resolved: 0 };
+      for (const it of items) {
+        if (it.waiting === "you") counts.needsYou++;
+        else if (it.waiting === "reviewer") counts.awaitingReviewer++;
+        else if (it.waiting === "viewed") counts.viewed++;
+        else if (it.waiting === "fyi") counts.fyi++;
+        else if (it.waiting === "resolved") counts.resolved++;
+      }
+      return { counts, threads: items };
+    },
     readFileMarkdown: async (filePath) => {
       if (_cache?.fileContents?.[filePath]) return _cache.fileContents[filePath];
       if (!_isOffline && _conn) {
@@ -2553,32 +3545,46 @@ async function main() {
     },
     postReply: doReply,
     resolveThread: doResolve,
+    stageResolve: doStageResolve,
+    setViewed: doSetViewed,
+    specDrafts: _specDrafts,
+    specLocks: _specLocks,
+    commitSpec: doCommitSpec,
+    specDiff: computeSpecDiff,
   });
-
-  // Persist session token to ~/.tippani/session-token so the MCP shim
-  // (and other local helpers) can authenticate without copy/paste.
-  // 0600 perms; overwritten on each startup.
-  try {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-    const tokenPath = path.join(CONFIG_DIR, "session-token");
-    fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
-    // Best-effort cleanup on graceful shutdown so the token doesn't outlive
-    // the server process for any meaningful window.
-    const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} };
-    process.on("exit", cleanup);
-    process.on("SIGINT", () => { cleanup(); process.exit(0); });
-    process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-  } catch (e) {
-    console.warn(`  Warning: could not persist session token: ${e.message}`);
-  }
 
   const server = app.listen(PORT, "127.0.0.1", () => {
     const base = `http://localhost:${PORT}`;
     const url = openIndex !== null ? `${base}/file/${openIndex}` : base;
+    // Persist the session token ONLY after we own the port, so an instance
+    // that fails to bind (EADDRINUSE) never deletes the running server's
+    // token on exit. 0600 perms; overwritten on each successful startup.
+    // Per-PORT filename: a shared path would be clobbered by a second portal
+    // and unlink'd out from under a still-running one under the multi-portal
+    // model. The MCP shim discovers tokens via the per-port registry, not this
+    // file; this file is the external-client affordance.
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+      const tokenPath = path.join(CONFIG_DIR, `session-token-${PORT}`);
+      fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
+      // Register this portal so MCP clients can discover it by PR/port and
+      // adopt it instead of colliding on the port (multi-PR parallelism).
+      writeInstance({ port: PORT, prId: _prId, token: _sessionToken, pid: process.pid, url: base });
+      const cleanup = () => {
+        try { fs.unlinkSync(tokenPath); } catch {}
+        removeInstance(PORT);
+      };
+      process.on("exit", cleanup);
+      process.on("SIGINT", () => { cleanup(); process.exit(0); });
+      process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+    } catch (e) {
+      console.warn(`  Warning: could not persist session token: ${e.message}`);
+    }
     console.log(`\n  Tippani running at ${base}`);
     console.log(`  Control API token: ${_sessionToken}`);
+    console.log(`  Token file: ${path.join(CONFIG_DIR, `session-token-${PORT}`)}`);
     console.log(`  External clients: set Authorization: Bearer <token> and X-Tippani-Client: <name>\n`);
-    open(url);
+    if (!headless) open(url);
   });
   server.on("error", (err) => {
     if (err.code === "EADDRINUSE") {
