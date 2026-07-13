@@ -141,21 +141,32 @@ Comments are written to a local queue first, then synced to ADO. If offline, the
 
 ## AI / MCP integration
 
-Tippani exposes a [Model Context Protocol](https://modelcontextprotocol.io) server so LLM clients (Claude Desktop, GitHub Copilot, etc.) can drive the review workflow — list threads, stage drafts, scroll to comments — while you stay in tippani's browser UI and approve each action. See issue [#42](https://github.com/mavaali/tippani/issues/42) for the design.
+Tippani exposes a [Model Context Protocol](https://modelcontextprotocol.io) server so LLM clients (Claude Desktop, GitHub Copilot, etc.) can drive the review workflow — open a PR, triage threads, stage replies and whole-file spec edits, resolve or mark threads viewed — while you watch in tippani's browser UI and approve each action. The design is tracked in issue [#42](https://github.com/mavaali/tippani/issues/42).
 
-**Setup (Claude Desktop):** add to your `claude_desktop_config.json`:
+**Self-bootstrapping — you don't start tippani first.** The shim launches (or adopts) a review portal per PR on demand via the `open_pr` tool, opening a visible browser window for you while the agent drives it. Multiple PRs can run at once on separate ports, discovered across processes via a per-port registry under `~/.tippani/instances/`.
+
+**Setup (Claude Desktop):** install tippani globally (`npm i -g tippani`), then add to your `claude_desktop_config.json`. The shim authenticates to Azure DevOps with a token you pass in via `TIPPANI_ADO_TOKEN` (an ADO REST/git access token) — it will refuse to start without one. Optionally set `TIPPANI_ADO_AUDIENCE` to have it verify the token's audience on startup:
 
 ```json
 {
   "mcpServers": {
-    "tippani": { "command": "npx", "args": ["-y", "tippani-mcp"] }
+    "tippani": {
+      "command": "tippani-mcp",
+      "env": { "TIPPANI_ADO_TOKEN": "<your ADO access token>" }
+    }
   }
 }
 ```
 
-Start tippani first (it writes a session token to `~/.tippani/session-token` that the MCP shim reads). The shim exposes 8 tools: `list_threads`, `get_thread`, `focus_thread`, `stage_draft`, `clear_draft`, `post_reply`, `resolve_thread`, `get_spec`.
+**Tools (19):**
 
-The underlying HTTP control API is also directly usable for scripts and IDE extensions — see `src/control-api.js`.
+- **Portal & navigation** — `open_pr` (call first), `open_file`, `open_thread`, `show_feedback` (cross-PR triage page).
+- **Reading** — `list_threads`, `get_thread`, `get_spec`, `get_spec_draft`, `triage_summary`; focus with `focus_thread`.
+- **Stage-then-review** — stage locally with `stage_draft`, `stage_spec_edit`, `stage_resolve_thread`; nothing reaches Azure DevOps until you finalize with `post_reply`, `commit_spec`, or `resolve_thread`. `commit_spec` requires explicit content — a staged proposal is review-only and never committed implicitly, so it can't overwrite your own edits. Also `clear_draft`, `clear_spec_edit`, and `mark_viewed` (acknowledge a thread without resolving it).
+
+Staged whole-file edits show up in the portal as a GitHub-style Current/Proposed diff you can accept-and-refine in the editor before committing.
+
+The portal can also run standalone with `--headless` (agent-only, no browser), `--port=<n>` (run several at once), and `--ado-token=<t>` (bearer auth, skipping the PAT / az CLI). The underlying HTTP control API is directly usable for scripts and IDE extensions — see `src/control-api.js`.
 
 ## License
 
