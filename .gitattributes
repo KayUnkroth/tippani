@@ -1,0 +1,6 @@
+# Keep the editor test fixtures LF on every platform. They are stored LF in the
+# repo, but Windows `core.autocrlf=true` checks them out as CRLF — and the
+# byte-identical editor invariant (src/client/invariant.test.mjs) compares the
+# on-disk fixture to the editor's LF output, so a CRLF working copy fails the
+# test spuriously. `eol=lf` forces an LF working copy regardless of autocrlf.
+src/client/fixtures/*.md text eol=lf

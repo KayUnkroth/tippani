@@ -30,6 +30,7 @@ import { renderSpecBody } from "./spec-source-map.js";
 import { isTableBlock, computeTableDiff } from "./table-diff.js";
 import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
+import { reattachFrontmatter } from "./frontmatter.js";
 import {
   decodeConfigValue,
   extOf,
@@ -3443,10 +3444,12 @@ async function main() {
       return { ok: false, status: 404, body: { error: "file index out of range" } };
     }
     const filePath = files[idx].path;
-    const bodyContent = content;
-    if (typeof bodyContent !== "string") {
+    if (typeof content !== "string") {
       return { ok: false, status: 400, body: { error: "commit_spec requires explicit content (the staged draft is review-only)" } };
     }
+    // Re-attach the original YAML frontmatter (stripped from the editor buffer)
+    // so committing an edited spec never drops it (data loss on Learn docs).
+    const bodyContent = reattachFrontmatter(_cache?.fileContents?.[filePath], content);
     const commitMessage = (message && String(message).trim()) || `tippani: update ${filePath.split("/").pop()}`;
     if (_isOffline || !_conn) {
       addPending(_prId, { type: "save", filePath, content: bodyContent, message: commitMessage });
@@ -3484,8 +3487,12 @@ async function main() {
       return res.status(400).json({ ok: false, error: "filePath and content are required" });
     }
     const commitMessage = (message && String(message).trim()) || `tippani: update ${filePath.split("/").pop()}`;
+    // Re-attach the original YAML frontmatter (stripped from the editor buffer)
+    // so saving an edited spec never drops it (data loss on Learn docs). Done
+    // before queuing so the offline queue carries the full content too.
+    const fullContent = reattachFrontmatter(_cache?.fileContents?.[filePath], content);
     // Queue first so a failure/offline never loses the edit.
-    const action = addPending(_prId, { type: "save", filePath, content, message: commitMessage });
+    const action = addPending(_prId, { type: "save", filePath, content: fullContent, message: commitMessage });
 
     if (_isOffline || !_conn) {
       return res.json({ ok: true, synced: false, queued: true, message: "Saved locally (offline) — will push on sync." });
@@ -3493,14 +3500,14 @@ async function main() {
     try {
       // Pass the load-time tip as oldObjectId (#49) — ADO rejects the push if the
       // branch moved underneath the editor (optimistic concurrency).
-      const commitId = await pushFileToBranch(_conn, _branch, filePath, content, commitMessage, baseObjectId || undefined);
+      const commitId = await pushFileToBranch(_conn, _branch, filePath, fullContent, commitMessage, baseObjectId || undefined);
       const pending = loadPending(_prId);
       const idx = pending.findIndex((p) => p.id === action.id);
       if (idx >= 0) pending[idx].synced = true;
       savePending(_prId, pending);
       // Refresh the local cache so a reload shows the saved content.
       if (_cache && _cache.fileContents) {
-        _cache.fileContents[filePath] = content;
+        _cache.fileContents[filePath] = fullContent;
         saveCache(_prId, _cache);
       }
       res.json({ ok: true, synced: true, commitId });
