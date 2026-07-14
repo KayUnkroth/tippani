@@ -341,6 +341,35 @@ async function setViewedMap(conn, prId, map) {
     { "Content-Type": "application/json-patch+json" }, patch, ADO_REPO, prId, ADO_PROJECT);
 }
 
+// Load viewed markers for DISPLAY, distinguishing "genuinely none" from
+// "couldn't read them". The old lenient getViewedMap swallowed a failed read as
+// {} — which renders every thread as unread and looks like the viewed state was
+// lost, when it's actually still in the PR property and just wasn't readable
+// (usually an expired ADO token on a long-lived portal). Callers surface
+// `error` to the user instead of silently showing all-unread.
+async function loadViewedState(conn, prId, isOffline) {
+  if (isOffline || !conn) return { map: {}, error: null };
+  try {
+    return { map: await readViewedMap(conn, prId), error: null };
+  } catch (e) {
+    const auth = /401|unauthor|expired|credential|token/i.test(e?.message || "");
+    return { map: {}, error: auth ? "ADO sign-in expired." : "Couldn't reach Azure DevOps." };
+  }
+}
+
+// Amber banner shown when the viewed markers couldn't be read, so a failed read
+// never silently masquerades as "nothing viewed".
+function viewedWarning(err) {
+  if (!err) return "";
+  return `<div class="viewed-warning" role="alert" style="margin:10px 0;padding:9px 13px;`
+    + `border:1px solid #b8860b;border-radius:8px;`
+    + `background:color-mix(in srgb,#b8860b 15%,transparent);`
+    + `color:var(--cp-text);font-size:13px;line-height:1.45">`
+    + `⚠ <strong>Viewed state couldn't be loaded</strong> (${escHtml(err)}) `
+    + `Your markers are still saved on the pull request — this is a read error, not lost data. `
+    + `Reopen the PR to refresh the connection.</div>`;
+}
+
 // Current tip commit (objectId) of a branch ref like "refs/heads/feature/x".
 async function getBranchTip(conn, branchRef) {
   const gitApi = await conn.getGitApi();
@@ -702,6 +731,35 @@ function stripMarkdown(s) {
     .trim();
 }
 
+// Shared single-tab navigation watcher, injected into EVERY portal page. When
+// an MCP nav tool sets a target via POST /api/v1/nav (single-tab mode), the
+// control API bumps navSeq; this steers the one open tab to the new page.
+// sessionStorage survives same-tab reloads so it fires once per bump and never
+// yanks the user back after a manual navigation. Same-origin, so the browser's
+// fetch to /api/v1/state is auth-exempt like the other in-page polls.
+const NAV_WATCHER = `<script>
+(function(){
+  async function navPoll(){
+    try {
+      const r = await fetch('/api/v1/state');
+      if (!r.ok) return;
+      const s = await r.json();
+      if (!s || !s.navUrl || !Number.isFinite(s.navSeq)) return;
+      var last = 0;
+      try { last = Number(sessionStorage.getItem('tippaniNavSeq')) || 0; } catch (e) {}
+      if (s.navSeq <= last) return;
+      try { sessionStorage.setItem('tippaniNavSeq', String(s.navSeq)); } catch (e) {}
+      var here = location.pathname + location.search;
+      var target = null;
+      try { var u = new URL(s.navUrl, location.origin); target = u.pathname + u.search; } catch (e) {}
+      if (target && target !== here) { location.href = s.navUrl; }
+    } catch (e) {}
+  }
+  setInterval(navPoll, 1500);
+  navPoll();
+})();
+<\/script>`;
+
 // --- File picker landing page ---
 function buildPickerPage(pr, changedFiles, threads = []) {
   const prTitle = escHtml(pr.title || "Pull Request");
@@ -806,6 +864,7 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
       ${fileCardsHtml}
     </div>
   </div>
+${NAV_WATCHER}
 </body>
 </html>`;
 }
@@ -834,7 +893,7 @@ function classifyThread(t, authorName, viewedMap = {}) {
   return { resolved, system, lastBy, lastId, viewed, waiting };
 }
 
-function buildFeedbackPage(pr, threads, changedFiles, viewedMap = {}) {
+function buildFeedbackPage(pr, threads, changedFiles, viewedMap = {}, viewedError = null) {
   const prId = pr.pullRequestId;
   const prTitle = escHtml(pr.title || "Pull Request");
   const author = pr.createdBy?.displayName || "";
@@ -956,16 +1015,18 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
       <a class="back" href="/">← PR overview</a>
     </div>
     <div class="fb-sub">PR #${prId} · ${openCount} open thread${openCount !== 1 ? "s" : ""}${needCount ? ` · ${needCount} need${needCount !== 1 ? "" : "s"} your reply` : ""}</div>
+    ${viewedWarning(viewedError)}
     <div class="fb-list">
       ${cardsHtml || '<div class="fb-empty">No comment threads on this PR.</div>'}
     </div>
   </div>
+${NAV_WATCHER}
 </body>
 </html>`;
 }
 
 // --- Single-thread view + reply page (PR-level threads) ---
-function buildThreadPage(pr, thread, draft, isViewed = false) {
+function buildThreadPage(pr, thread, draft, isViewed = false, viewedError = null) {
   const prId = pr.pullRequestId;
   const tid = thread.id;
   const file = thread.threadContext?.filePath || null;
@@ -1035,6 +1096,7 @@ textarea:focus { outline: 2px solid var(--cp-accent); outline-offset: 1px; }
       <a class="back" href="/feedback">\u2190 Feedback</a>
     </div>
     <div class="th-sub">PR #${prId} \u00b7 thread ${tid}${resolved ? " \u00b7 resolved" : ""}${isViewed ? " \u00b7 viewed" : ""}</div>
+    ${viewedWarning(viewedError)}
     ${commentsHtml}
     <div class="reply-wrap">
       <div class="reply-label">Your reply <span class="draft-badge" id="draftBadge">staged by agent</span></div>
@@ -1091,6 +1153,7 @@ textarea:focus { outline: 2px solid var(--cp-accent); outline-offset: 1px; }
   }
   setInterval(poll, 1500);
 <\/script>
+${NAV_WATCHER}
 </body>
 </html>`;
 }
@@ -2820,12 +2883,25 @@ setInterval(updateSyncStatus, 30000);
   handleRight.addEventListener('mousedown', startDrag(handleRight, sidebarRight, 'right'));
 })();
 <\/script>
+${NAV_WATCHER}
 </body>
 </html>`;
 }
 
 // --- Module-level state ---
 let _conn, _pr, _prId, _branch, _changedFiles, _otherChangedFiles = [], _cache, _isOffline, _canEdit = false;
+let _adoToken = null;
+
+// Swap the live ADO bearer token at runtime. Coforce is the token authority and
+// pushes a freshly-minted token here (POST /api/v1/ado-token) before the old one
+// expires, so a long-lived portal never makes ADO calls with a stale token.
+// Rebuilds the connection so every subsequent ADO call uses the new bearer.
+function applyAdoToken(token) {
+  if (typeof token !== "string" || !token) return false;
+  _adoToken = token;
+  _conn = getAdoConnectionBearer(token);
+  return true;
+}
 
 // Control API state (#42 Phase 1). All in-memory, ephemeral by design.
 const _focus = createFocusStore();
@@ -3097,8 +3173,8 @@ async function main() {
         if (_cache) { _cache.threads = threads; saveCache(_prId, _cache); }
       } catch { /* use cached threads */ }
     }
-    const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
-    res.type("html").send(buildFeedbackPage(_pr, applyPendingResolves(threads), _changedFiles, viewedMap));
+    const { map: viewedMap, error: viewedError } = await loadViewedState(_conn, _prId, _isOffline);
+    res.type("html").send(buildFeedbackPage(_pr, applyPendingResolves(threads), _changedFiles, viewedMap, viewedError));
   });
 
   // Single-thread view + reply page (used for PR-level threads that have no
@@ -3113,10 +3189,10 @@ async function main() {
     }
     const t = (threads || []).find((x) => x.id === Number(req.params.id));
     if (!t) return res.redirect("/feedback");
-    const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
+    const { map: viewedMap, error: viewedError } = await loadViewedState(_conn, _prId, _isOffline);
     const lastId = (t.comments || []).reduce((m, c) => Math.max(m, c.id || 0), 0);
     const isViewed = viewedMap[String(t.id)] != null && Number(viewedMap[String(t.id)]) === lastId;
-    res.type("html").send(buildThreadPage(_pr, t, _drafts.get(t.id), isViewed));
+    res.type("html").send(buildThreadPage(_pr, t, _drafts.get(t.id), isViewed, viewedError));
   });
 
   // Route a thread to the right view: a FILE thread opens in the file view,
@@ -3505,6 +3581,7 @@ async function main() {
   registerControlApi(app, {
     port: PORT,
     sessionToken: _sessionToken,
+    setAdoToken: applyAdoToken,
     focus: _focus,
     drafts: _drafts,
     locks: _locks,
@@ -3569,7 +3646,7 @@ async function main() {
       fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
       // Register this portal so MCP clients can discover it by PR/port and
       // adopt it instead of colliding on the port (multi-PR parallelism).
-      writeInstance({ port: PORT, prId: _prId, token: _sessionToken, pid: process.pid, url: base });
+      writeInstance({ port: PORT, prId: _prId, token: _sessionToken, pid: process.pid, url: base, shimPid: Number(process.env.TIPPANI_SHIM_PID) || null });
       const cleanup = () => {
         try { fs.unlinkSync(tokenPath); } catch {}
         removeInstance(PORT);
@@ -3577,6 +3654,12 @@ async function main() {
       process.on("exit", cleanup);
       process.on("SIGINT", () => { cleanup(); process.exit(0); });
       process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+      // Spawned by the shim over an IPC pipe (stdio ipc). When the shim dies for
+      // ANY reason, the OS closes the pipe and this fires — so a portal never
+      // outlives the shim that owns it. No timer, no polling.
+      if (process.channel) {
+        process.on("disconnect", () => { cleanup(); process.exit(0); });
+      }
     } catch (e) {
       console.warn(`  Warning: could not persist session token: ${e.message}`);
     }

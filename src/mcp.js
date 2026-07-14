@@ -33,7 +33,7 @@ if (!adoCheck.ok) {
   process.exit(1);
 }
 
-const session = createPortalSession();
+const session = createPortalSession({ reapOnStart: true });
 const http = createHttpClient({
   getBaseUrl: session.getBaseUrl,
   getToken: session.getToken,
@@ -67,8 +67,20 @@ for (const t of tools) {
   );
 }
 
-process.on("SIGINT", () => { session.stop(); process.exit(0); });
-process.on("SIGTERM", () => { session.stop(); process.exit(0); });
+// Tear our portals down however the host shuts us down. MCP hosts typically
+// stop a stdio server by CLOSING stdin (not by sending a signal), so listening
+// only for SIGINT/SIGTERM leaked every portal we owned. Cover all paths:
+// signals, normal exit, and stdin EOF/close.
+let stopped = false;
+function shutdown(exit) {
+  if (!stopped) { stopped = true; try { session.stop(); } catch {} }
+  if (exit) process.exit(0);
+}
+process.on("SIGINT", () => shutdown(true));
+process.on("SIGTERM", () => shutdown(true));
+process.on("exit", () => shutdown(false));
+process.stdin.on("end", () => shutdown(true));
+process.stdin.on("close", () => shutdown(true));
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

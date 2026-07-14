@@ -8,7 +8,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "tippani-reg-"));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 
-const { writeInstance, removeInstance, listInstances, registryDir } =
+const { writeInstance, removeInstance, listInstances, registryDir, isPidAlive, reapInstances } =
   await import("./portal-registry.js");
 
 let pass = 0, fail = 0;
@@ -41,6 +41,43 @@ try {
 
   removeInstance(3847); // idempotent
   check("remove is idempotent", listInstances().length === 1);
+
+  // --- shimPid persistence ---
+  writeInstance({ port: 3900, prId: 5, token: "t", pid: 2001, shimPid: 4242 });
+  check("writes shimPid", listInstances().find((i) => i.port === 3900).shimPid === 4242);
+  writeInstance({ port: 3901, prId: 6, token: "t", pid: 2002 });
+  check("shimPid defaults to null", listInstances().find((i) => i.port === 3901).shimPid === null);
+  removeInstance(3900); removeInstance(3901);
+
+  // --- isPidAlive ---
+  check("isPidAlive: self is alive", isPidAlive(process.pid) === true);
+  check("isPidAlive: garbage pid is dead", isPidAlive(2147483646) === false);
+  check("isPidAlive: 0/null/NaN are dead", !isPidAlive(0) && !isPidAlive(null) && !isPidAlive("x"));
+
+  // --- reapInstances (pure, injected) ---
+  {
+    const killed = [];
+    const removed = [];
+    const insts = [
+      { port: 4000, pid: 100, shimPid: null },  // portal dead -> drop file
+      { port: 4001, pid: 200, shimPid: 201 },   // portal alive, shim dead -> kill+drop
+      { port: 4002, pid: 300, shimPid: 301 },   // portal alive, shim alive -> keep
+      { port: 4003, pid: 400, shimPid: null },  // portal alive, no shim -> keep (legacy)
+    ];
+    const alive = new Set([200, 300, 301, 400]); // 100 dead, 201 dead
+    const reaped = reapInstances({
+      listInstancesFn: () => insts,
+      isPidAliveFn: (pid) => alive.has(Number(pid)),
+      killPidFn: (pid) => { killed.push(Number(pid)); return true; },
+      removeInstanceFn: (port) => { removed.push(Number(port)); },
+    });
+    check("reap: drops dead-portal file", removed.includes(4000) && reaped.find((r) => r.port === 4000)?.reason === "dead-portal");
+    check("reap: kills orphan portal (shim dead)", killed.includes(200) && removed.includes(4001));
+    check("reap: orphan reason recorded", reaped.find((r) => r.port === 4001)?.reason === "orphaned");
+    check("reap: keeps portal with live shim", !killed.includes(300) && !removed.includes(4002));
+    check("reap: keeps legacy portal with no shimPid", !killed.includes(400) && !removed.includes(4003));
+    check("reap: reaped exactly two", reaped.length === 2);
+  }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}
   console.log(`\nportal-registry.test: ${pass} passed, ${fail} failed`);

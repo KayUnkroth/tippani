@@ -9,6 +9,7 @@ export function registerControlApi(app, deps) {
   const {
     port,
     sessionToken,
+    setAdoToken,        // (token) => bool — swap the live ADO bearer (Coforce token push, optional)
     focus,
     drafts,
     locks,
@@ -154,6 +155,36 @@ export function registerControlApi(app, deps) {
     res.json({ ok: true, focus: next });
   });
 
+  // POST /api/v1/nav { path } — single-tab navigation. Records a navigation
+  // target the browser's open tab should move to (the client poll reads navUrl
+  // + navSeq from /api/v1/state and does window.location = navUrl once per bump).
+  // Separate-tabs mode never calls this; it opens a fresh browser tab instead.
+  app.post("/api/v1/nav", requireAuth({ mutation: true }), (req, res) => {
+    const { path } = req.body || {};
+    if (typeof path !== "string" || !path) {
+      return res.status(400).json({ error: "path (non-empty string) required" });
+    }
+    const nav = focus.setNav(path);
+    res.json({ ok: true, nav });
+  });
+
+  // POST /api/v1/ado-token { token } — Coforce pushes a freshly-minted ADO
+  // bearer here before the old one expires, so a long-lived portal never makes
+  // ADO calls with a stale token. Swaps the connection in place. The token is
+  // never echoed back.
+  app.post("/api/v1/ado-token", requireAuth({ mutation: true }), (req, res) => {
+    const { token } = req.body || {};
+    if (typeof token !== "string" || !token) {
+      return res.status(400).json({ error: "token (non-empty string) required" });
+    }
+    if (typeof setAdoToken !== "function") {
+      return res.status(501).json({ error: "ado-token swap not wired in this deployment" });
+    }
+    const ok = setAdoToken(token);
+    if (!ok) return res.status(400).json({ error: "token rejected" });
+    res.json({ ok: true });
+  });
+
   app.get("/api/v1/specs/:fileIndex", requireAuth(), async (req, res) => {
     const files = getChangedFiles() || [];
     const idx = parseInt(req.params.fileIndex);
@@ -253,6 +284,8 @@ export function registerControlApi(app, deps) {
     res.json({
       focusedThreadId: f.focusedThreadId,
       version: f.version,
+      navUrl: f.navUrl,
+      navSeq: f.navSeq,
       drafts: drafts.list(),
       specDrafts: specDrafts ? specDrafts.list() : {},
     });

@@ -19,7 +19,7 @@ import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
 import openDefault from "open";
-import { listInstances } from "./portal-registry.js";
+import { listInstances, removeInstance, reapInstances } from "./portal-registry.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORTAL_ENTRY = path.join(HERE, "index.js");
@@ -54,7 +54,19 @@ export function createPortalSession({
   openBrowserFn = (url) => openDefault(url),
   readyTimeoutMs = Number(process.env.TIPPANI_READY_TIMEOUT_MS) || 60_000,
   isPortFreeFn = defaultIsPortFree,
+  // When true, reap orphaned/stale portals from the registry at startup (dead
+  // portal files, and live portals whose spawning shim is gone). The shim turns
+  // this on; tests leave it off so they never touch the real registry.
+  reapOnStart = false,
+  reapFn = reapInstances,
+  // Navigation mode. Default (false) = single tab: nav tools steer the one open
+  // browser tab in place. true = separate tabs: each nav opens a new browser tab.
+  // Opt in via TIPPANI_SEPARATE_TABS=1.
+  separateTabs = process.env.TIPPANI_SEPARATE_TABS === "1" ||
+    process.env.TIPPANI_SEPARATE_TABS === "true",
 } = {}) {
+  // Backstop cleanup of portals leaked by past crashes / hard-killed shims.
+  if (reapOnStart) { try { reapFn(); } catch { /* best effort */ } }
   // active = the portal we're currently bound to:
   //   { port, url, token, prId, owned }  (owned = we launched it)
   let active = null;
@@ -164,8 +176,17 @@ export function createPortalSession({
 
     const env = { ...process.env };
     if (adoToken) env.TIPPANI_ADO_TOKEN = adoToken;
+    // Tell the portal who spawned it so startup reaping can detect orphans.
+    env.TIPPANI_SHIM_PID = String(process.pid);
 
-    const proc = spawnFn(nodeBin, args, { env, stdio: "ignore", detached: false });
+    // stdio ipc gives the portal a pipe tied to THIS shim's lifetime: when the
+    // shim dies (any cause), the OS closes it and the portal's `disconnect`
+    // handler exits it. That's what stops portals outliving the shim.
+    const proc = spawnFn(nodeBin, args, {
+      env,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      detached: false,
+    });
     let exited = false;
     proc.on("exit", () => { exited = true; });
 
@@ -215,6 +236,8 @@ export function createPortalSession({
     getToken,
     getBaseUrl,
     stop,
+    // Navigation mode (see createPortalSession options). Read by the nav tools.
+    separateTabs: !!separateTabs,
     // Open a specific portal path in the user's browser (e.g. "/thread/123").
     openUrl: (path) => {
       const base = (getBaseUrl() || "").replace(/\/+$/, "");

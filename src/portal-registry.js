@@ -20,7 +20,7 @@ export function registryDir() {
 }
 
 /** Write (or overwrite) this portal's registry entry, keyed by port. */
-export function writeInstance({ port, prId, token, pid, url }) {
+export function writeInstance({ port, prId, token, pid, url, shimPid }) {
   try {
     fs.mkdirSync(REG_DIR, { recursive: true, mode: 0o700 });
     const entry = {
@@ -28,6 +28,9 @@ export function writeInstance({ port, prId, token, pid, url }) {
       prId: Number(prId),
       token,
       pid: pid ?? process.pid,
+      // The shim process that spawned this portal, if any. Startup reaping kills
+      // a live portal whose spawning shim is gone (see reapInstances).
+      shimPid: shimPid == null ? null : Number(shimPid),
       url: url || `http://localhost:${port}`,
       startedAt: Date.now(),
     };
@@ -63,4 +66,50 @@ export function listInstances() {
   } catch {
     return [];
   }
+}
+
+/**
+ * Is a process alive? Uses signal 0 (existence probe, sends nothing).
+ * EPERM means the process exists but isn't ours — still alive.
+ */
+export function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!n || !Number.isFinite(n)) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === "EPERM";
+  }
+}
+
+/**
+ * Startup backstop for orphaned portals. For every registry entry:
+ *   - portal pid dead        → drop the stale file.
+ *   - portal alive, but the shim that spawned it is gone → kill the portal and
+ *     drop the file (it can never be reached again — its owner is dead).
+ *   - portal alive with a live (or unknown) shim → leave it.
+ * Pure + fully injectable so it can be unit-tested without touching real
+ * processes or the real registry dir.
+ */
+export function reapInstances({
+  listInstancesFn = listInstances,
+  isPidAliveFn = isPidAlive,
+  killPidFn = (pid) => { try { process.kill(Number(pid)); return true; } catch { return false; } },
+  removeInstanceFn = removeInstance,
+} = {}) {
+  const reaped = [];
+  for (const inst of listInstancesFn()) {
+    if (!isPidAliveFn(inst.pid)) {
+      removeInstanceFn(inst.port);
+      reaped.push({ port: inst.port, reason: "dead-portal" });
+      continue;
+    }
+    if (inst.shimPid != null && !isPidAliveFn(inst.shimPid)) {
+      killPidFn(inst.pid);
+      removeInstanceFn(inst.port);
+      reaped.push({ port: inst.port, reason: "orphaned" });
+    }
+  }
+  return reaped;
 }

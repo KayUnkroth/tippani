@@ -39,6 +39,27 @@ function check(name, cond) {
   let threw = false;
   try { f.set("not-a-number"); } catch { threw = true; }
   check("focus: rejects non-numeric id", threw);
+
+  // --- nav (single-tab navigation) ---
+  const n0 = f.get();
+  check("nav: starts null", n0.navUrl === null);
+  check("nav: seq starts at 0", n0.navSeq === 0);
+
+  const v0 = f.get().version;
+  const n1 = f.setNav("/goto/thread/7");
+  check("nav: setNav records url", n1.navUrl === "/goto/thread/7");
+  check("nav: setNav bumps navSeq", n1.navSeq === 1);
+  check("nav: setNav bumps version", n1.version === v0 + 1);
+  check("nav: get() exposes navUrl", f.get().navUrl === "/goto/thread/7");
+
+  // Same path again still fires (monotonic) so a repeat nav re-triggers.
+  const n2 = f.setNav("/goto/thread/7");
+  check("nav: repeat same path bumps navSeq", n2.navSeq === 2);
+  check("nav: repeat same path bumps version", n2.version === n1.version + 1);
+
+  let navThrew = false;
+  try { f.setNav(""); } catch { navThrew = true; }
+  check("nav: rejects empty url", navThrew);
 }
 
 // --- DraftStore ---

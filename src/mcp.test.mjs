@@ -130,12 +130,13 @@ try {
     check("list_threads: focus reported", r.focus.focusedThreadId === null);
   }
 
-  // --- open_file ---
+  // --- open_file (single-tab default: steers the open tab via /api/v1/nav) ---
   {
     const r1 = await byName.open_file.handler({ fileIndex: 2 });
-    check("open_file: opens /file/<idx>", r1.opened === "/file/2" && openUrlCalls.includes("/file/2"));
+    check("open_file: opens /file/<idx>", r1.opened === "/file/2" && focus.get().navUrl === "/file/2");
+    check("open_file: single-tab does NOT open a new browser tab", !openUrlCalls.includes("/file/2"));
     const r2 = await byName.open_file.handler({ fileIndex: 0, line: 47 });
-    check("open_file: appends ?line when given", r2.opened === "/file/0?line=47" && openUrlCalls.includes("/file/0?line=47"));
+    check("open_file: appends ?line when given", r2.opened === "/file/0?line=47" && focus.get().navUrl === "/file/0?line=47");
   }
 
   // --- stage_resolve_thread ---
@@ -225,10 +226,28 @@ try {
       r2.ok === true && viewedCalls.some((c) => c.threadId === 202 && c.commentId === null));
   }
 
-  // --- open_thread ---
+  // --- open_thread (single-tab default) ---
   {
     const r = await byName.open_thread.handler({ threadId: 14974588 });
-    check("open_thread: opens /goto/thread url in browser", r.ok === true && openUrlCalls.includes("/goto/thread/14974588"));
+    check("open_thread: steers tab to /goto/thread url", r.ok === true && focus.get().navUrl === "/goto/thread/14974588");
+    check("open_thread: single-tab does NOT open a new browser tab", !openUrlCalls.includes("/goto/thread/14974588"));
+  }
+
+  // --- separate-tabs mode: nav tools open a fresh browser tab instead ---
+  {
+    const tabUrlCalls = [];
+    const tabSession = {
+      ensurePortal: async () => ({ reused: false }),
+      openUrl: async (path) => { tabUrlCalls.push(path); },
+      separateTabs: true,
+    };
+    const tabTools = Object.fromEntries(buildTools(http, tabSession).map((t) => [t.name, t]));
+    await tabTools.open_thread.handler({ threadId: 42 });
+    await tabTools.open_file.handler({ fileIndex: 1 });
+    await tabTools.show_feedback.handler({});
+    check("separate-tabs: open_thread opens a new tab", tabUrlCalls.includes("/goto/thread/42"));
+    check("separate-tabs: open_file opens a new tab", tabUrlCalls.includes("/file/1"));
+    check("separate-tabs: show_feedback opens a new tab", tabUrlCalls.includes("/feedback"));
   }
 
   // --- get_spec ---
