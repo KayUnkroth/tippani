@@ -59,6 +59,11 @@ export function createPortalSession({
   // this on; tests leave it off so they never touch the real registry.
   reapOnStart = false,
   reapFn = reapInstances,
+  // Remove a portal's registry entry (injectable for tests). stop() calls this
+  // for each owned portal because on Windows proc.kill() is TerminateProcess (a
+  // hard kill) — the portal's own exit handler never runs, so the shim must
+  // delete the entry itself or it leaks as a stale "zombie" file.
+  removeInstanceFn = removeInstance,
   // Navigation mode. Default (false) = single tab: nav tools steer the one open
   // browser tab in place. true = separate tabs: each nav opens a new browser tab.
   // Opt in via TIPPANI_SEPARATE_TABS=1.
@@ -222,11 +227,15 @@ export function createPortalSession({
 
   function stop() {
     // Tear down every portal WE launched (adopted portals belong to others).
-    // Snapshot + clear first so each child's exit handler (which deletes its
-    // own entry) doesn't perturb the iteration.
-    const procs = [...ownedChildren.values()];
+    // Snapshot + clear first so nothing perturbs iteration. On Windows proc.kill()
+    // is TerminateProcess (a hard kill), so the portal's own exit handler never
+    // runs to delete its registry entry — the shim removes it here itself, then
+    // disconnects (graceful ipc close) and kills the child as a fallback.
+    const entries = [...ownedChildren.entries()];
     ownedChildren.clear();
-    for (const proc of procs) {
+    for (const [port, proc] of entries) {
+      try { removeInstanceFn(port); } catch {}
+      try { if (proc.connected) proc.disconnect(); } catch {}
       try { proc.kill(); } catch {}
     }
   }

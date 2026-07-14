@@ -1159,7 +1159,7 @@ ${NAV_WATCHER}
 }
 
 // --- Spec review page (3-column layout) ---
-function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown, canEdit, baseObjectId, viewedMap = {}) {
+function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap, changedFiles, currentFileIndex, rawMarkdown, canEdit, baseObjectId, viewedMap = {}, viewedError = null) {
   const tocHtml = toc
     .map(
       (t) =>
@@ -1600,6 +1600,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
         <button class="fmt-btn" id="fmtOutdent" title="Outdent (⇧Tab)" aria-label="Outdent" tabindex="-1">⇤</button>
       </span>
     </div>` : ""}
+    ${viewedWarning(viewedError)}
     <div class="spec" id="spec-content">
       ${specHtml}
     </div>
@@ -3289,8 +3290,8 @@ async function main() {
       if (!_isOffline && _conn) {
         try { baseObjectId = await getBranchTip(_conn, _branch); } catch { /* non-fatal */ }
       }
-      const viewedMap = (!_isOffline && _conn) ? await getViewedMap(_conn, _prId) : {};
-      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body, canEdit, baseObjectId, viewedMap));
+      const { map: viewedMap, error: viewedError } = await loadViewedState(_conn, _prId, _isOffline);
+      res.type("html").send(buildSpecPage(specHtml, toc, metadata, _pr, allThreads, filePath, sourceMap, _changedFiles, idx, body, canEdit, baseObjectId, viewedMap, viewedError));
     } catch (e) {
       res.status(500).send("Error rendering spec. Check the server console for details.");
       console.error("Spec render error:", e.message);
