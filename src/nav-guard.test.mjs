@@ -1,5 +1,5 @@
 // Tests for the NAV_WATCHER steering guard (single-tab nav).
-import { navSkipsBarePathClobber, navShouldNavigate } from "./nav-guard.js";
+import { navSkipsBarePathClobber, navShouldNavigate, navTarget } from "./nav-guard.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) { if (cond) pass++; else { fail++; console.error("  FAIL: " + name); } }
@@ -50,6 +50,21 @@ try {
     navSkipsBarePathClobber("?edit=1", "/file/0", "/file/1", "") === false);
   check("clobber-guard: target carries its own query -> false",
     navSkipsBarePathClobber("?edit=1", "/file/0", "/file/0", "?line=5") === false);
+
+  // navTarget: the resolved same-origin path the watcher actually navigates to
+  // (never the raw navUrl), or null when off-origin/malformed.
+  check("navTarget: relative path -> same-origin path",
+    navTarget("/file/0?edit=1", ORIGIN) === "/file/0?edit=1");
+  check("navTarget: same-origin absolute -> path only",
+    navTarget(ORIGIN + "/file/0#h", ORIGIN) === "/file/0#h");
+  check("navTarget: foreign absolute -> null",
+    navTarget("https://evil.example/x", ORIGIN) === null);
+  check("navTarget: javascript: -> null",
+    navTarget("javascript:alert(1)", ORIGIN) === null);
+  check("navTarget: protocol-relative //host -> null",
+    navTarget("//evil.example/x", ORIGIN) === null);
+  check("navTarget: malformed -> null",
+    navTarget("http://[::bad", ORIGIN) === null);
 } catch (e) {
   fail++;
   console.error("UNEXPECTED THROW:", e && e.stack);

@@ -6,7 +6,7 @@
 // input.
 
 import { EventEmitter } from "events";
-import { createPortalSession, openInBrowser } from "./portal-launcher.js";
+import { createPortalSession, openInBrowser, buildOpenArgv } from "./portal-launcher.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -203,14 +203,44 @@ try {
   {
     let spawned = null;
     const res = await openInBrowser("http://localhost:3848/file/0", {
-      openCmd: "vsc-open {url}", spawnFn: (cmd) => { spawned = cmd; return { unref() {} }; }, openFn: () => { throw new Error("should not open externally"); },
+      openCmd: "vsc-open {url}", spawnFn: (bin, args, opts) => { spawned = { bin, args, opts }; return { unref() {} }; }, openFn: () => { throw new Error("should not open externally"); },
     });
-    check("open: runs host cmd with {url} substituted", res.via === "cmd" && spawned === "vsc-open http://localhost:3848/file/0");
+    check("open: runs host cmd with {url} as a discrete argv element",
+      res.via === "cmd" && spawned.bin === "vsc-open" &&
+      spawned.args.length === 1 && spawned.args[0] === "http://localhost:3848/file/0");
+    check("open: never uses a shell", spawned.opts && spawned.opts.shell !== true);
+    check("open: returns argv, not a shell string",
+      Array.isArray(res.argv) && res.argv.join(" ") === "vsc-open http://localhost:3848/file/0");
   }
   {
     let spawned = null;
-    await openInBrowser("http://x/y", { openCmd: "myopen", spawnFn: (cmd) => { spawned = cmd; return { unref() {} }; }, openFn: () => {} });
-    check("open: appends URL when no {url} placeholder", spawned === "myopen http://x/y");
+    await openInBrowser("http://x/y", { openCmd: "myopen", spawnFn: (bin, args) => { spawned = { bin, args }; return { unref() {} }; }, openFn: () => {} });
+    check("open: appends URL as its own argv element when no {url}",
+      spawned.bin === "myopen" && spawned.args.length === 1 && spawned.args[0] === "http://x/y");
+  }
+  // Command-injection guard: a URL carrying shell metacharacters must stay ONE
+  // inert argv element — never split, never shell-interpreted.
+  {
+    let spawned = null;
+    const evil = "http://localhost:3847/file/0?line=1;rm -rf ~ $(id) `whoami`";
+    await openInBrowser(evil, { openCmd: "vsc-open {url}", spawnFn: (bin, args, opts) => { spawned = { bin, args, opts }; return { unref() {} }; }, openFn: () => {} });
+    check("open: malicious URL stays a single argv element",
+      spawned.bin === "vsc-open" && spawned.args.length === 1 && spawned.args[0] === evil);
+    check("open: malicious URL never spawns a shell", spawned.opts.shell !== true);
+  }
+  // buildOpenArgv: quote-aware tokenization + injection-proof substitution.
+  {
+    check("buildOpenArgv: substitutes {url} as its own element",
+      JSON.stringify(buildOpenArgv("code --open-url {url}", "http://h/p?a=1;b")) ===
+      JSON.stringify(["code", "--open-url", "http://h/p?a=1;b"]));
+    check("buildOpenArgv: respects quoted args with spaces",
+      JSON.stringify(buildOpenArgv('open -a "Google Chrome" {url}', "http://h")) ===
+      JSON.stringify(["open", "-a", "Google Chrome", "http://h"]));
+    check("buildOpenArgv: appends URL when no placeholder",
+      JSON.stringify(buildOpenArgv("myopen", "http://h")) === JSON.stringify(["myopen", "http://h"]));
+    check("buildOpenArgv: injection chars in URL stay one element",
+      JSON.stringify(buildOpenArgv("x {url}", "a b; rm -rf ~ && echo pwned")) ===
+      JSON.stringify(["x", "a b; rm -rf ~ && echo pwned"]));
   }
 } catch (e) {
   // A thrown block used to be masked by the bare try/finally + process.exit(0),

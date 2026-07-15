@@ -38,16 +38,49 @@ function defaultIsPortFree(port) {
 
 // Open a URL. If TIPPANI_OPEN_CMD is set (the embedding host's opener — e.g.
 // route to the VS Code integrated "Simple Browser" instead of an external
-// browser), run it: `{url}` is substituted where present, else the URL is
-// appended. Falls back to the OS default browser (`open`). Item 7.
+// browser), run it. The host template is tokenized and the URL is substituted
+// as a DISCRETE argv element (or appended), then spawned WITHOUT a shell — so a
+// URL carrying shell metacharacters (;, $(), backticks, &&) can never inject a
+// command. The template is host-supplied (trusted); the URL is not. Falls back
+// to the OS default browser (`open`). Item 7.
 export function openInBrowser(url, { openCmd = process.env.TIPPANI_OPEN_CMD, spawnFn = defaultSpawn, openFn = openDefault } = {}) {
   if (openCmd && String(openCmd).trim()) {
-    const full = openCmd.includes("{url}") ? openCmd.replace(/\{url\}/g, url) : `${openCmd} ${url}`;
-    const child = spawnFn(full, { shell: true, stdio: "ignore", detached: true });
+    const argv = buildOpenArgv(openCmd, url);
+    const child = spawnFn(argv[0], argv.slice(1), { stdio: "ignore", detached: true });
     if (child && typeof child.unref === "function") child.unref();
-    return Promise.resolve({ via: "cmd", cmd: full });
+    return Promise.resolve({ via: "cmd", argv });
   }
   return Promise.resolve(openFn(url)).then(() => ({ via: "open" }));
+}
+
+// Tokenize a host opener template (quote-aware) and substitute `{url}` with the
+// URL as its OWN argv element (or append it when there's no placeholder). Because
+// the URL becomes a discrete argv element passed to a shell-less spawn, shell
+// metacharacters in it are inert — no command injection.
+export function buildOpenArgv(template, url) {
+  const tokens = tokenizeCommand(String(template));
+  let used = false;
+  const argv = tokens.map((t) => {
+    if (t.includes("{url}")) { used = true; return t.replace(/\{url\}/g, url); }
+    return t;
+  });
+  if (!used) argv.push(url);
+  return argv.length ? argv : [url];
+}
+
+// Minimal quote-aware tokenizer for the trusted host template. Splits on
+// unquoted whitespace; single/double quotes group a token and are stripped.
+function tokenizeCommand(s) {
+  const out = [];
+  let cur = "", quote = null, started = false;
+  for (const c of s) {
+    if (quote) { if (c === quote) quote = null; else cur += c; continue; }
+    if (c === '"' || c === "'") { quote = c; started = true; continue; }
+    if (c === " " || c === "\t" || c === "\n" || c === "\r") { if (started) { out.push(cur); cur = ""; started = false; } continue; }
+    cur += c; started = true;
+  }
+  if (started) out.push(cur);
+  return out;
 }
 
 /**

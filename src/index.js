@@ -33,7 +33,7 @@ import { writeInstance, removeInstance } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
 import { isExpiredJwt } from "./ado-token-check.js";
 import { buildPrCriteria, summarizePr } from "./pr-criteria.js";
-import { navSkipsBarePathClobber, navShouldNavigate } from "./nav-guard.js";
+import { navSkipsBarePathClobber, navShouldNavigate, navTarget } from "./nav-guard.js";
 import {
   decodeConfigValue,
   extOf,
@@ -752,6 +752,7 @@ function stripMarkdown(s) {
 const NAV_WATCHER = `<script>
 (function(){
   ${navSkipsBarePathClobber.toString()}
+  ${navTarget.toString()}
   ${navShouldNavigate.toString()}
   async function navPoll(){
     try {
@@ -764,9 +765,12 @@ const NAV_WATCHER = `<script>
       if (s.navSeq <= last) return;
       try { sessionStorage.setItem('tippaniNavSeq', String(s.navSeq)); } catch (e) {}
       // Same-origin-only + don't clobber a deliberate same-path query deep-link
-      // (e.g. ?edit=1) — both handled by navShouldNavigate.
-      if (navShouldNavigate({ pathname: location.pathname, search: location.search, hash: location.hash }, s.navUrl, location.origin))
-        location.href = s.navUrl;
+      // (e.g. ?edit=1) — both handled by navShouldNavigate. Navigate to the
+      // RESOLVED same-origin target, never the raw navUrl.
+      if (navShouldNavigate({ pathname: location.pathname, search: location.search, hash: location.hash }, s.navUrl, location.origin)) {
+        var t = navTarget(s.navUrl, location.origin);
+        if (t) location.href = t;
+      }
     } catch (e) {}
   }
   setInterval(navPoll, 1500);

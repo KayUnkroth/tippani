@@ -13,15 +13,24 @@ export function navSkipsBarePathClobber(hereSearch, herePathname, navPathname, n
   return navPathname === herePathname && !navSearch && !!hereSearch;
 }
 
+// Resolve a nav target to its SAME-ORIGIN path (pathname+search+hash), or null
+// when the value is malformed, foreign-origin, a javascript: URL, or empty. The
+// watcher navigates to THIS resolved path — never the raw navUrl — so a value
+// that resolves off-origin (or into a script scheme) can never steer the tab
+// off-app. This is the belt behind navShouldNavigate's gate.
+export function navTarget(navUrl, origin) {
+  let u;
+  try { u = new URL(navUrl, origin); } catch (e) { return null; }
+  if (u.origin !== origin) return null;
+  const target = u.pathname + u.search + u.hash;
+  return target || null;
+}
+
 export function navShouldNavigate(here, navUrl, origin) {
+  const target = navTarget(navUrl, origin);
+  if (!target) return false;
   let u;
   try { u = new URL(navUrl, origin); } catch (e) { return false; }
-  // Only ever steer the tab to a SAME-ORIGIN path. A foreign absolute URL or a
-  // javascript: value resolves to a different (or opaque) origin and is ignored —
-  // never navigate the user off-app or into a script URL.
-  if (u.origin !== origin) return false;
-  const target = u.pathname + u.search + u.hash;
-  if (!target) return false;
   if (navSkipsBarePathClobber(here.search, here.pathname, u.pathname, u.search)) return false;
   return target !== (here.pathname + here.search + (here.hash || ""));
 }
