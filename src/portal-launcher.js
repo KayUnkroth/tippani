@@ -19,7 +19,7 @@ import net from "net";
 import path from "path";
 import { fileURLToPath } from "url";
 import openDefault from "open";
-import { listInstances } from "./portal-registry.js";
+import { listInstances, removeInstance, reapInstances } from "./portal-registry.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORTAL_ENTRY = path.join(HERE, "index.js");
@@ -54,7 +54,29 @@ export function createPortalSession({
   openBrowserFn = (url) => openDefault(url),
   readyTimeoutMs = Number(process.env.TIPPANI_READY_TIMEOUT_MS) || 60_000,
   isPortFreeFn = defaultIsPortFree,
+  // When true, reap orphaned/stale portals from the registry at startup (dead
+  // portal files, and live portals whose spawning shim is gone). The shim turns
+  // this on; tests leave it off so they never touch the real registry.
+  reapOnStart = false,
+  reapFn = reapInstances,
+  // Remove a portal's registry entry (injectable for tests). stop() calls this
+  // for each owned portal because on Windows proc.kill() is TerminateProcess (a
+  // hard kill) — the portal's own exit handler never runs, so the shim must
+  // delete the entry itself or it leaks as a stale "zombie" file.
+  removeInstanceFn = removeInstance,
+  // Navigation mode. Default (false) = single tab: nav tools steer the one open
+  // browser tab in place. true = separate tabs: each nav opens a new browser tab.
+  // Opt in via TIPPANI_SEPARATE_TABS=1.
+  separateTabs = process.env.TIPPANI_SEPARATE_TABS === "1" ||
+    process.env.TIPPANI_SEPARATE_TABS === "true",
 } = {}) {
+  // Backstop cleanup of portals leaked by past crashes / hard-killed shims.
+  // reapInstances is async (it probes ports to avoid killing a recycled PID);
+  // run it fire-and-forget so session creation never blocks on it.
+  if (reapOnStart) {
+    try { Promise.resolve(reapFn()).catch(() => { /* best effort */ }); }
+    catch { /* best effort */ }
+  }
   // active = the portal we're currently bound to:
   //   { port, url, token, prId, owned }  (owned = we launched it)
   let active = null;
@@ -164,8 +186,17 @@ export function createPortalSession({
 
     const env = { ...process.env };
     if (adoToken) env.TIPPANI_ADO_TOKEN = adoToken;
+    // Tell the portal who spawned it so startup reaping can detect orphans.
+    env.TIPPANI_SHIM_PID = String(process.pid);
 
-    const proc = spawnFn(nodeBin, args, { env, stdio: "ignore", detached: false });
+    // stdio ipc gives the portal a pipe tied to THIS shim's lifetime: when the
+    // shim dies (any cause), the OS closes it and the portal's `disconnect`
+    // handler exits it. That's what stops portals outliving the shim.
+    const proc = spawnFn(nodeBin, args, {
+      env,
+      stdio: ["ignore", "ignore", "ignore", "ipc"],
+      detached: false,
+    });
     let exited = false;
     proc.on("exit", () => { exited = true; });
 
@@ -201,11 +232,15 @@ export function createPortalSession({
 
   function stop() {
     // Tear down every portal WE launched (adopted portals belong to others).
-    // Snapshot + clear first so each child's exit handler (which deletes its
-    // own entry) doesn't perturb the iteration.
-    const procs = [...ownedChildren.values()];
+    // Snapshot + clear first so nothing perturbs iteration. On Windows proc.kill()
+    // is TerminateProcess (a hard kill), so the portal's own exit handler never
+    // runs to delete its registry entry — the shim removes it here itself, then
+    // disconnects (graceful ipc close) and kills the child as a fallback.
+    const entries = [...ownedChildren.entries()];
     ownedChildren.clear();
-    for (const proc of procs) {
+    for (const [port, proc] of entries) {
+      try { removeInstanceFn(port); } catch {}
+      try { if (proc.connected) proc.disconnect(); } catch {}
       try { proc.kill(); } catch {}
     }
   }
@@ -215,6 +250,8 @@ export function createPortalSession({
     getToken,
     getBaseUrl,
     stop,
+    // Navigation mode (see createPortalSession options). Read by the nav tools.
+    separateTabs: !!separateTabs,
     // Open a specific portal path in the user's browser (e.g. "/thread/123").
     openUrl: (path) => {
       const base = (getBaseUrl() || "").replace(/\/+$/, "");

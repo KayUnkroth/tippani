@@ -40,6 +40,7 @@ function fakeSpawn(bin, args, opts) {
   setTimeout(() => {
     if (busyPorts.has(port)) { child.emit("exit", 1); return; } // EADDRINUSE
     registry.push({ port, prId, token: `tok-${port}`, url: `http://localhost:${port}` });
+    busyPorts.add(port); // a launched portal now holds its port (mirror reality)
   }, 15);
   return child;
 }
@@ -130,6 +131,21 @@ try {
     check("multi-pr: stop killed BOTH owned portals (no orphan)", childA.killed && childB.killed);
   }
 
+  // --- stop() removes each owned portal's registry entry itself (on Windows
+  //     proc.kill() is a hard TerminateProcess, so the portal's own exit handler
+  //     never runs to delete it — the shim must, or it leaks a zombie file) ---
+  {
+    reset();
+    const removed = [];
+    const s = newSession({ removeInstanceFn: (port) => removed.push(Number(port)) });
+    await s.ensurePortal({ prId: 111 }); // launches on 3847
+    await s.ensurePortal({ prId: 222 }); // launches on 3848
+    check("stop-cleanup: nothing removed before stop", removed.length === 0);
+    s.stop();
+    check("stop-cleanup: stop removed BOTH owned registry entries",
+      removed.includes(3847) && removed.includes(3848));
+  }
+
   // --- adopted portals are NOT killed on stop (they belong to others) ---
   {
     reset();
@@ -175,6 +191,11 @@ try {
     check("input: rejects missing prId", threw);
     s.stop();
   }
+} catch (e) {
+  // A thrown block used to be masked by the bare try/finally + process.exit(0),
+  // silently skipping every later check. Count it as a failure so it surfaces.
+  fail++;
+  console.error("UNEXPECTED THROW:", e && e.stack);
 } finally {
   console.log(`\nportal-launcher.test: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);

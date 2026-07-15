@@ -59,6 +59,16 @@ export function createHttpClient({ baseUrl, getBaseUrl, token, getToken, clientN
 }
 
 export function buildTools(http, session) {
+  // Move the user to a portal path. Single-tab mode (default) steers the one
+  // open browser tab in place via the control API; separate-tabs mode opens a
+  // fresh browser tab per nav (TIPPANI_SEPARATE_TABS=1).
+  async function navigate(path) {
+    if (session && session.separateTabs && typeof session.openUrl === "function") {
+      await session.openUrl(path);
+    } else {
+      try { await http.post("/api/v1/nav", { path }); } catch {}
+    }
+  }
   return [
     {
       name: "open_pr",
@@ -124,9 +134,7 @@ export function buildTools(http, session) {
         "review and post your proposed reply.",
       inputSchema: { threadId: z.number() },
       handler: async ({ threadId }) => {
-        if (session && typeof session.openUrl === "function") {
-          await session.openUrl(`/goto/thread/${threadId}`);
-        }
+        await navigate(`/goto/thread/${threadId}`);
         return { ok: true, opened: `/goto/thread/${threadId}` };
       },
     },
@@ -139,9 +147,7 @@ export function buildTools(http, session) {
         "the whole PR at a glance rather than drilling into a single file or thread.",
       inputSchema: {},
       handler: async () => {
-        if (session && typeof session.openUrl === "function") {
-          await session.openUrl(`/feedback`);
-        }
+        await navigate(`/feedback`);
         return { ok: true, opened: `/feedback` };
       },
     },
@@ -158,9 +164,7 @@ export function buildTools(http, session) {
       },
       handler: async ({ fileIndex, line }) => {
         const path = `/file/${fileIndex}` + (line ? `?line=${line}` : "");
-        if (session && typeof session.openUrl === "function") {
-          await session.openUrl(path);
-        }
+        await navigate(path);
         return { ok: true, opened: path };
       },
     },

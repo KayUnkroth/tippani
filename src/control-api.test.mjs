@@ -52,11 +52,13 @@ const focus = createFocusStore();
 const drafts = createDraftStore({ onChange: () => focus.bumpVersion() });
 const locks = createLockStore({ ttlMs: 60_000 });
 
+let lastAdoToken = null;
 const app = express();
 app.use(express.json());
 registerControlApi(app, {
   port: PORT_FOR_PREFIXES,
   sessionToken: SESSION_TOKEN,
+  setAdoToken: (t) => { lastAdoToken = t; return t !== "reject-me"; },
   focus, drafts, locks,
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
@@ -177,6 +179,65 @@ try {
   {
     const r = await call("/api/v1/commands/focus", { method: "POST", headers: authHeaders, body: { threadId: null } });
     check("focus: null clears", r.status === 200 && r.body.focus.focusedThreadId === null);
+  }
+
+  // --- POST /api/v1/nav (single-tab navigation) ---
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "/goto/thread/101" } });
+    check("nav: 200", r.status === 200);
+    check("nav: records url", r.body.nav.navUrl === "/goto/thread/101");
+    check("nav: seq >= 1", r.body.nav.navSeq >= 1);
+  }
+  {
+    const r = await call("/api/v1/state");
+    check("nav: state exposes navUrl", r.body.navUrl === "/goto/thread/101");
+    check("nav: state exposes navSeq", typeof r.body.navSeq === "number" && r.body.navSeq >= 1);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: {} });
+    check("nav: missing path -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", body: { path: "/feedback" } });
+    check("nav: requires auth -> 401", r.status === 401);
+  }
+  // Reject nav targets that would steer the tab OFF-origin or into a scheme.
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "//evil.com/x" } });
+    check("nav: protocol-relative //host -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "https://evil.com/x" } });
+    check("nav: absolute foreign URL -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "javascript:alert(1)" } });
+    check("nav: javascript: scheme -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "/ok\\..\\evil" } });
+    check("nav: backslash path -> 400", r.status === 400);
+  }
+
+  // --- POST /api/v1/ado-token (Coforce token push) ---
+  {
+    const r = await call("/api/v1/ado-token", { method: "POST", headers: authHeaders, body: { token: "fresh-bearer-xyz" } });
+    check("ado-token: 200", r.status === 200 && r.body.ok === true);
+    check("ado-token: swaps the live token", lastAdoToken === "fresh-bearer-xyz");
+  }
+  {
+    const r = await call("/api/v1/ado-token", { method: "POST", headers: authHeaders, body: {} });
+    check("ado-token: missing token -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/ado-token", { method: "POST", body: { token: "x" } });
+    check("ado-token: requires auth -> 401", r.status === 401);
+  }
+  {
+    // setAdoToken rejects the token (e.g. expired bearer) → endpoint returns 400,
+    // exercising the previously-dead "token rejected" branch.
+    const r = await call("/api/v1/ado-token", { method: "POST", headers: authHeaders, body: { token: "reject-me" } });
+    check("ado-token: rejected token -> 400", r.status === 400);
   }
 
   // --- PUT /api/v1/threads/:id/draft ---

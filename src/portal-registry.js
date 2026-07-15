@@ -12,6 +12,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import net from "net";
 
 const REG_DIR = path.join(os.homedir(), ".tippani", "instances");
 
@@ -20,7 +21,7 @@ export function registryDir() {
 }
 
 /** Write (or overwrite) this portal's registry entry, keyed by port. */
-export function writeInstance({ port, prId, token, pid, url }) {
+export function writeInstance({ port, prId, token, pid, url, shimPid }) {
   try {
     fs.mkdirSync(REG_DIR, { recursive: true, mode: 0o700 });
     const entry = {
@@ -28,6 +29,9 @@ export function writeInstance({ port, prId, token, pid, url }) {
       prId: Number(prId),
       token,
       pid: pid ?? process.pid,
+      // The shim process that spawned this portal, if any. Startup reaping kills
+      // a live portal whose spawning shim is gone (see reapInstances).
+      shimPid: shimPid == null ? null : Number(shimPid),
       url: url || `http://localhost:${port}`,
       startedAt: Date.now(),
     };
@@ -63,4 +67,83 @@ export function listInstances() {
   } catch {
     return [];
   }
+}
+
+/**
+ * Is a process alive? Uses signal 0 (existence probe, sends nothing).
+ * EPERM means the process exists but isn't ours — still alive.
+ */
+export function isPidAlive(pid) {
+  const n = Number(pid);
+  if (!n || !Number.isFinite(n)) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (e) {
+    return e && e.code === "EPERM";
+  }
+}
+
+/**
+ * Does something accept a TCP connection on this port (localhost)? Used as an
+ * IDENTITY proxy before killing an orphan: a live portal owns its port, so a
+ * connectable port confirms the entry's pid is really that portal and not an
+ * unrelated process that inherited a recycled PID. Best-effort, short timeout.
+ */
+function defaultConfirmPort(port, timeoutMs = 250) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; try { sock.destroy(); } catch {} resolve(v); } };
+    const sock = net.connect({ port: Number(port), host: "127.0.0.1" });
+    sock.once("connect", () => finish(true));
+    sock.once("error", () => finish(false));
+    sock.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+/**
+ * Startup backstop for orphaned portals. For every registry entry:
+ *   - portal pid dead                    → drop the stale file.
+ *   - portal alive, spawning shim gone   → it's an orphan. A PID can be recycled
+ *       by the OS, so DON'T kill blindly: confirm the portal's port still accepts
+ *       a connection (identity proxy). Port serving → kill the orphan and drop.
+ *       Port dead → the live pid is a recycled stranger, so drop the stale entry
+ *       and NEVER kill it.
+ *   - portal alive with a live (or unknown) shim → leave it.
+ * Async (the port probe is async) and fully injectable so unit tests never touch
+ * real processes, sockets, or the real registry dir.
+ *
+ * Residual: if a dead shim's PID was itself recycled to a live process, the entry
+ * looks non-orphaned and is left — the IPC-disconnect teardown covers the common
+ * orphan case; this reaper only guarantees it never SIGTERMs a stranger.
+ */
+export async function reapInstances({
+  listInstancesFn = listInstances,
+  isPidAliveFn = isPidAlive,
+  killPidFn = (pid) => { try { process.kill(Number(pid)); return true; } catch { return false; } },
+  removeInstanceFn = removeInstance,
+  confirmPortFn = defaultConfirmPort,
+} = {}) {
+  const reaped = [];
+  for (const inst of listInstancesFn()) {
+    if (!isPidAliveFn(inst.pid)) {
+      removeInstanceFn(inst.port);
+      reaped.push({ port: inst.port, reason: "dead-portal" });
+      continue;
+    }
+    if (inst.shimPid != null && !isPidAliveFn(inst.shimPid)) {
+      const serving = await confirmPortFn(inst.port);
+      if (serving) {
+        killPidFn(inst.pid);
+        removeInstanceFn(inst.port);
+        reaped.push({ port: inst.port, reason: "orphaned" });
+      } else {
+        // Alive pid but its port is dead → not actually our portal (recycled
+        // PID). Drop the unreachable entry without killing a stranger.
+        removeInstanceFn(inst.port);
+        reaped.push({ port: inst.port, reason: "orphaned-stale-nokill" });
+      }
+    }
+  }
+  return reaped;
 }

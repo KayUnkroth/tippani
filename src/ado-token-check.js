@@ -55,3 +55,27 @@ export function tokenRejectionMessage(result) {
     `(${result.aud || "unknown"}) for the Azure DevOps git/REST API. Bind the ` +
     "Tippani (Azure DevOps) account to this server.";
 }
+
+/**
+ * True only when `token` is a JWT whose `exp` claim is already in the past.
+ * Non-JWT tokens (PATs, opaque tokens) and JWTs without a numeric `exp` return
+ * false — they can't be judged expired offline, so they are not turned away.
+ * Used by the /api/v1/ado-token hot-swap to reject a stale bearer up front
+ * instead of binding it and only failing on the next ADO call.
+ * @param {string} token
+ * @param {number} [nowMs] current time in ms (injectable for tests)
+ * @returns {boolean}
+ */
+export function isExpiredJwt(token, nowMs = Date.now()) {
+  if (typeof token !== "string" || !token) return false;
+  const parts = token.split(".");
+  if (parts.length !== 3) return false;
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  } catch {
+    return false;
+  }
+  if (typeof payload.exp !== "number") return false;
+  return payload.exp * 1000 <= nowMs;
+}

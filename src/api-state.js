@@ -19,9 +19,14 @@
 export function createFocusStore() {
   let focusedThreadId = null;
   let version = 0;
+  // Single-tab navigation: which portal path the LLM wants the user's ONE open
+  // browser tab pointed at. navSeq is monotonic so the browser acts once per
+  // request (and survives same-tab reloads via sessionStorage on the client).
+  let navUrl = null;
+  let navSeq = 0;
   return {
     get() {
-      return { focusedThreadId, version };
+      return { focusedThreadId, version, navUrl, navSeq };
     },
     set(threadId) {
       const next = threadId == null ? null : Number(threadId);
@@ -33,6 +38,17 @@ export function createFocusStore() {
         version++;
       }
       return { focusedThreadId, version };
+    },
+    // Request the browser navigate its current tab to `url` (single-tab mode).
+    // Always bumps navSeq + version so a repeat nav to the same path still fires.
+    setNav(url) {
+      if (typeof url !== "string" || !url) {
+        throw new Error("nav: url must be a non-empty string");
+      }
+      navUrl = url;
+      navSeq++;
+      version++;
+      return { navUrl, navSeq, version };
     },
     bumpVersion() {
       version++;
