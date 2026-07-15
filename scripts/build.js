@@ -25,6 +25,7 @@ fs.mkdirSync(path.join(DIST, "bin"), { recursive: true });
 // 0. Build the browser-side editor bundle (inlined into the server)
 console.log("0. Building client editor bundle...");
 run("node scripts/build-client.js");
+run("node scripts/build-mermaid.js");
 
 // 1. Bundle with esbuild
 console.log("1. Bundling with esbuild...");

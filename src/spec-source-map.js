@@ -16,6 +16,7 @@ import rehypeSanitize from "rehype-sanitize";
 import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
+import { normalizeMermaidContainers } from "./mermaid-normalize.js";
 
 // The tags the client's commentable selector matches, in the same set.
 export const COMMENTABLE_TAGS = new Set(["p", "li", "blockquote", "table", "pre"]);
@@ -54,7 +55,7 @@ export async function collectBlockRanges(content) {
     .use(remarkGfm)
     .use(remarkRehype)
     .use(rehypeCollectBlockRanges(ranges));
-  const tree = proc.parse(content || "");
+  const tree = proc.parse(normalizeMermaidContainers(content));
   await proc.run(tree);
   return ranges;
 }
@@ -73,6 +74,6 @@ export async function renderSpecBody(content, sanitizeSchema) {
     .use(rehypeSlug)
     .use(rehypeAutolinkHeadings, { behavior: "wrap" })
     .use(rehypeStringify)
-    .process(content || "");
+    .process(normalizeMermaidContainers(content));
   return { html: String(result), ranges };
 }

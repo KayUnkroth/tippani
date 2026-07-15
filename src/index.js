@@ -17,6 +17,8 @@ import { fileURLToPath } from "url";
 import os from "os";
 import crypto from "crypto";
 import { EDITOR_JS } from "./client/editor.bundle.js";
+import { MERMAID_JS } from "./client/mermaid.bundle.js";
+import { MERMAID_VIEW_JS } from "./client/mermaid-view.bundle.js";
 import { isConflict } from "./conflict.js";
 import { decideCanEdit } from "./canedit.js";
 import {
@@ -1556,6 +1558,11 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .spec .section-focused { box-shadow: 0 0 0 2px #6d071a; border-radius: 6px; }
 [data-theme="dark"] .comment-thread.thread-focused { box-shadow: 0 0 0 2px #b23a58; border-color: #b23a58 !important; }
 [data-theme="dark"] .spec .section-focused { box-shadow: 0 0 0 2px #b23a58; }
+/* Phase 119: rendered Mermaid diagrams. */
+.mermaid-block { margin: 14px 0; text-align: center; overflow-x: auto; }
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-block.mermaid-error { text-align: left; }
+.mermaid-error-note { font-size: 12px; color: var(--cp-text-muted); margin-bottom: 6px; }
 /* Item 3: Current / Diff / Proposed view toggle. */
 .view-toggle { display: inline-flex; border: 1px solid var(--cp-border); border-radius: 7px; overflow: hidden; margin-right: 6px; }
 .view-btn { font-family: inherit; font-size: 12px; padding: 4px 10px; border: none; background: var(--cp-surface); color: var(--cp-text-muted); cursor: pointer; border-right: 1px solid var(--cp-border); }
@@ -1813,6 +1820,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
 <div class="toast" id="toast"></div>
 
 <script>${EDITOR_JS}</script>
+<script>${MERMAID_VIEW_JS}</script>
 <script>
 // #47 edit/view toggle. Read-only rendered view is the default; editing is opt-in.
 // The CM editor is mounted lazily on first entry and reused, so edits persist
@@ -2565,7 +2573,7 @@ async function applyView(view) {
   if (view === 'proposed') {
     try {
       const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/render?draft=1');
-      if (r.ok) { const d = await r.json(); if (current) current.innerHTML = d.html || ''; }
+      if (r.ok) { const d = await r.json(); if (current) { current.innerHTML = d.html || ''; if (window.tippaniRenderMermaid) window.tippaniRenderMermaid(current); } }
     } catch {}
     if (!editing) { if (content) content.style.display = 'none'; if (current) current.style.display = ''; }
   } else {
@@ -3449,6 +3457,14 @@ async function main() {
       }
     }
     next();
+  });
+
+  // Phase 119: serve the vendored Mermaid runtime (embedded string) for the
+  // spec page's lazy diagram rendering. Offline-safe; long-cache immutable.
+  app.get("/vendor/mermaid.min.js", (_req, res) => {
+    res.type("application/javascript")
+       .set("Cache-Control", "public, max-age=31536000, immutable")
+       .send(MERMAID_JS);
   });
 
   // File picker or auto-redirect
