@@ -27,14 +27,26 @@ export function registerControlApi(app, deps) {
     specDiff,           // async (fileIndex) => {hunks, source?, updatedAt?} (optional)
   } = deps;
 
-  const LOCAL_PREFIXES = [
+  const ALLOWED_ORIGINS = new Set([
     `http://localhost:${port}`,
     `http://127.0.0.1:${port}`,
-  ];
+  ]);
 
+  // Same-origin means the request's Origin (or Referer) resolves to EXACTLY one
+  // of this portal's origins. Compare parsed origins, never string prefixes: a
+  // `startsWith` check let `http://localhost:${port}0` (a different port),
+  // `http://localhost:${port}.evil.com`, and `http://localhost:${port}@evil.com`
+  // all pass — and same-origin skips the session-token requirement on mutations.
   function isSameOrigin(req) {
-    const origin = req.headers.origin || req.headers.referer || "";
-    return LOCAL_PREFIXES.some((p) => origin.startsWith(p));
+    const header = req.headers.origin || req.headers.referer || "";
+    if (!header) return false;
+    let origin;
+    try {
+      origin = new URL(header).origin;
+    } catch {
+      return false;
+    }
+    return ALLOWED_ORIGINS.has(origin);
   }
 
   function requireAuth(opts = { mutation: false }) {
@@ -163,6 +175,14 @@ export function registerControlApi(app, deps) {
     const { path } = req.body || {};
     if (typeof path !== "string" || !path) {
       return res.status(400).json({ error: "path (non-empty string) required" });
+    }
+    // Must be a same-origin ABSOLUTE PATH ("/…"). Reject absolute URLs, a
+    // protocol-relative "//host", schemes like javascript:, and backslash paths
+    // (browsers fold "\" to "/"). The client watcher also refuses to navigate
+    // off-origin, but reject at this seam too so a hostile nav value never
+    // reaches the one open tab.
+    if (!path.startsWith("/") || path.startsWith("//") || path.includes("\\")) {
+      return res.status(400).json({ error: "path must be a same-origin absolute path (starts with a single /)" });
     }
     const nav = focus.setNav(path);
     res.json({ ok: true, nav });

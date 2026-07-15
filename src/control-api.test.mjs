@@ -58,7 +58,7 @@ app.use(express.json());
 registerControlApi(app, {
   port: PORT_FOR_PREFIXES,
   sessionToken: SESSION_TOKEN,
-  setAdoToken: (t) => { lastAdoToken = t; return true; },
+  setAdoToken: (t) => { lastAdoToken = t; return t !== "reject-me"; },
   focus, drafts, locks,
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
@@ -201,6 +201,23 @@ try {
     const r = await call("/api/v1/nav", { method: "POST", body: { path: "/feedback" } });
     check("nav: requires auth -> 401", r.status === 401);
   }
+  // Reject nav targets that would steer the tab OFF-origin or into a scheme.
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "//evil.com/x" } });
+    check("nav: protocol-relative //host -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "https://evil.com/x" } });
+    check("nav: absolute foreign URL -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "javascript:alert(1)" } });
+    check("nav: javascript: scheme -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/nav", { method: "POST", headers: authHeaders, body: { path: "/ok\\..\\evil" } });
+    check("nav: backslash path -> 400", r.status === 400);
+  }
 
   // --- POST /api/v1/ado-token (Coforce token push) ---
   {
@@ -215,6 +232,12 @@ try {
   {
     const r = await call("/api/v1/ado-token", { method: "POST", body: { token: "x" } });
     check("ado-token: requires auth -> 401", r.status === 401);
+  }
+  {
+    // setAdoToken rejects the token (e.g. expired bearer) → endpoint returns 400,
+    // exercising the previously-dead "token rejected" branch.
+    const r = await call("/api/v1/ado-token", { method: "POST", headers: authHeaders, body: { token: "reject-me" } });
+    check("ado-token: rejected token -> 400", r.status === 400);
   }
 
   // --- PUT /api/v1/threads/:id/draft ---

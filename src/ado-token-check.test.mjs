@@ -1,5 +1,5 @@
 // Unit tests for the offline ADO token inspector (ado-token-check.js).
-import { inspectAdoToken, tokenRejectionMessage } from "./ado-token-check.js";
+import { inspectAdoToken, tokenRejectionMessage, isExpiredJwt } from "./ado-token-check.js";
 
 // A host-supplied expected audience (the Azure DevOps git/REST resource app id
 // is host config, not hardcoded in tippani). Any value works for the test.
@@ -51,6 +51,19 @@ try {
     // JWT-shaped but unparseable payload → allow (don't false-fail a valid-but-odd token).
     const r = inspectAdoToken("aaa.@@@notbase64json@@@.sig");
     check("unparseable JWT payload → allow", r.ok === true);
+  }
+
+  // --- isExpiredJwt (used by the /api/v1/ado-token hot-swap) ---
+  {
+    const nowS = Math.floor(Date.now() / 1000);
+    check("expired JWT → true", isExpiredJwt(jwt(AUD, { exp: nowS - 60 })) === true);
+    check("future JWT → false", isExpiredJwt(jwt(AUD, { exp: nowS + 3600 })) === false);
+    check("JWT without exp → false", isExpiredJwt(jwt(AUD)) === false);
+    check("non-JWT (PAT/opaque) → false", isExpiredJwt("gho_ABCDEF0123456789") === false);
+    check("empty → false", isExpiredJwt("") === false);
+    // exp is injectable-clock testable: exp=1000s => 1_000_000ms.
+    check("nowMs after exp → true", isExpiredJwt(jwt(AUD, { exp: 1000 }), 2_000_000) === true);
+    check("nowMs before exp → false", isExpiredJwt(jwt(AUD, { exp: 1000 }), 500_000) === false);
   }
 } finally {
   console.log(`\nado-token-check.test: ${pass} passed, ${fail} failed`);

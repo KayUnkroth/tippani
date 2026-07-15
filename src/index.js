@@ -31,6 +31,7 @@ import { isTableBlock, computeTableDiff } from "./table-diff.js";
 import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
+import { isExpiredJwt } from "./ado-token-check.js";
 import {
   decodeConfigValue,
   extOf,
@@ -752,8 +753,14 @@ const NAV_WATCHER = `<script>
       try { sessionStorage.setItem('tippaniNavSeq', String(s.navSeq)); } catch (e) {}
       var here = location.pathname + location.search;
       var target = null;
-      try { var u = new URL(s.navUrl, location.origin); target = u.pathname + u.search; } catch (e) {}
-      if (target && target !== here) { location.href = s.navUrl; }
+      try {
+        var u = new URL(s.navUrl, location.origin);
+        // Only ever steer the tab to a SAME-ORIGIN path. A foreign absolute URL
+        // or a javascript: value resolves to a different (or opaque) origin and
+        // is ignored — never navigate the user off-app or into a script URL.
+        if (u.origin === location.origin) { target = u.pathname + u.search + u.hash; }
+      } catch (e) {}
+      if (target && target !== here) { location.href = target; }
     } catch (e) {}
   }
   setInterval(navPoll, 1500);
@@ -2900,6 +2907,10 @@ let _adoToken = null;
 // Rebuilds the connection so every subsequent ADO call uses the new bearer.
 function applyAdoToken(token) {
   if (typeof token !== "string" || !token) return false;
+  // Reject a stale bearer instead of binding it and failing later ADO calls.
+  // The whole point of the push is "fresh before the old one expires", so an
+  // already-expired JWT is exactly the case to turn away (surfaces as 400).
+  if (isExpiredJwt(token)) return false;
   _adoToken = token;
   _conn = getAdoConnectionBearer(token);
   return true;

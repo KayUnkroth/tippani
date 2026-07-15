@@ -71,7 +71,12 @@ export function createPortalSession({
     process.env.TIPPANI_SEPARATE_TABS === "true",
 } = {}) {
   // Backstop cleanup of portals leaked by past crashes / hard-killed shims.
-  if (reapOnStart) { try { reapFn(); } catch { /* best effort */ } }
+  // reapInstances is async (it probes ports to avoid killing a recycled PID);
+  // run it fire-and-forget so session creation never blocks on it.
+  if (reapOnStart) {
+    try { Promise.resolve(reapFn()).catch(() => { /* best effort */ }); }
+    catch { /* best effort */ }
+  }
   // active = the portal we're currently bound to:
   //   { port, url, token, prId, owned }  (owned = we launched it)
   let active = null;

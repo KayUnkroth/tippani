@@ -54,29 +54,36 @@ try {
   check("isPidAlive: garbage pid is dead", isPidAlive(2147483646) === false);
   check("isPidAlive: 0/null/NaN are dead", !isPidAlive(0) && !isPidAlive(null) && !isPidAlive("x"));
 
-  // --- reapInstances (pure, injected) ---
+  // --- reapInstances (async, injected identity) ---
   {
     const killed = [];
     const removed = [];
     const insts = [
       { port: 4000, pid: 100, shimPid: null },  // portal dead -> drop file
-      { port: 4001, pid: 200, shimPid: 201 },   // portal alive, shim dead -> kill+drop
+      { port: 4001, pid: 200, shimPid: 201 },   // alive, shim dead, port serving -> kill+drop
       { port: 4002, pid: 300, shimPid: 301 },   // portal alive, shim alive -> keep
       { port: 4003, pid: 400, shimPid: null },  // portal alive, no shim -> keep (legacy)
+      { port: 4004, pid: 500, shimPid: 501 },   // alive pid (recycled), shim dead, port DEAD -> drop, NO kill
     ];
-    const alive = new Set([200, 300, 301, 400]); // 100 dead, 201 dead
-    const reaped = reapInstances({
+    const alive = new Set([200, 300, 301, 400, 500]); // 100 dead, 201 dead, 501 dead
+    const serving = new Set([4001]); // only the genuine orphan still owns its port
+    const reaped = await reapInstances({
       listInstancesFn: () => insts,
       isPidAliveFn: (pid) => alive.has(Number(pid)),
       killPidFn: (pid) => { killed.push(Number(pid)); return true; },
       removeInstanceFn: (port) => { removed.push(Number(port)); },
+      confirmPortFn: async (port) => serving.has(Number(port)),
     });
     check("reap: drops dead-portal file", removed.includes(4000) && reaped.find((r) => r.port === 4000)?.reason === "dead-portal");
-    check("reap: kills orphan portal (shim dead)", killed.includes(200) && removed.includes(4001));
+    check("reap: kills orphan whose port still serves", killed.includes(200) && removed.includes(4001));
     check("reap: orphan reason recorded", reaped.find((r) => r.port === 4001)?.reason === "orphaned");
     check("reap: keeps portal with live shim", !killed.includes(300) && !removed.includes(4002));
     check("reap: keeps legacy portal with no shimPid", !killed.includes(400) && !removed.includes(4003));
-    check("reap: reaped exactly two", reaped.length === 2);
+    check("reap: recycled-PID orphan dropped WITHOUT kill",
+      !killed.includes(500) && removed.includes(4004) &&
+      reaped.find((r) => r.port === 4004)?.reason === "orphaned-stale-nokill");
+    check("reap: never killed a non-serving pid", killed.length === 1 && killed[0] === 200);
+    check("reap: reaped exactly three", reaped.length === 3);
   }
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch {}

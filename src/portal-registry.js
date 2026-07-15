@@ -12,6 +12,7 @@
 import fs from "fs";
 import path from "path";
 import os from "os";
+import net from "net";
 
 const REG_DIR = path.join(os.homedir(), ".tippani", "instances");
 
@@ -84,19 +85,44 @@ export function isPidAlive(pid) {
 }
 
 /**
- * Startup backstop for orphaned portals. For every registry entry:
- *   - portal pid dead        → drop the stale file.
- *   - portal alive, but the shim that spawned it is gone → kill the portal and
- *     drop the file (it can never be reached again — its owner is dead).
- *   - portal alive with a live (or unknown) shim → leave it.
- * Pure + fully injectable so it can be unit-tested without touching real
- * processes or the real registry dir.
+ * Does something accept a TCP connection on this port (localhost)? Used as an
+ * IDENTITY proxy before killing an orphan: a live portal owns its port, so a
+ * connectable port confirms the entry's pid is really that portal and not an
+ * unrelated process that inherited a recycled PID. Best-effort, short timeout.
  */
-export function reapInstances({
+function defaultConfirmPort(port, timeoutMs = 250) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (v) => { if (!done) { done = true; try { sock.destroy(); } catch {} resolve(v); } };
+    const sock = net.connect({ port: Number(port), host: "127.0.0.1" });
+    sock.once("connect", () => finish(true));
+    sock.once("error", () => finish(false));
+    sock.setTimeout(timeoutMs, () => finish(false));
+  });
+}
+
+/**
+ * Startup backstop for orphaned portals. For every registry entry:
+ *   - portal pid dead                    → drop the stale file.
+ *   - portal alive, spawning shim gone   → it's an orphan. A PID can be recycled
+ *       by the OS, so DON'T kill blindly: confirm the portal's port still accepts
+ *       a connection (identity proxy). Port serving → kill the orphan and drop.
+ *       Port dead → the live pid is a recycled stranger, so drop the stale entry
+ *       and NEVER kill it.
+ *   - portal alive with a live (or unknown) shim → leave it.
+ * Async (the port probe is async) and fully injectable so unit tests never touch
+ * real processes, sockets, or the real registry dir.
+ *
+ * Residual: if a dead shim's PID was itself recycled to a live process, the entry
+ * looks non-orphaned and is left — the IPC-disconnect teardown covers the common
+ * orphan case; this reaper only guarantees it never SIGTERMs a stranger.
+ */
+export async function reapInstances({
   listInstancesFn = listInstances,
   isPidAliveFn = isPidAlive,
   killPidFn = (pid) => { try { process.kill(Number(pid)); return true; } catch { return false; } },
   removeInstanceFn = removeInstance,
+  confirmPortFn = defaultConfirmPort,
 } = {}) {
   const reaped = [];
   for (const inst of listInstancesFn()) {
@@ -106,9 +132,17 @@ export function reapInstances({
       continue;
     }
     if (inst.shimPid != null && !isPidAliveFn(inst.shimPid)) {
-      killPidFn(inst.pid);
-      removeInstanceFn(inst.port);
-      reaped.push({ port: inst.port, reason: "orphaned" });
+      const serving = await confirmPortFn(inst.port);
+      if (serving) {
+        killPidFn(inst.pid);
+        removeInstanceFn(inst.port);
+        reaped.push({ port: inst.port, reason: "orphaned" });
+      } else {
+        // Alive pid but its port is dead → not actually our portal (recycled
+        // PID). Drop the unreachable entry without killing a stranger.
+        removeInstanceFn(inst.port);
+        reaped.push({ port: inst.port, reason: "orphaned-stale-nokill" });
+      }
     }
   }
   return reaped;
