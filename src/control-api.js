@@ -323,13 +323,18 @@ export function registerControlApi(app, deps) {
 
   // Surgical anchored edits (#edit_spec): apply edits to the current snapshot
   // (the staged draft if present, else the committed body) and STAGE the result
-  // as a review-only draft. Never commits. Last-write-wins: staging is NOT
-  // blocked by the user editing (no lock check) — a live stage auto-loads into
-  // the open editor (see the file-view poll).
+  // as a review-only draft. Never commits. HONORS THE EDIT LOCK: while the user
+  // holds the file open in edit mode (the 3s heartbeat), staging is blocked with a
+  // 409 so the agent never overwrites the proposal under review. The agent should
+  // report and wait rather than retry. Merging the agent's edits onto the user's
+  // saved text is a possible future improvement.
   app.post("/api/v1/specs/:fileIndex/edit", requireAuth({ mutation: true }), async (req, res) => {
     if (!specDrafts) return res.status(501).json({ error: "spec drafts not wired" });
     const idx = validSpecIndex(req.params.fileIndex);
     if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    if (specLocks && specLocks.isLocked(idx)) {
+      return res.status(409).json({ error: "user is editing this file", code: "locked", retryAfterMs: 10_000 });
+    }
     const { edits, source } = req.body || {};
     const existing = specDrafts.get(idx);
     let base;

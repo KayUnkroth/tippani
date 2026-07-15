@@ -52,6 +52,7 @@ const focus = createFocusStore();
 const drafts = createDraftStore({ onChange: () => focus.bumpVersion() });
 const locks = createLockStore({ ttlMs: 60_000 });
 const specDrafts = createDraftStore({ onChange: () => focus.bumpVersion() });
+const specLocks = createLockStore({ ttlMs: 60_000 });
 
 let lastAdoToken = null;
 const app = express();
@@ -65,6 +66,7 @@ registerControlApi(app, {
   getChangedFiles: () => changedFiles,
   readFileMarkdown: async (p) => (p === "/docs/spec.md" ? SPEC_MD : ""),
   specDrafts,
+  specLocks,
   specDiff: async (idx) => ({ hunks: [{ startLine: 3, endLine: 3, oldHtml: "<p>a</p>", newHtml: "<p>b</p>" }], source: "test", updatedAt: 1 }),
   renderDraft: async (idx, { draft } = {}) => ({ html: draft ? "<p>DRAFT</p>" : "<p>COMMITTED</p>" }),
   listPrs: async (q) => ({ prs: [{ id: 1, title: "PR One", author: "Kay" }], mine: q.creator !== "any", status: 1 }),
@@ -356,6 +358,30 @@ try {
     const r = await call("/api/v1/specs/99/edit", { method: "POST", headers: authHeaders,
       body: { edits: [{ kind: "find", find: "x", replace: "y" }] } });
     check("edit: bad file index -> 404", r.status === 404);
+  }
+
+  // --- /edit honors the editor lock (option (c)): 409 while the user is editing ---
+  {
+    const r = await call("/api/v1/specs/0/lock", { method: "POST", headers: authHeaders });
+    check("spec lock touch: 200", r.status === 200);
+  }
+  {
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "More.", replace: "BLOCKED" }] } });
+    check("edit while user is editing (locked) -> 409 code=locked", r.status === 409 && r.body.code === "locked");
+  }
+  {
+    const before = (await call("/api/v1/specs/0/draft")).body.draft.content;
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "More.", replace: "BLOCKED" }] } });
+    const after = (await call("/api/v1/specs/0/draft")).body.draft.content;
+    check("edit blocked by lock stages nothing", r.status === 409 && before === after);
+  }
+  specLocks.release(0);
+  {
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "More.", replace: "AfterUnlock" }] } });
+    check("edit after the user stops editing -> 200", r.status === 200 && /AfterUnlock/.test(r.body.draft.content));
   }
 
   // --- View + filter control state (items 3 / 5) ---

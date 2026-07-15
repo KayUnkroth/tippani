@@ -2967,7 +2967,11 @@ document.addEventListener('keydown', (e) => {
             lastSpecDraftKey = key;
             if (typeof setViewButtonsEnabled === 'function') setViewButtonsEnabled(!!sd);
             if (_currentView === 'diff' || _currentView === 'proposed') { try { applyView(_currentView); } catch {} }
-            if (sd && window.tippani && window.tippani.isEditing && window.tippani.isEditing() && window.tippani.getEditor) {
+            // Belt-and-suspenders for the lock-acquisition lag: the server now
+            // 409s an agent edit while the user holds the edit lock, but never
+            // swap a DIRTY buffer out from under the user (option (c)).
+            if (sd && window.tippani && window.tippani.isEditing && window.tippani.isEditing()
+                && !(window.tippani.isDirty && window.tippani.isDirty()) && window.tippani.getEditor) {
               const ed = window.tippani.getEditor(); if (ed && ed.setMarkdown) ed.setMarkdown(sd.content);
             }
           }
