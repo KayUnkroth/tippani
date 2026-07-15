@@ -5,6 +5,8 @@
 // Dependencies are injected so callers can supply real ADO-backed accessors
 // in production and in-memory fakes in tests.
 
+import { applyEdits, SpecEditError } from "./spec-edit.js";
+
 export function registerControlApi(app, deps) {
   const {
     port,
@@ -25,6 +27,8 @@ export function registerControlApi(app, deps) {
     specLocks,          // lock store keyed by fileIndex (optional)
     commitSpec,         // async (fileIndex, content, message) => {ok, status, body}
     specDiff,           // async (fileIndex) => {hunks, source?, updatedAt?} (optional)
+    renderDraft,        // async (fileIndex, {draft}) => {html} (optional) — item 3 Current view
+    listPrs,            // async (query) => {prs, ...} (optional) — item 6 list PRs
   } = deps;
 
   const ALLOWED_ORIGINS = new Set([
@@ -188,6 +192,23 @@ export function registerControlApi(app, deps) {
     res.json({ ok: true, nav });
   });
 
+  // POST /api/v1/commands/view { view } — set the spec view (original|diff|current)
+  // the browser should switch to (item 3). Server-side so the agent drives it and
+  // it survives a reload; the browser never auto-flips on a stage.
+  app.post("/api/v1/commands/view", requireAuth({ mutation: true }), (req, res) => {
+    const { view } = req.body || {};
+    try { res.json({ ok: true, view: focus.setView(view) }); }
+    catch (e) { res.status(400).json({ error: String(e?.message || e) }); }
+  });
+
+  // POST /api/v1/commands/filter { filter } — set (or clear with null) the
+  // feedback-page filter the browser should apply (item 5).
+  app.post("/api/v1/commands/filter", requireAuth({ mutation: true }), (req, res) => {
+    const { filter } = req.body || {};
+    try { res.json({ ok: true, filter: focus.setFilter(filter ?? null) }); }
+    catch (e) { res.status(400).json({ error: String(e?.message || e) }); }
+  });
+
   // POST /api/v1/ado-token { token } — Coforce pushes a freshly-minted ADO
   // bearer here before the old one expires, so a long-lived portal never makes
   // ADO calls with a stale token. Swaps the connection in place. The token is
@@ -257,6 +278,16 @@ export function registerControlApi(app, deps) {
     res.json({ fileIndex: idx, draft: d });
   });
 
+  // Rendered HTML of a file's proposed (draft=1) or committed body (item 3
+  // Current view). The reading view swaps #spec-content to this HTML.
+  app.get("/api/v1/specs/:fileIndex/render", requireAuth(), async (req, res) => {
+    if (typeof renderDraft !== "function") return res.status(501).json({ error: "render not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    try { res.json(await renderDraft(idx, { draft: req.query.draft === "1" })); }
+    catch (e) { res.status(500).json({ error: String(e?.message || e) }); }
+  });
+
   app.put("/api/v1/specs/:fileIndex/draft", requireAuth({ mutation: true }), (req, res) => {
     if (!specDrafts) return res.status(501).json({ error: "spec drafts not wired" });
     const idx = validSpecIndex(req.params.fileIndex);
@@ -290,6 +321,36 @@ export function registerControlApi(app, deps) {
     res.json({ ok: true, fileIndex: idx, expiresAt: exp });
   });
 
+  // Surgical anchored edits (#edit_spec): apply edits to the current snapshot
+  // (the staged draft if present, else the committed body) and STAGE the result
+  // as a review-only draft. Never commits. Last-write-wins: staging is NOT
+  // blocked by the user editing (no lock check) — a live stage auto-loads into
+  // the open editor (see the file-view poll).
+  app.post("/api/v1/specs/:fileIndex/edit", requireAuth({ mutation: true }), async (req, res) => {
+    if (!specDrafts) return res.status(501).json({ error: "spec drafts not wired" });
+    const idx = validSpecIndex(req.params.fileIndex);
+    if (idx === null) return res.status(404).json({ error: "file index out of range" });
+    const { edits, source } = req.body || {};
+    const existing = specDrafts.get(idx);
+    let base;
+    if (existing && typeof existing.content === "string") {
+      base = existing.content;
+    } else {
+      try { base = await readFileMarkdown((getChangedFiles() || [])[idx].path); }
+      catch (e) { return res.status(502).json({ error: "failed to read file: " + (e?.message || e) }); }
+    }
+    try {
+      const { content, applied, replacements } = applyEdits(base, edits);
+      const d = specDrafts.put(idx, content, { source: source || "external" });
+      res.json({ ok: true, fileIndex: idx, applied, replacements, draft: d, version: focus.get().version });
+    } catch (e) {
+      if (e instanceof SpecEditError) {
+        return res.status(422).json({ error: e.message, code: e.code, editIndex: e.editIndex });
+      }
+      res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
   app.post("/api/v1/specs/:fileIndex/commit", requireAuth({ mutation: true }), async (req, res) => {
     if (typeof commitSpec !== "function") return res.status(501).json({ error: "commit not wired" });
     const idx = validSpecIndex(req.params.fileIndex);
@@ -299,6 +360,25 @@ export function registerControlApi(app, deps) {
     res.status(r.status).json(r.body);
   });
 
+  // GET /api/v1/prs — list pull requests to review (item 6). Query: status,
+  // creator ('me' default / 'any'), reviewer, target, top. Defaults to the
+  // authenticated user's active PRs.
+  app.get("/api/v1/prs", requireAuth(), async (req, res) => {
+    if (typeof listPrs !== "function") return res.status(501).json({ error: "list PRs not wired" });
+    try {
+      const q = {
+        status: req.query.status,
+        creator: req.query.creator,
+        reviewer: req.query.reviewer,
+        target: req.query.target,
+        top: req.query.top ? parseInt(req.query.top, 10) : undefined,
+      };
+      res.json(await listPrs(q));
+    } catch (e) {
+      res.status(502).json({ error: String(e?.message || e) });
+    }
+  });
+
   app.get("/api/v1/state", requireAuth(), (_req, res) => {
     const f = focus.get();
     res.json({
@@ -306,6 +386,10 @@ export function registerControlApi(app, deps) {
       version: f.version,
       navUrl: f.navUrl,
       navSeq: f.navSeq,
+      view: f.view,
+      viewSeq: f.viewSeq,
+      filter: f.filter,
+      filterSeq: f.filterSeq,
       drafts: drafts.list(),
       specDrafts: specDrafts ? specDrafts.list() : {},
     });

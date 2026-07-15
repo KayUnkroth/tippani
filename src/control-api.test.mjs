@@ -51,6 +51,7 @@ const SPEC_MD = "# Title\n\nIntro paragraph.\n\n## Section A\n\nBody.\n\n### Sub
 const focus = createFocusStore();
 const drafts = createDraftStore({ onChange: () => focus.bumpVersion() });
 const locks = createLockStore({ ttlMs: 60_000 });
+const specDrafts = createDraftStore({ onChange: () => focus.bumpVersion() });
 
 let lastAdoToken = null;
 const app = express();
@@ -63,7 +64,10 @@ registerControlApi(app, {
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
   readFileMarkdown: async (p) => (p === "/docs/spec.md" ? SPEC_MD : ""),
+  specDrafts,
   specDiff: async (idx) => ({ hunks: [{ startLine: 3, endLine: 3, oldHtml: "<p>a</p>", newHtml: "<p>b</p>" }], source: "test", updatedAt: 1 }),
+  renderDraft: async (idx, { draft } = {}) => ({ html: draft ? "<p>DRAFT</p>" : "<p>COMMITTED</p>" }),
+  listPrs: async (q) => ({ prs: [{ id: 1, title: "PR One", author: "Kay" }], mine: q.creator !== "any", status: 1 }),
 });
 
 const server = await new Promise((resolve) => {
@@ -319,6 +323,72 @@ try {
     await call("/api/v1/commands/focus", { method: "POST", headers: authHeaders, body: { threadId: 102 } });
     const v2 = (await call("/api/v1/state")).body.version;
     check("state: version bumps on focus change", v2 > v1);
+  }
+
+  // --- Surgical spec edits (/edit, #edit_spec) ---
+  {
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "range", startLine: 3, endLine: 3, oldString: "Intro paragraph.", newString: "Intro EDITED." }], source: "test-agent" } });
+    check("edit: range stages draft (200)", r.status === 200 && r.body.ok === true);
+    check("edit: applied count", r.body.applied === 1);
+    check("edit: draft reflects the edit", /Intro EDITED\./.test(r.body.draft.content));
+  }
+  {
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "Body.", replace: "Body!" }] } });
+    check("edit: accumulates on the staged draft", /Body!/.test(r.body.draft.content));
+    check("edit: prior edit persists across calls", /Intro EDITED\./.test(r.body.draft.content));
+  }
+  {
+    const before = (await call("/api/v1/specs/0/draft")).body.draft.content;
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "range", startLine: 1, endLine: 1, oldString: "WRONG", newString: "x" }] } });
+    check("edit: guard mismatch -> 422 code", r.status === 422 && r.body.code === "guard_mismatch");
+    const after = (await call("/api/v1/specs/0/draft")).body.draft.content;
+    check("edit: failed call stages nothing (draft unchanged)", before === after);
+  }
+  {
+    const r = await call("/api/v1/specs/0/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "zzz-not-present", replace: "x" }] } });
+    check("edit: not found -> 422 code", r.status === 422 && r.body.code === "not_found");
+  }
+  {
+    const r = await call("/api/v1/specs/99/edit", { method: "POST", headers: authHeaders,
+      body: { edits: [{ kind: "find", find: "x", replace: "y" }] } });
+    check("edit: bad file index -> 404", r.status === 404);
+  }
+
+  // --- View + filter control state (items 3 / 5) ---
+  {
+    const r = await call("/api/v1/commands/view", { method: "POST", headers: authHeaders, body: { view: "diff" } });
+    check("view: set diff -> ok", r.status === 200 && r.body.view.view === "diff");
+    const s = (await call("/api/v1/state")).body;
+    check("state: exposes view", s.view === "diff" && s.viewSeq >= 1);
+    const bad = await call("/api/v1/commands/view", { method: "POST", headers: authHeaders, body: { view: "nope" } });
+    check("view: bad view -> 400", bad.status === 400);
+  }
+  {
+    const r = await call("/api/v1/commands/filter", { method: "POST", headers: authHeaders, body: { filter: { states: ["you"] } } });
+    check("filter: set -> ok", r.status === 200 && r.body.filter.filter.states[0] === "you");
+    const s = (await call("/api/v1/state")).body;
+    check("state: exposes filter", !!s.filter && s.filter.states[0] === "you");
+    const cl = await call("/api/v1/commands/filter", { method: "POST", headers: authHeaders, body: { filter: null } });
+    check("filter: clear -> null", cl.body.filter.filter === null);
+  }
+  {
+    const r = await call("/api/v1/specs/0/render?draft=1", { headers: authHeaders });
+    check("render: draft=1 renders draft html", r.status === 200 && /DRAFT/.test(r.body.html));
+    const r2 = await call("/api/v1/specs/0/render", { headers: authHeaders });
+    check("render: committed html by default", /COMMITTED/.test(r2.body.html));
+  }
+
+  // --- list PRs (item 6) ---
+  {
+    const r = await call("/api/v1/prs", { headers: authHeaders });
+    check("prs: lists my active PRs by default", r.status === 200 && Array.isArray(r.body.prs) && r.body.prs[0].id === 1);
+    check("prs: mine true by default", r.body.mine === true);
+    const r2 = await call("/api/v1/prs?creator=any", { headers: authHeaders });
+    check("prs: creator=any widens", r2.body.mine === false);
   }
 
 } finally {

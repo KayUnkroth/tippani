@@ -6,7 +6,7 @@
 // input.
 
 import { EventEmitter } from "events";
-import { createPortalSession } from "./portal-launcher.js";
+import { createPortalSession, openInBrowser } from "./portal-launcher.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) {
@@ -190,6 +190,27 @@ try {
     try { await s.ensurePortal({ prId: 0 }); } catch { threw = true; }
     check("input: rejects missing prId", threw);
     s.stop();
+  }
+
+  // --- openInBrowser: pluggable opener (item 7) ---
+  {
+    let openedUrl = null;
+    const res = await openInBrowser("http://localhost:3847/prs", {
+      openCmd: "", spawnFn: () => { throw new Error("should not spawn"); }, openFn: (u) => { openedUrl = u; },
+    });
+    check("open: falls back to OS open when no cmd", res.via === "open" && openedUrl === "http://localhost:3847/prs");
+  }
+  {
+    let spawned = null;
+    const res = await openInBrowser("http://localhost:3848/file/0", {
+      openCmd: "vsc-open {url}", spawnFn: (cmd) => { spawned = cmd; return { unref() {} }; }, openFn: () => { throw new Error("should not open externally"); },
+    });
+    check("open: runs host cmd with {url} substituted", res.via === "cmd" && spawned === "vsc-open http://localhost:3848/file/0");
+  }
+  {
+    let spawned = null;
+    await openInBrowser("http://x/y", { openCmd: "myopen", spawnFn: (cmd) => { spawned = cmd; return { unref() {} }; }, openFn: () => {} });
+    check("open: appends URL when no {url} placeholder", spawned === "myopen http://x/y");
   }
 } catch (e) {
   // A thrown block used to be masked by the bare try/finally + process.exit(0),

@@ -32,6 +32,8 @@ import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
 import { isExpiredJwt } from "./ado-token-check.js";
+import { buildPrCriteria, summarizePr } from "./pr-criteria.js";
+import { navSkipsBarePathClobber, navShouldNavigate } from "./nav-guard.js";
 import {
   decodeConfigValue,
   extOf,
@@ -206,6 +208,14 @@ function getAdoConnection(pat) {
 async function getPullRequest(conn, prId) {
   const gitApi = await conn.getGitApi();
   return gitApi.getPullRequestById(prId);
+}
+
+// List pull requests for the configured project (item 6). `criteria` is a
+// GitPullRequestSearchCriteria (see pr-criteria.buildPrCriteria).
+async function listPullRequests(conn, criteria, top = 50) {
+  const gitApi = await conn.getGitApi();
+  const prs = await gitApi.getPullRequestsByProject(ADO_PROJECT, criteria, undefined, undefined, top);
+  return prs || [];
 }
 
 // The PR object carries the authoritative repository (getPullRequestById is a
@@ -741,6 +751,8 @@ function stripMarkdown(s) {
 // fetch to /api/v1/state is auth-exempt like the other in-page polls.
 const NAV_WATCHER = `<script>
 (function(){
+  ${navSkipsBarePathClobber.toString()}
+  ${navShouldNavigate.toString()}
   async function navPoll(){
     try {
       const r = await fetch('/api/v1/state');
@@ -751,16 +763,10 @@ const NAV_WATCHER = `<script>
       try { last = Number(sessionStorage.getItem('tippaniNavSeq')) || 0; } catch (e) {}
       if (s.navSeq <= last) return;
       try { sessionStorage.setItem('tippaniNavSeq', String(s.navSeq)); } catch (e) {}
-      var here = location.pathname + location.search;
-      var target = null;
-      try {
-        var u = new URL(s.navUrl, location.origin);
-        // Only ever steer the tab to a SAME-ORIGIN path. A foreign absolute URL
-        // or a javascript: value resolves to a different (or opaque) origin and
-        // is ignored — never navigate the user off-app or into a script URL.
-        if (u.origin === location.origin) { target = u.pathname + u.search + u.hash; }
-      } catch (e) {}
-      if (target && target !== here) { location.href = target; }
+      // Same-origin-only + don't clobber a deliberate same-path query deep-link
+      // (e.g. ?edit=1) — both handled by navShouldNavigate.
+      if (navShouldNavigate({ pathname: location.pathname, search: location.search, hash: location.hash }, s.navUrl, location.origin))
+        location.href = s.navUrl;
     } catch (e) {}
   }
   setInterval(navPoll, 1500);
@@ -918,14 +924,17 @@ function buildFeedbackPage(pr, threads, changedFiles, viewedMap = {}, viewedErro
       const gist = stripMarkdown((last?.content || "").replace(/\s+/g, " ")).slice(0, 180);
       const idx = file ? fileIndexOf(file) : -1;
       const anchor = file ? `${file.split("/").pop()}${line ? ":" + line : ""}` : "PR-level";
-      return { id: t.id, resolved, lastBy, waiting, gist, idx, anchor, comments, count: comments.length };
+      const reviewers = [...new Set(comments.map((c) => c.author?.displayName).filter(Boolean))];
+      return { id: t.id, resolved, lastBy, waiting, gist, idx, anchor, comments, count: comments.length, file: file || null, reviewers };
     });
 
   const rank = (w) => (w === "you" ? 0 : w === "reviewer" ? 1 : w === "viewed" ? 2 : w === "fyi" ? 3 : 4);
   rows.sort((a, b) => rank(a.waiting) - rank(b.waiting) || (a.anchor > b.anchor ? 1 : a.anchor < b.anchor ? -1 : 0));
 
-  const openCount = rows.filter((r) => !r.resolved && r.waiting !== "fyi").length;
-  const needCount = rows.filter((r) => r.waiting === "you").length;
+  const stateLabels = { you: "Needs you", reviewer: "Awaiting reviewer", viewed: "Viewed", fyi: "FYI", resolved: "Resolved" };
+  const allReviewers = [...new Set(rows.flatMap((r) => r.reviewers || []))].sort();
+  const allFiles = [...new Set(rows.map((r) => r.file).filter(Boolean))].sort();
+  const openCount = rows.filter((r) => !r.resolved && r.waiting !== "fyi").length;  const needCount = rows.filter((r) => r.waiting === "you").length;
 
   const badgeFor = (w) =>
     w === "you" ? '<span class="fb-badge fb-need">Needs your reply</span>'
@@ -942,7 +951,9 @@ function buildFeedbackPage(pr, threads, changedFiles, viewedMap = {}, viewedErro
 
   const cardsHtml = rows.map((r) => {
     const threadHtml = (r.comments || []).map(commentHtml).join("");
-    return `<div class="fb-card">
+    const dataText = escHtml((r.gist + " " + (r.comments || []).map((c) => c.content || "").join(" ")).toLowerCase());
+    const dataRev = escHtml((r.reviewers || []).join("|"));
+    return `<div class="fb-card" data-state="${r.waiting}" data-file="${escHtml(r.file || "")}" data-reviewers="${dataRev}" data-text="${dataText}">
       <div class="fb-top"><span class="fb-anchor">${escHtml(r.anchor)}</span>${badgeFor(r.waiting)}<button type="button" class="fb-toggle" aria-expanded="false" onclick="toggleCard(this)">Expand</button></div>
       <div class="fb-gist">${escHtml(r.gist)}</div>
       <div class="fb-meta">last by ${escHtml(r.lastBy)} \u00b7 ${r.count} comment${r.count !== 1 ? "s" : ""}</div>
@@ -974,6 +985,11 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
 .back { font-size: 13px; color: var(--cp-accent); text-decoration: none; }
 .fb-sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 20px; }
 .fb-list { display: flex; flex-direction: column; gap: 8px; }
+.fb-filters { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 14px; }
+.fb-chip-group { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.fb-chip { font-size: 12px; display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border: 1px solid var(--cp-border); border-radius: 99px; background: var(--cp-surface); cursor: pointer; }
+.fb-filters select, .fb-filters input { font-family: inherit; font-size: 12px; padding: 5px 9px; border: 1px solid var(--cp-border); border-radius: 8px; background: var(--cp-surface); color: var(--cp-text); }
+.fb-filters input[type=search] { flex: 1; min-width: 140px; }
 .fb-card { display: block; padding: 14px 18px; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 12px; text-decoration: none; color: var(--cp-text); transition: all 0.15s; }
 .fb-card:hover { border-color: var(--cp-accent); box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
 .fb-static { cursor: default; opacity: 0.85; }
@@ -1010,6 +1026,33 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
     if (willOpen) { body.removeAttribute('hidden'); btn.textContent = 'Collapse'; btn.setAttribute('aria-expanded', 'true'); }
     else { body.setAttribute('hidden', ''); btn.textContent = 'Expand'; btn.setAttribute('aria-expanded', 'false'); }
   }
+  // Item 5: filter the feedback cards (state / reviewer / file / text). Same
+  // shape the set_feedback_filter MCP tool pushes; persisted to localStorage.
+  function applyFeedbackFilter() {
+    const states = Array.from(document.querySelectorAll('.fb-chip input:checked')).map((c) => c.value);
+    const reviewer = (document.getElementById('fbReviewer') || {}).value || '';
+    const file = (document.getElementById('fbFile') || {}).value || '';
+    const q = ((document.getElementById('fbSearch') || {}).value || '').toLowerCase();
+    document.querySelectorAll('.fb-card').forEach((card) => {
+      const revs = (card.dataset.reviewers || '').split('|').filter(Boolean);
+      const ok = (!states.length || states.includes(card.dataset.state))
+        && (!reviewer || revs.includes(reviewer))
+        && (!file || card.dataset.file === file)
+        && (!q || (card.dataset.text || '').includes(q));
+      card.style.display = ok ? '' : 'none';
+    });
+    try { localStorage.setItem('fbFilter', JSON.stringify({ states, reviewer, file, query: q })); } catch (e) {}
+  }
+  function setFeedbackFilterUI(f) {
+    if (!f) f = { states: ['you','reviewer','viewed','fyi','resolved'], reviewer: '', file: '', query: '' };
+    if (Array.isArray(f.states)) document.querySelectorAll('.fb-chip input').forEach((c) => { c.checked = f.states.length ? f.states.includes(c.value) : true; });
+    if (document.getElementById('fbReviewer')) document.getElementById('fbReviewer').value = f.reviewer || '';
+    if (document.getElementById('fbFile')) document.getElementById('fbFile').value = f.file || '';
+    if (document.getElementById('fbSearch')) document.getElementById('fbSearch').value = f.query || '';
+    applyFeedbackFilter();
+  }
+  (function () { try { const s = localStorage.getItem('fbFilter'); if (s) setFeedbackFilterUI(JSON.parse(s)); } catch (e) {} })();
+  (function () { let lastSeq = -1; async function poll() { try { const r = await fetch('/api/v1/state'); if (r.ok) { const s = await r.json(); if (typeof s.filterSeq === 'number' && s.filterSeq !== lastSeq) { lastSeq = s.filterSeq; setFeedbackFilterUI(s.filter); } } } catch (e) {} } setInterval(poll, 1500); poll(); })();
 <\/script>
 </head>
 <body>
@@ -1024,6 +1067,12 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFon
     </div>
     <div class="fb-sub">PR #${prId} · ${openCount} open thread${openCount !== 1 ? "s" : ""}${needCount ? ` · ${needCount} need${needCount !== 1 ? "" : "s"} your reply` : ""}</div>
     ${viewedWarning(viewedError)}
+    <div class="fb-filters" id="fbFilters">
+      <span class="fb-chip-group">${["you","reviewer","viewed","fyi","resolved"].map((s) => `<label class="fb-chip"><input type="checkbox" value="${s}" checked onchange="applyFeedbackFilter()">${escHtml(stateLabels[s])}</label>`).join("")}</span>
+      <select id="fbReviewer" onchange="applyFeedbackFilter()"><option value="">All reviewers</option>${allReviewers.map((r) => `<option value="${escHtml(r)}">${escHtml(r)}</option>`).join("")}</select>
+      <select id="fbFile" onchange="applyFeedbackFilter()"><option value="">All files</option>${allFiles.map((f) => `<option value="${escHtml(f)}">${escHtml(f.split("/").pop())}</option>`).join("")}</select>
+      <input id="fbSearch" type="search" placeholder="Search\u2026" oninput="applyFeedbackFilter()">
+    </div>
     <div class="fb-list">
       ${cardsHtml || '<div class="fb-empty">No comment threads on this PR.</div>'}
     </div>
@@ -1033,7 +1082,66 @@ ${NAV_WATCHER}
 </html>`;
 }
 
-// --- Single-thread view + reply page (PR-level threads) ---
+// --- Pull-request list page (item 6) — tiles + client-side title/author filter.
+function buildPrListPage(prs, project) {
+  const list = prs || [];
+  const statusLabel = (s) => (s === 1 ? "Active" : s === 3 ? "Completed" : s === 2 ? "Abandoned" : "");
+  const rows = list.map((pr) => `<div class="pr-card" data-title="${escHtml((pr.title || "").toLowerCase())}" data-author="${escHtml((pr.author || "").toLowerCase())}">
+      <div class="pr-top"><span class="pr-id">#${pr.id}</span><span class="pr-status">${statusLabel(pr.status)}</span>${pr.isDraft ? '<span class="pr-draft">Draft</span>' : ""}</div>
+      <div class="pr-title">${escHtml(pr.title || "")}</div>
+      <div class="pr-meta">${escHtml(pr.author || "")} \u00b7 ${escHtml(pr.source || "")} \u2192 ${escHtml(pr.target || "")}${pr.repo ? " \u00b7 " + escHtml(pr.repo) : ""}</div>
+      <div class="pr-actions">${pr.webUrl ? `<a class="pr-open" href="${pr.webUrl}" target="_blank" rel="noopener">Open PR \u2197</a>` : ""}</div>
+    </div>`).join("\n");
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tippani \u2014 Pull Requests</title>
+<style>
+${cssVariables()}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, sans-serif; background: var(--cp-bg); color: var(--cp-text); padding: 40px 24px; display: flex; flex-direction: column; align-items: center; }
+.container { width: 100%; max-width: 820px; }
+.brand-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+.logo { width: 32px; height: 32px; border-radius: 8px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-weight: 700; font-size: 12px; }
+h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
+.sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 16px; }
+.filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.filters input { font-family: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--cp-border); border-radius: 8px; background: var(--cp-surface); color: var(--cp-text); flex: 1; min-width: 200px; }
+.pr-list { display: flex; flex-direction: column; gap: 8px; }
+.pr-card { padding: 14px 18px; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 12px; }
+.pr-card:hover { border-color: var(--cp-accent); }
+.pr-top { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.pr-id { font-size: 13px; font-weight: 700; color: var(--cp-accent); }
+.pr-status { font-size: 11px; color: var(--cp-text-muted); }
+.pr-draft { font-size: 11px; background: var(--cp-border); padding: 1px 7px; border-radius: 99px; }
+.pr-title { font-size: 15px; font-weight: 600; line-height: 1.35; }
+.pr-meta { font-size: 12px; color: var(--cp-text-muted); margin-top: 4px; }
+.pr-actions { margin-top: 8px; display: flex; gap: 14px; }
+.pr-open { font-size: 12px; font-weight: 600; color: var(--cp-accent); text-decoration: none; }
+.empty { font-size: 14px; color: var(--cp-text-muted); padding: 24px; text-align: center; }
+<\/style>
+<script>
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+  function applyPrFilter() {
+    const q = (document.getElementById('prSearch').value || '').toLowerCase();
+    document.querySelectorAll('.pr-card').forEach((c) => {
+      const hit = !q || c.dataset.title.includes(q) || c.dataset.author.includes(q);
+      c.style.display = hit ? '' : 'none';
+    });
+  }
+<\/script></head><body>
+  <div class="container">
+    <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 pull requests</span></div>
+    <h1>Pull requests${project ? " \u2014 " + escHtml(project) : ""}</h1>
+    <div class="sub">${list.length} PR${list.length !== 1 ? "s" : ""}</div>
+    <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
+    <div class="pr-list">${rows || '<div class="empty">No pull requests found.</div>'}</div>
+  </div>
+${NAV_WATCHER}
+</body></html>`;
+}
+
+// --- Single-thread view + reply page (used for PR-level threads that have no
+// file anchor, so they still get a "jump in and reply" experience).
 function buildThreadPage(pr, thread, draft, isViewed = false, viewedError = null) {
   const prId = pr.pullRequestId;
   const tid = thread.id;
@@ -1233,10 +1341,10 @@ function buildSpecPage(specHtml, toc, metadata, pr, threads, specPath, sourceMap
             <button type="button" class="reply-btn-cancel reply-btn-close" onclick="closeReply(${t.id})">Cancel</button>
           </div>
         </form>`;
-    return `<div class="comment-thread ${statusClass}" data-thread-id="${t.id}" data-thread-line="${t.threadContext?.rightFileStart?.line || ""}">
+    return `<div class="comment-thread ${statusClass}" data-thread-id="${t.id}" data-thread-line="${t.threadContext?.rightFileStart?.line || ""}" onclick="onThreadClick(event, ${t.id})">
       ${(anchor || statusTag) ? `<div class="comment-anchor">${isResolved ? "✓ " : ""}${escHtml(anchor)}${statusTag}</div>` : ""}
       ${isResolved ? `<details><summary class="resolved-summary">${escHtml(t.comments[0]?.author?.displayName || "Comment")} — resolved</summary>` : ""}
-      ${commentsHtml}
+      <div class="thread-comments">${commentsHtml}</div>
       ${actions}
       ${isResolved ? `</details>` : ""}
     </div>`;
@@ -1359,7 +1467,7 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .file-nav-active { background: var(--cp-highlight); color: var(--cp-accent); font-weight: 600; }
 
 /* Main content */
-.main-content { flex: 1; min-width: 0; overflow-y: auto; padding: 32px 40px; background: var(--cp-bg); }
+.main-content { flex: 1; min-width: 0; overflow-y: auto; padding: 32px 40px; background: var(--cp-bg); scroll-padding-top: 56px; }
 .spec { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 40px; box-shadow: 0 1px 4px rgba(0,0,0,0.04); max-width: 820px; margin: 0 auto; }
 .spec h1 { font-size: 28px; font-weight: 700; margin: 1.5rem 0 0.75rem; padding-bottom: 0.5rem; border-bottom: 1px solid var(--cp-border); color: var(--cp-text); }
 .spec h1 a, .spec h2 a, .spec h3 a, .spec h4 a { color: inherit; text-decoration: none; }
@@ -1396,6 +1504,10 @@ body.col-resizing * { cursor: col-resize !important; user-select: none !importan
 .layout.edit-mode.right-collapsed #resizeRight { display: none; }
 .empty-comments { font-size: 13px; color: var(--cp-text-muted); font-style: italic; padding: 12px 0; }
 .comment-thread { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 16px; margin-bottom: 10px; font-size: 13px; transition: box-shadow 0.15s; overflow: hidden; min-width: 0; }
+/* Item 9: cap a thread's comment list so a long thread doesn't push the last
+   reply + reply box off-screen — older comments scroll internally; the latest
+   comment stays visible. Scrollbar only appears when the list exceeds the cap. */
+.thread-comments { max-height: 42vh; overflow-y: auto; overflow-x: hidden; }
 .comment-thread:hover { box-shadow: 0 4px 16px rgba(0,0,0,0.08); }
 .thread-active { border-left: 3px solid var(--cp-accent); }
 .thread-resolved { border-left: 3px solid var(--cp-success); opacity: 0.7; }
@@ -1435,7 +1547,18 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .reply-btn-cancel { background: none; border: 1px solid var(--cp-border); color: var(--cp-text-muted); font-size: 12px; padding: 5px 12px; border-radius: 6px; cursor: pointer; }
 .reply-btn-cancel:hover { color: var(--cp-text); }
 .reply-external-badge { font-size: 11px; color: var(--cp-accent); background: color-mix(in srgb, var(--cp-accent) 12%, transparent); border: 1px solid color-mix(in srgb, var(--cp-accent) 30%, transparent); border-radius: 6px; padding: 4px 8px; margin-bottom: 6px; }
-.comment-thread.thread-focused { box-shadow: 0 0 0 2px var(--cp-accent); }
+.comment-thread.thread-focused { box-shadow: 0 0 0 2px #6d071a; border-color: #6d071a !important; cursor: pointer; }
+/* Item 2/8: persistent Bordeaux-red highlight on the source section tied to the focused thread (no timeout). */
+.spec .section-focused { box-shadow: 0 0 0 2px #6d071a; border-radius: 6px; }
+[data-theme="dark"] .comment-thread.thread-focused { box-shadow: 0 0 0 2px #b23a58; border-color: #b23a58 !important; }
+[data-theme="dark"] .spec .section-focused { box-shadow: 0 0 0 2px #b23a58; }
+/* Item 3: Current / Diff / Proposed view toggle. */
+.view-toggle { display: inline-flex; border: 1px solid var(--cp-border); border-radius: 7px; overflow: hidden; margin-right: 6px; }
+.view-btn { font-family: inherit; font-size: 12px; padding: 4px 10px; border: none; background: var(--cp-surface); color: var(--cp-text-muted); cursor: pointer; border-right: 1px solid var(--cp-border); }
+.view-btn:last-child { border-right: none; }
+.view-btn:hover { background: var(--cp-accent-soft); color: var(--cp-text); }
+.view-btn.active { background: var(--cp-accent); color: var(--cp-accent-fg); font-weight: 600; }
+.view-btn:disabled { opacity: 0.4; cursor: default; }
 .kbd-hint { font-size: 11px; color: var(--cp-text-muted); padding: 6px 12px; border-top: 1px solid var(--cp-border); background: var(--cp-surface-soft); }
 .kbd-hint kbd { background: var(--cp-surface); border: 1px solid var(--cp-border); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; font-family: ui-monospace, monospace; font-size: 10px; }
 
@@ -1541,6 +1664,11 @@ details[open] .resolved-summary::before { content: '▾ '; }
     </div>
   </div>
   <div class="header-right">
+    <div class="view-toggle" id="viewToggle" role="group" aria-label="View">
+      <button class="view-btn active" data-view="current" onclick="tippani.setView('current')" title="Version currently committed in the PR">Current</button>
+      <button class="view-btn" data-view="diff" onclick="tippani.setView('diff')" title="Proposed changes overlaid" disabled>Diff</button>
+      <button class="view-btn" data-view="proposed" onclick="tippani.setView('proposed')" title="Proposed version (clean)" disabled>Proposed</button>
+    </div>
     <span class="dirty-dot" id="dirtyDot" style="display:none" title="Unsaved changes">●</span>
     ${canEdit ? `<div class="edit-pane-controls" id="editPaneControls" aria-label="Edit layout controls">
       <button class="pane-toggle" id="toggleTocPane" onclick="tippani.togglePane('left')" title="Minimize contents pane" aria-label="Minimize contents pane" aria-pressed="false">T</button>
@@ -1548,6 +1676,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
       <button class="pane-toggle" id="focusEditPane" onclick="tippani.toggleFocusEdit()" title="Focus editor" aria-label="Focus editor" aria-pressed="false">F</button>
     </div>` : ""}
     ${canEdit ? `<button class="edit-toggle save-btn" id="saveBtn" onclick="tippani.save()" style="display:none" disabled>Save</button>` : ""}
+    ${canEdit ? `<button class="edit-toggle" id="findBtn" onclick="tippani.search()" style="display:none" title="Find & Replace (Ctrl+F / Ctrl+H)">Find</button>` : ""}
     ${canEdit ? `<button class="edit-toggle" id="editToggle" onclick="tippani.toggle()" title="Toggle edit mode (${"⌘"}/Ctrl+E)">Edit</button>` : ""}
     <span id="proposalSource" class="proposal-source" style="display:none"></span>
     <button class="edit-toggle" id="discardProposalBtn" onclick="tippani.discardProposal()" style="display:none" title="Discard the staged proposed edit for this file">Discard proposal</button>
@@ -1613,6 +1742,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
       ${specHtml}
     </div>
     <div class="spec spec-edit" id="spec-editor" style="display:none"></div>
+    <div class="spec" id="spec-current" style="display:none"></div>
   </main>
 
   <div class="resize-handle" id="resizeRight"></div>
@@ -1885,6 +2015,7 @@ window.tippani = (function () {
     if (!ensureEditor()) return;
     el("spec-content").style.display = "none";
     el("spec-editor").style.display = "";
+    { const sc = el("spec-current"); if (sc) sc.style.display = "none"; }
     const tb = el("fmtToolbar");
     if (tb) tb.style.display = "";
     el("mainContent").classList.add("editing");
@@ -1892,6 +2023,7 @@ window.tippani = (function () {
     if (btn) btn.textContent = "View";
     const save = el("saveBtn");
     if (save) save.style.display = "";
+    { const find = el("findBtn"); if (find) find.style.display = ""; }
     updateSaveState();
     updateDirtyIndicator();
     editMode = true;
@@ -1913,8 +2045,10 @@ window.tippani = (function () {
     if (btn) btn.textContent = "Edit";
     const save = el("saveBtn");
     if (save) save.style.display = "none";
+    { const find = el("findBtn"); if (find) find.style.display = "none"; }
     editMode = false;
     applyEditPaneState();
+    if (typeof applyView === "function") applyView(typeof _currentView === "string" ? _currentView : "current");
   }
   function toggle() {
     editMode ? exitEdit() : enterEdit();
@@ -2136,6 +2270,14 @@ window.tippani = (function () {
     getEditor: () => editor,
     // True while the spec editor is open — drives the edit lock heartbeat.
     isEditing: () => editMode,
+    // Open the Find & Replace panel (manual equivalent of edit_spec's find kind).
+    search: () => { if (ensureEditor() && editor && editor.openSearch) editor.openSearch(); },
+    // Switch the spec reading view (item 3). Applies locally at once + records it
+    // server-side so the agent's set_view and the manual toggle share one state.
+    setView: (v) => {
+      if (typeof applyView === "function") applyView(v);
+      fetch("/api/v1/commands/view", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ view: v }) }).catch(() => {});
+    },
   };
 })();
 </script>
@@ -2378,8 +2520,6 @@ function scrollToLine(line) {
   if (!target) return;
   const dest = target._diffDest || target;
   dest.scrollIntoView({ behavior: 'smooth', block: 'center' });
-  dest.style.boxShadow = '0 0 0 2px var(--cp-accent)';
-  setTimeout(() => { dest.style.boxShadow = ''; }, 1500);
 }
 // Scroll the document to a thread's location so opening/focusing a thread syncs the doc.
 function scrollDocToThread(threadId) {
@@ -2406,7 +2546,66 @@ function scrollEditorToLine(lineNo) {
     main.scrollBy({ top: delta, behavior: 'smooth' });
   } catch {}
 }
-applyDiffOverlay();
+// Item 3: Current / Diff / Proposed reading view. Server-pushed (set_view) or
+// clicked; it never auto-flips when a draft is staged. 'proposed' renders the
+// proposed draft clean into #spec-current; 'diff' overlays; 'current' is the
+// committed #spec-content.
+let _currentView = 'current';
+async function applyView(view) {
+  if (!['current','diff','proposed'].includes(view)) return;
+  _currentView = view;
+  document.querySelectorAll('.view-btn').forEach((b) => b.classList.toggle('active', b.dataset.view === view));
+  const content = document.getElementById('spec-content');
+  const current = document.getElementById('spec-current');
+  const editing = !!(document.getElementById('mainContent') && document.getElementById('mainContent').classList.contains('editing'));
+  if (view === 'proposed') {
+    try {
+      const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/render?draft=1');
+      if (r.ok) { const d = await r.json(); if (current) current.innerHTML = d.html || ''; }
+    } catch {}
+    if (!editing) { if (content) content.style.display = 'none'; if (current) current.style.display = ''; }
+  } else {
+    if (current) current.style.display = 'none';
+    if (!editing && content) content.style.display = '';
+    clearDiffOverlay();
+    if (view === 'diff') { try { await applyDiffOverlay(); } catch {} }
+  }
+}
+// Item 2: persistent dark-red highlight on the source section tied to a thread.
+function highlightSectionForThread(threadId) {
+  document.querySelectorAll('.spec .section-focused').forEach((e) => e.classList.remove('section-focused'));
+  const td = THREADS_DATA.find((t) => Number(t.id) === Number(threadId));
+  if (!td || !td.line) return;
+  if (td.file && SPEC_PATH && td.file !== SPEC_PATH) return;
+  let target = null, bestKey = null, bestDist = Infinity;
+  for (const key of Object.keys(SOURCE_MAP)) {
+    const sm = SOURCE_MAP[key];
+    if (td.line >= sm.startLine && td.line <= sm.endLine) { target = commentableEls[parseInt(key)]; break; }
+    const dist = td.line < sm.startLine ? sm.startLine - td.line : td.line - sm.endLine;
+    if (dist < bestDist) { bestDist = dist; bestKey = key; }
+  }
+  if (!target && bestKey != null) target = commentableEls[parseInt(bestKey)];
+  const dest = target && (target._diffDest || target);
+  if (dest && dest.classList) dest.classList.add('section-focused');
+}
+// Enable Diff/Proposed only when a staged proposal exists for this file (else
+// they're greyed). Current is always available.
+function setViewButtonsEnabled(hasDraft) {
+  document.querySelectorAll('.view-btn').forEach((b) => {
+    if (b.dataset.view === 'diff' || b.dataset.view === 'proposed') {
+      b.disabled = !hasDraft;
+      if (!hasDraft) b.title = 'No staged proposal yet';
+    }
+  });
+  if (!hasDraft && (_currentView === 'diff' || _currentView === 'proposed')) applyView('current');
+}
+applyView('current');
+(async () => {
+  try {
+    const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/draft');
+    if (r.ok) { const d = await r.json(); setViewButtonsEnabled(!!(d && d.draft && d.draft.content)); }
+  } catch {}
+})();
 
 // open_file deep-link: /file/<idx>?line=N scrolls to that line once the view settles.
 (function () {
@@ -2489,8 +2688,23 @@ function focusThread(threadId, { scroll = true } = {}) {
   if (scroll && typeof scrollDocToThread === 'function') scrollDocToThread(threadId);
   _focusedThreadId = threadId;
   if (typeof updateDiffMarkers === 'function') updateDiffMarkers();
+  if (typeof highlightSectionForThread === 'function') highlightSectionForThread(threadId);
   return true;
 }
+
+// Item 8: click a thread card (but not its buttons/textarea/links) to focus it —
+// Bordeaux border on the thread + its source section, and scroll the doc there.
+function onThreadClick(e, id) {
+  if (e && e.target && e.target.closest('button, textarea, input, a, .reply-form, summary')) return;
+  focusThread(id);
+}
+// Item 9: scroll each thread's comment list to its latest comment on load so the
+// most recent reply is visible without scrolling the pane.
+(function () {
+  const scrollLatest = () => document.querySelectorAll('.thread-comments').forEach((c) => { c.scrollTop = c.scrollHeight; });
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', scrollLatest);
+  else scrollLatest();
+})();
 
 function gotoNext() {
   const ids = _getActiveThreadIds();
@@ -2655,6 +2869,8 @@ document.addEventListener('keydown', (e) => {
 // staged externally, populate the textarea and badge it.
 (function() {
   let lastVersion = -1;
+  let lastViewSeq = -1;
+  let lastSpecDraftKey = null;
   const seenDraftKey = (id, d) => id + ':' + (d ? d.updatedAt : '0');
   const lastDraftSeen = new Map();
 
@@ -2732,8 +2948,26 @@ document.addEventListener('keydown', (e) => {
             clearExternalBadge(tid);
           }
         }
-        // Apply an externally-staged spec edit for THIS file.
-        try { applyDiffOverlay(); } catch {}
+        // View switch pushed by the agent (set_view) — the browser NEVER
+        // auto-flips on a stage; it only changes when viewSeq bumps.
+        if (typeof s.viewSeq === 'number' && s.viewSeq !== lastViewSeq) {
+          lastViewSeq = s.viewSeq;
+          if (s.view) { try { applyView(s.view); } catch {} }
+        } else {
+          // A staged spec edit for THIS file changed: refresh only the CURRENT
+          // view (don't switch it) and, if editing, auto-load it into the editor
+          // (item 4, last-write-wins).
+          const sd = (s.specDrafts || {})[CURRENT_FILE_INDEX];
+          const key = sd ? sd.updatedAt : 0;
+          if (key !== lastSpecDraftKey) {
+            lastSpecDraftKey = key;
+            if (typeof setViewButtonsEnabled === 'function') setViewButtonsEnabled(!!sd);
+            if (_currentView === 'diff' || _currentView === 'proposed') { try { applyView(_currentView); } catch {} }
+            if (sd && window.tippani && window.tippani.isEditing && window.tippani.isEditing() && window.tippani.getEditor) {
+              const ed = window.tippani.getEditor(); if (ed && ed.setMarkdown) ed.setMarkdown(sd.content);
+            }
+          }
+        }
       }
     } catch {}
   }
@@ -2938,7 +3172,8 @@ async function main() {
   _prId = parseInt(positional[0]);
   const explicitFile = args.find((a) => a.startsWith("--file="))?.split("=").slice(1).join("=") || positional[1] || null;
 
-  if (!_prId) {
+  const browseMode = args.includes("--browse");
+  if (!_prId && !browseMode) {
     console.log("Usage: tippani <PR_ID> [options]");
     console.log("");
     console.log("Options:");
@@ -2994,6 +3229,45 @@ async function main() {
   if (Number.isFinite(portVal) && portVal > 0) PORT = portVal;
   const headless = args.includes("--headless") || process.env.TIPPANI_HEADLESS === "1";
   const adoToken = (args.find(a => a.startsWith("--ado-token="))?.split("=").slice(1).join("=")) || process.env.TIPPANI_ADO_TOKEN || null;
+
+  // Browse mode (item 6): a PR-less portal that only lists pull requests
+  // (/prs + /api/v1/prs), so list_prs works before any PR is opened. Reads
+  // org/project from config; needs an ADO token.
+  if (browseMode) {
+    if (adoToken) _conn = getAdoConnectionBearer(adoToken);
+    else { const pat = loadPat(); if (pat) _conn = getAdoConnection(pat); }
+    if (!_conn) { console.error("Browse mode requires an ADO token (--ado-token / TIPPANI_ADO_TOKEN)."); process.exit(1); }
+    _prId = 0;
+    const bapp = express();
+    bapp.use(express.json());
+    registerControlApi(bapp, {
+      port: PORT, sessionToken: _sessionToken, focus: _focus, drafts: _drafts, locks: _locks,
+      getThreads: () => [], getChangedFiles: () => [], listPrs: doListPrs,
+    });
+    bapp.get("/prs", async (_req, res) => {
+      try { const d = await doListPrs({}); res.type("html").send(buildPrListPage(d.prs || [], ADO_PROJECT)); }
+      catch (e) { res.status(500).send("Error listing PRs."); console.error("PR list error:", e.message); }
+    });
+    bapp.get("/", (_req, res) => res.redirect("/prs"));
+    const bserver = bapp.listen(PORT, "127.0.0.1", () => {
+      try {
+        fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+        const tokenPath = path.join(CONFIG_DIR, `session-token-${PORT}`);
+        fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
+        writeInstance({ port: PORT, prId: 0, token: _sessionToken, pid: process.pid, url: `http://localhost:${PORT}`, shimPid: Number(process.env.TIPPANI_SHIM_PID) || null });
+        const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} removeInstance(PORT); };
+        process.on("exit", cleanup);
+        process.on("SIGINT", () => { cleanup(); process.exit(0); });
+        process.on("SIGTERM", () => { cleanup(); process.exit(0); });
+        if (process.channel) process.on("disconnect", () => { cleanup(); process.exit(0); });
+      } catch (e) { console.warn("  browse: token persist failed: " + e.message); }
+      console.log(`\n  Tippani (browse) running at http://localhost:${PORT}`);
+      console.log(`  Control API token: ${_sessionToken}`);
+      if (!headless) open(`http://localhost:${PORT}/prs`);
+    });
+    bserver.on("error", (err) => { console.error("  browse server error: " + err.message); process.exit(1); });
+    return;
+  }
 
   // Try cache first
   _cache = loadCache(_prId);
@@ -3233,6 +3507,13 @@ async function main() {
     return res.redirect(`/thread/${id}`);
   });
 
+  // PR list page (item 6). Works on any portal that has an ADO connection
+  // (PR-bound or browse) so list_prs can navigate here.
+  app.get("/prs", async (_req, res) => {
+    try { const d = await doListPrs({}); res.type("html").send(buildPrListPage(d.prs || [], ADO_PROJECT)); }
+    catch (e) { res.status(500).send("Error listing PRs. Check the server console."); console.error("PR list error:", e.message); }
+  });
+
   // Spec view for a specific file
   app.get("/file/:index", async (req, res) => {
     try {
@@ -3331,6 +3612,41 @@ async function main() {
     if (body === draftBody) return { hunks: [] };
     const hunks = await computeSpecDiffHunks(body, draftBody);
     return { hunks, source: draft.source || null, updatedAt: draft.updatedAt || null };
+  }
+
+  // Rendered HTML of a file's proposed draft (draft=true) or committed body,
+  // for the Original / Current view toggle (item 3). The reading view swaps
+  // #spec-content to this HTML.
+  async function renderSpecDraft(idx, { draft: wantDraft } = {}) {
+    const files = _changedFiles || [];
+    if (!Number.isFinite(idx) || idx < 0 || idx >= files.length) return { html: "" };
+    const filePath = files[idx].path;
+    let content = null;
+    if (wantDraft) {
+      const d = _specDrafts.get(idx);
+      if (d && typeof d.content === "string") content = d.content;
+    }
+    if (content == null) {
+      let raw = _cache?.fileContents?.[filePath];
+      if (!raw && !_isOffline && _conn) { try { raw = await getFileContent(_conn, filePath, _branch); } catch {} }
+      content = raw || "";
+    }
+    const { body } = stripFrontmatter(content);
+    const { html } = await renderSpecBody(body, specSanitizeSchema);
+    return { html };
+  }
+
+  // List PRs to review (item 6). Defaults to the authenticated user's active
+  // PRs; widen via query.creator = 'any'. Returns summarized PRs for the /prs
+  // page + list_prs tool.
+  async function doListPrs(query = {}) {
+    if (_isOffline || !_conn) return { prs: [], error: "offline" };
+    let currentUserId = null;
+    try { const cd = await _conn.connect(); currentUserId = cd && cd.authenticatedUser && cd.authenticatedUser.id; } catch { /* fall back to no creator filter */ }
+    const crit = buildPrCriteria(query, { currentUserId });
+    const top = Number.isFinite(query.top) ? query.top : 50;
+    const raw = await listPullRequests(_conn, crit, top);
+    return { prs: raw.map(summarizePr), mine: !!crit.creatorId, status: crit.status, project: ADO_PROJECT };
   }
 
   app.post("/api/comment", async (req, res) => {
@@ -3647,6 +3963,8 @@ async function main() {
     specLocks: _specLocks,
     commitSpec: doCommitSpec,
     specDiff: computeSpecDiff,
+    renderDraft: renderSpecDraft,
+    listPrs: doListPrs,
   });
 
   const server = app.listen(PORT, "127.0.0.1", () => {

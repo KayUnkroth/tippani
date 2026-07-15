@@ -24,9 +24,20 @@ export function createFocusStore() {
   // request (and survives same-tab reloads via sessionStorage on the client).
   let navUrl = null;
   let navSeq = 0;
+  // Which spec view the browser should show for the current file (item 3).
+  // null = default (Original). Server-side so the agent (set_view) can drive it
+  // and it survives a same-tab reload; the browser never auto-flips on a stage.
+  let view = null;      // "original" | "diff" | "current"
+  let viewSeq = 0;
+  // Feedback-page filter criteria the browser should apply (item 5). null = no
+  // server-pushed filter. The agent (set_feedback_filter) sets it; the manual
+  // filter bar mirrors the same shape locally.
+  let filter = null;    // { states?, reviewer?, file?, query? }
+  let filterSeq = 0;
+  const VIEWS = ["current", "diff", "proposed"];
   return {
     get() {
-      return { focusedThreadId, version, navUrl, navSeq };
+      return { focusedThreadId, version, navUrl, navSeq, view, viewSeq, filter, filterSeq };
     },
     set(threadId) {
       const next = threadId == null ? null : Number(threadId);
@@ -49,6 +60,27 @@ export function createFocusStore() {
       navSeq++;
       version++;
       return { navUrl, navSeq, version };
+    },
+    // Set the spec view the browser should switch to (item 3). Always bumps so a
+    // repeat set to the same view still fires the browser's apply.
+    setView(v) {
+      if (!VIEWS.includes(v)) {
+        throw new Error(`view: must be one of ${VIEWS.join("|")}`);
+      }
+      view = v;
+      viewSeq++;
+      version++;
+      return { view, viewSeq, version };
+    },
+    // Set (or clear, with null) the feedback filter the browser should apply.
+    setFilter(f) {
+      if (f !== null && (typeof f !== "object" || Array.isArray(f))) {
+        throw new Error("filter: must be an object or null");
+      }
+      filter = f;
+      filterSeq++;
+      version++;
+      return { filter, filterSeq, version };
     },
     bumpVersion() {
       version++;

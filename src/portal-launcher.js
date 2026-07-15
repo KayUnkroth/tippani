@@ -36,6 +36,20 @@ function defaultIsPortFree(port) {
   });
 }
 
+// Open a URL. If TIPPANI_OPEN_CMD is set (the embedding host's opener — e.g.
+// route to the VS Code integrated "Simple Browser" instead of an external
+// browser), run it: `{url}` is substituted where present, else the URL is
+// appended. Falls back to the OS default browser (`open`). Item 7.
+export function openInBrowser(url, { openCmd = process.env.TIPPANI_OPEN_CMD, spawnFn = defaultSpawn, openFn = openDefault } = {}) {
+  if (openCmd && String(openCmd).trim()) {
+    const full = openCmd.includes("{url}") ? openCmd.replace(/\{url\}/g, url) : `${openCmd} ${url}`;
+    const child = spawnFn(full, { shell: true, stdio: "ignore", detached: true });
+    if (child && typeof child.unref === "function") child.unref();
+    return Promise.resolve({ via: "cmd", cmd: full });
+  }
+  return Promise.resolve(openFn(url)).then(() => ({ via: "open" }));
+}
+
 /**
  * Create a portal session the MCP shim uses to discover, adopt, or launch a
  * tippani portal per PR. Returns { ensurePortal, getToken, getBaseUrl, stop,
@@ -51,7 +65,7 @@ export function createPortalSession({
   spawnFn = defaultSpawn,
   fetchImpl = fetch,
   listInstancesFn = listInstances,
-  openBrowserFn = (url) => openDefault(url),
+  openBrowserFn = (url) => openInBrowser(url),
   readyTimeoutMs = Number(process.env.TIPPANI_READY_TIMEOUT_MS) || 60_000,
   isPortFreeFn = defaultIsPortFree,
   // When true, reap orphaned/stale portals from the registry at startup (dead
@@ -150,21 +164,44 @@ export function createPortalSession({
     }
   }
 
-  async function launchNew({ prId, org, project, repo, refresh }) {
+  // Ensure a portal exists for cross-PR browsing (list_prs). Reuses the active
+  // portal (PR-bound OR browse — both serve /prs + /api/v1/prs), or an existing
+  // browse portal (prId 0) in the registry, else launches a PR-less browse
+  // portal (reads org/project from ~/.tippani/config.json).
+  async function ensureBrowsePortal() {
+    if (active && (await healthyAt(active.url, active.token))) {
+      await maybeOpenBrowser();
+      return { reused: true, url: active.url };
+    }
+    for (const inst of listInstancesFn()) {
+      if (Number(inst.prId) !== 0) continue;
+      const url = inst.url || `http://localhost:${inst.port}`;
+      if (await healthyAt(url, inst.token)) {
+        active = { port: Number(inst.port), url, token: inst.token, prId: 0, owned: false };
+        await maybeOpenBrowser();
+        return { reused: true, adopted: true, url };
+      }
+    }
+    active = await launchNew({ browse: true });
+    await maybeOpenBrowser();
+    return { reused: false, url: active.url };
+  }
+
+  async function launchNew({ prId, org, project, repo, refresh, browse } = {}) {
     let lastErr = null;
     for (let port = basePort; port < basePort + portSpan; port++) {
       // Fast pre-check: skip ports already in use WITHOUT spawning. A spawned
       // portal runs the full ADO fetch before it binds and hits EADDRINUSE, so
       // probing here avoids a full fetch (or the ready timeout) per busy port.
       if (!(await isPortFreeFn(port))) { lastErr = `port ${port} in use`; continue; }
-      const res = await tryLaunchOnPort(port, { prId, org, project, repo, refresh });
+      const res = await tryLaunchOnPort(port, { prId, org, project, repo, refresh, browse });
       if (res.ok) {
         // Track so stop() can tear down every portal we own, not just the last.
         ownedChildren.set(port, res.child);
         res.child.on("exit", () => {
           if (ownedChildren.get(port) === res.child) ownedChildren.delete(port);
         });
-        return { port, url: `http://localhost:${port}`, token: res.token, prId, owned: true };
+        return { port, url: `http://localhost:${port}`, token: res.token, prId: browse ? 0 : prId, owned: true };
       }
       lastErr = res.error;
       // Port busy (another PR's portal or a stale entry) → try the next one.
@@ -175,10 +212,12 @@ export function createPortalSession({
     );
   }
 
-  function tryLaunchOnPort(port, { prId, org, project, repo, refresh }) {
+  function tryLaunchOnPort(port, { prId, org, project, repo, refresh, browse }) {
     // The portal launches headless — the shim owns browser-opening (see
     // maybeOpenBrowser) so both launch and adopt bring the portal up uniformly.
-    const args = [portalEntry, String(prId), `--port=${port}`, "--headless"];
+    const args = browse
+      ? [portalEntry, "--browse", `--port=${port}`, "--headless"]
+      : [portalEntry, String(prId), `--port=${port}`, "--headless"];
     if (org) args.push(`--org=${org}`);
     if (project) args.push(`--project=${project}`);
     if (repo) args.push(`--repo=${repo}`);
@@ -211,7 +250,7 @@ export function createPortalSession({
         // this port must NOT be adopted here — our child will hit EADDRINUSE
         // and exit, and we move on.
         const inst = listInstancesFn().find(
-          (i) => Number(i.port) === port && Number(i.prId) === prId);
+          (i) => Number(i.port) === port && Number(i.prId) === (browse ? 0 : prId));
         if (inst && (await healthyAt(inst.url || `http://localhost:${port}`, inst.token))) {
           resolve({ ok: true, token: inst.token, child: proc });
           return;
@@ -247,6 +286,7 @@ export function createPortalSession({
 
   return {
     ensurePortal,
+    ensureBrowsePortal,
     getToken,
     getBaseUrl,
     stop,

@@ -143,5 +143,33 @@ function check(name, cond) {
   check("inflight: re-acquire after release works", ok3 === true);
 }
 
+// --- FocusStore: view + filter state (items 3 / 5) ---
+{
+  const f = createFocusStore();
+  const init = f.get();
+  check("view: starts null", init.view === null && init.viewSeq === 0);
+  check("filter: starts null", init.filter === null && init.filterSeq === 0);
+
+  const v = f.get().version;
+  const r = f.setView("diff");
+  check("setView: records view", r.view === "diff");
+  check("setView: bumps viewSeq + version", r.viewSeq === 1 && r.version === v + 1);
+  const r2 = f.setView("diff");
+  check("setView: repeat still bumps so the browser re-applies", r2.viewSeq === 2);
+  let threw = false; try { f.setView("bogus"); } catch { threw = true; }
+  check("setView: rejects an unknown view", threw);
+
+  const fr = f.setFilter({ states: ["you"], reviewer: "Alice" });
+  check("setFilter: records the filter", fr.filter.states[0] === "you" && fr.filter.reviewer === "Alice");
+  check("setFilter: bumps filterSeq", fr.filterSeq === 1);
+  const cleared = f.setFilter(null);
+  check("setFilter(null): clears", cleared.filter === null);
+  let threw2 = false; try { f.setFilter("nope"); } catch { threw2 = true; }
+  check("setFilter: rejects a non-object", threw2);
+
+  const g = f.get();
+  check("get: exposes view + filter fields", g.view === "diff" && g.filter === null);
+}
+
 console.log(`api-state.test: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
