@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.5.0 (2026-07-15)
+
+MCP reliability for long-lived and multi-PR sessions, single-tab navigation, and a security-hardening pass over the control API. From [#66](https://github.com/mavaali/tippani/pull/66).
+
+### Added — MCP reliability
+- **Single-tab navigation (default).** The MCP nav tools (`open_thread`, `show_feedback`, `open_file`) now steer the one open browser tab in place instead of spawning a new tab per navigation, so a review no longer accumulates stale tabs and the agent and user stay on the same page. A shared watcher injected on every portal page polls `/api/v1/state` and follows a monotonic `navSeq`, firing once per bump and never yanking the user back after a manual navigation. Opt back into a tab per nav with `TIPPANI_SEPARATE_TABS=1`.
+- **ADO token hot-swap.** `POST /api/v1/ado-token` swaps a long-lived portal's Azure DevOps bearer in place (rebuilds the connection, no restart), so an external token authority can push a fresh token before the old one expires. Session-token gated; the token is never echoed back.
+- **Portal lifecycle and orphan reaping.** Each portal is spawned over an IPC channel tied to the shim's lifetime and exits on shim death, so a portal can't outlive the shim that owns it. A startup reaper clears stale/orphaned registry entries, and `session.stop()` removes each owned portal's entry itself (on Windows `TerminateProcess` skips the portal's own cleanup).
+- **Shutdown on stdin close.** The stdio MCP server now tears its portals down on stdin EOF/close (how hosts usually stop a stdio server), in addition to `SIGINT`/`SIGTERM`/exit.
+- **Viewed-state read failures surfaced.** A failed read of the PR viewed-markers no longer silently renders every thread as unread: an amber banner distinguishes an expired ADO sign-in from a general reach failure on the feedback, thread, and spec pages. The markers stay saved on the pull request.
+- **Frontmatter preserved on commit.** Committing an edited spec re-attaches the original YAML frontmatter (the editor mounts a frontmatter-stripped body), so a commit never drops `title`/`ms.date`/etc. on Learn/DocFX docs.
+
+### Security — control-API hardening
+- **Exact-origin same-origin gate.** The control API's same-origin check compares parsed origins instead of `startsWith` prefixes. The old prefix match let a different port (`…:38470`), a suffix host (`…:3847.evil.com`), and a userinfo trick (`…:3847@evil.com`) all count as same-origin, which skips the session-token requirement on every mutation.
+- **Single-tab nav can't steer off-origin.** The injected watcher navigates only when the resolved URL is same-origin and goes to the computed path (never the raw `navUrl`), and `POST /api/v1/nav` rejects absolute, protocol-relative, `javascript:`, and backslash paths.
+- **Orphan reaper won't kill a recycled PID.** The reaper kills an orphaned portal only when its port still accepts a connection (an identity proxy); an alive PID whose port is dead is treated as a recycled stranger and its stale entry is dropped without a kill.
+- **Expired bearer rejected.** `POST /api/v1/ado-token` turns away an already-expired bearer JWT instead of binding a dead token that fails on the next call.
+
+### Notes
+- Single-tab navigation is a default behavior change for the MCP workflow; set `TIPPANI_SEPARATE_TABS=1` for the previous tab-per-nav behavior.
+- New and extended suites for nav validation, the ADO-token expiry check, and the identity-guarded reaper. Full suite: **433 passing**.
+
 ## 1.4.0 (2026-07-13)
 
 Promotes the 1.4.0 beta line (AI/MCP integration) to stable and adds the MCP-driven review portal from [#65](https://github.com/mavaali/tippani/pull/65).
