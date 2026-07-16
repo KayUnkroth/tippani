@@ -152,6 +152,45 @@ export function buildTools(http, session) {
       },
     },
     {
+      name: "set_view",
+      description:
+        "Switch the spec reading view the user sees for a file: 'current' (the " +
+        "committed text), 'diff' (proposed changes overlaid), or 'proposed' (the " +
+        "proposed draft rendered clean). The browser view NEVER auto-flips when " +
+        "you stage an edit \u2014 call this after edit_spec / stage_spec_edit so the " +
+        "user actually sees the change. Optionally pass fileIndex to navigate to " +
+        "that file first.",
+      inputSchema: {
+        view: z.enum(["current", "diff", "proposed"]).describe("Which view to show"),
+        fileIndex: z.number().optional().describe("0-based changed-file index to navigate to first"),
+      },
+      handler: async ({ view, fileIndex }) => {
+        if (typeof fileIndex === "number") await navigate(`/file/${fileIndex}`);
+        return http.post("/api/v1/commands/view", { view });
+      },
+    },
+    {
+      name: "set_feedback_filter",
+      description:
+        "Focus the user's Feedback page on a subset of comment threads by pushing " +
+        "a filter to the browser: by state(s), reviewer, file, and/or a text query. " +
+        "Pass clear=true (or omit everything) to show all. Pair with show_feedback " +
+        "to bring the user there. States: 'you' (needs your reply), 'reviewer' " +
+        "(awaiting reviewer), 'viewed', 'fyi', 'resolved'.",
+      inputSchema: {
+        states: z.array(z.enum(["you", "reviewer", "viewed", "fyi", "resolved"])).optional()
+          .describe("Thread states to show"),
+        reviewer: z.string().optional().describe("Only threads this person authored a comment in"),
+        file: z.string().optional().describe("Only threads on this file path"),
+        query: z.string().optional().describe("Text search over thread content"),
+        clear: z.boolean().optional().describe("Clear the filter (show all)"),
+      },
+      handler: ({ states, reviewer, file, query, clear }) => {
+        const filter = clear ? null : { states, reviewer, file, query };
+        return http.post("/api/v1/commands/filter", { filter });
+      },
+    },
+    {
       name: "open_file",
       description:
         "Open a changed file in the user's browser at the file view, optionally scrolled to a " +
@@ -308,6 +347,69 @@ export function buildTools(http, session) {
       },
       handler: ({ fileIndex, content, message }) =>
         http.post(`/api/v1/specs/${fileIndex}/commit`, { content, message }),
+    },
+    {
+      name: "edit_spec",
+      description:
+        "Make surgical edits to one spec file without resending the whole body. " +
+        "Applies one or more anchored edits and STAGES the result as a review-only " +
+        "draft (like stage_spec_edit \u2014 it never commits; use commit_spec to commit). " +
+        "Edits apply to the file's current staged draft if one exists, else the " +
+        "committed body, so successive calls accumulate. All edits in a call are " +
+        "atomic: if any can't be located, its guard doesn't match, or two overlap, " +
+        "nothing is staged. After staging, call set_view('diff') or set_view('current') " +
+        "so the user sees the change \u2014 the browser view does not auto-flip. Prefer " +
+        "this over stage_spec_edit for anything short of a full rewrite.",
+      inputSchema: {
+        fileIndex: z.number().describe("0-based index into the PR's changed files"),
+        edits: z.array(z.object({
+          kind: z.enum(["range", "find"]).describe(
+            "'range' = line-range replace guarded by oldString; 'find' = find/replace"),
+          startLine: z.number().int().optional().describe("range: 1-based first line (inclusive)"),
+          endLine: z.number().int().optional().describe("range: 1-based last line (inclusive)"),
+          oldString: z.string().optional().describe(
+            "range: exact current text of lines [startLine..endLine]; the edit fails if it doesn't match"),
+          newString: z.string().optional().describe("range: replacement text"),
+          find: z.string().optional().describe("find: text to locate"),
+          replace: z.string().optional().describe("find: replacement text"),
+          where: z.enum(["first", "all", "last"]).optional().describe(
+            "find: which occurrence(s) to replace (default first)"),
+        })).min(1).describe("Edits applied atomically against one snapshot, right-to-left"),
+        source: z.string().optional().describe("Free-form attribution e.g. model name"),
+      },
+      handler: ({ fileIndex, edits, source }) =>
+        http.post(`/api/v1/specs/${fileIndex}/edit`, { edits, source }),
+    },
+    {
+      name: "list_prs",
+      description:
+        "List pull requests to review and open the /prs page in the user's " +
+        "browser (tiles, each links to open the PR). Defaults to YOUR open " +
+        "(active) PRs; widen with creator:'any' to find anyone's open PRs, or " +
+        "filter by status / reviewer / target branch. Use this to pick a PR " +
+        "before open_pr.",
+      inputSchema: {
+        status: z.enum(["active", "completed", "abandoned", "all"]).optional()
+          .describe("PR status (default active)"),
+        creator: z.string().optional().describe("'me' (default), 'any'/'all', or an ADO identity id"),
+        reviewer: z.string().optional().describe("ADO identity id to filter by reviewer"),
+        target: z.string().optional().describe("Target branch (e.g. main)"),
+        top: z.number().optional().describe("Max results (default 50)"),
+      },
+      handler: async ({ status, creator, reviewer, target, top }) => {
+        if (session && typeof session.ensureBrowsePortal === "function") {
+          await session.ensureBrowsePortal();
+        }
+        const qs = new URLSearchParams();
+        if (status) qs.set("status", status);
+        if (creator) qs.set("creator", creator);
+        if (reviewer) qs.set("reviewer", reviewer);
+        if (target) qs.set("target", target);
+        if (typeof top === "number") qs.set("top", String(top));
+        const data = await http.get("/api/v1/prs" + (qs.toString() ? "?" + qs.toString() : ""));
+        await navigate("/prs");
+        return data;
+      },
     },
   ];
 }

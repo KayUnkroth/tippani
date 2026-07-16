@@ -17,6 +17,7 @@ import { StateField } from "@codemirror/state";
 import { markdown } from "@codemirror/lang-markdown";
 import { GFM } from "@lezer/markdown";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
+import { search, searchKeymap, openSearchPanel } from "@codemirror/search";
 import { tableField } from "./table-widget.js";
 import { diffLines, diffStats } from "./diff.js";
 import {
@@ -447,7 +448,8 @@ function mount(el, markdownText, opts = {}) {
     doc: markdownText,
     extensions: [
       history(),
-      keymap.of([...formatKeymap, ...defaultKeymap, ...historyKeymap]),
+      keymap.of([...formatKeymap, ...searchKeymap, ...defaultKeymap, ...historyKeymap]),
+      search({ top: true }),
       markdown({ extensions: GFM }),
       livePreview,
       activeFormatsField,
@@ -470,6 +472,8 @@ function mount(el, markdownText, opts = {}) {
     // Replace the entire buffer (used to load an externally-staged proposal).
     setMarkdown: (md) =>
       view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: String(md ?? "") } }),
+    // Open the Find & Replace panel (manual equivalent of the edit_spec find kind).
+    openSearch: () => { view.focus(); openSearchPanel(view); },
     destroy: () => view.destroy(),
   };
 }
