@@ -1221,7 +1221,7 @@ function buildHomePage(prs, project) {
       <div class="pr-title">${escHtml(pr.title || "")}</div>
       <div class="pr-meta">${escHtml(pr.author || "")} \u00b7 ${escHtml(pr.source || "")} \u2192 ${escHtml(pr.target || "")}${pr.repo ? " \u00b7 " + escHtml(pr.repo) : ""}</div>
     </a>`).join("\n");
-  const sampleWiql = "SELECT [System.Id], [System.Title], [System.State]\nFROM workitems\nWHERE [System.WorkItemType] = 'Feature' AND [System.CreatedDate] >= @today - 30\nORDER BY [System.CreatedDate] DESC";
+  const sampleWiql = "SELECT [System.Id], [System.Title], [System.State]\nFROM workitems\nWHERE [System.WorkItemType] = 'Feature' AND [System.CreatedDate] >= @today - 30 AND [System.AssignedTo] = @Me\nORDER BY [System.CreatedDate] DESC";
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tippani \u2014 Discovery</title>
@@ -1334,7 +1334,6 @@ table.wi-results { width: 100%; table-layout: fixed; border-collapse: collapse; 
   <div class="container">
     <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 discovery</span></div>
     <h1>Discovery</h1>
-    <div class="sub">Find what to work on \u2014 a review to pick up, a work item, or a spec \u2014 without leaving Tippani.</div>
     <div class="tabs">
       <button class="tab" data-tab="queue" type="button">Review queue</button>
       <button class="tab" data-tab="workitems" type="button">Work items</button>
