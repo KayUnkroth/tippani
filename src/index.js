@@ -3675,7 +3675,19 @@ async function main() {
   // PR list page (item 6). Works on any portal that has an ADO connection
   // (PR-bound or browse) so list_prs can navigate here.
   app.get("/prs", async (_req, res) => {
-    try { const d = await doListPrs({}); res.type("html").send(buildPrListPage(d.prs || [], ADO_PROJECT)); }
+    try {
+      // In browse mode (no PR bound) /prs IS the Discovery home: the role-scoped
+      // review queue with clickable /open cards. list_prs navigates here, and
+      // the single-tab nav steering may pull other tabs here too, so it must be
+      // the same clickable home as "/". Once a PR is bound, keep the classic
+      // PR-list page (buildPrListPage) for backward compatibility.
+      if (!_prId) {
+        const d = await doListPrs({ role: "queue" });
+        return res.type("html").send(buildHomePage(d.prs || [], ADO_PROJECT));
+      }
+      const d = await doListPrs({});
+      res.type("html").send(buildPrListPage(d.prs || [], ADO_PROJECT));
+    }
     catch (e) { res.status(500).send("Error listing PRs. Check the server console."); console.error("PR list error:", e.message); }
   });
 
