@@ -42,6 +42,7 @@ import {
   deriveRepoContext,
   summarizeNonMarkdown,
 } from "./config-util.js";
+import { resolveImagePath, imageContentType } from "./image-src.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -252,6 +253,30 @@ async function getFileContent(conn, filePath, branch) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString("utf-8");
+}
+
+// Fetch a binary blob (an embedded image) from the repo as raw bytes. Same ADO
+// call as getFileContent, but returns the Buffer undecoded so the image proxy
+// route can stream it with the right content-type.
+async function getImageBlob(conn, filePath, branch) {
+  const gitApi = await conn.getGitApi();
+  const versionDesc = branch.replace("refs/heads/", "");
+  const item = await gitApi.getItemContent(
+    ADO_REPO,
+    filePath,
+    ADO_PROJECT,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    { version: versionDesc, versionType: 0 }
+  );
+  const chunks = [];
+  for await (const chunk of item) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 async function getPRChangedFiles(conn, prId) {
@@ -3564,7 +3589,7 @@ async function main() {
 
       const { metadata, body } = stripFrontmatter(raw);
       const { toc } = buildSourceMap(body);
-      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema);
+      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema, { rewriteImagesForFileIndex: idx });
 
       // Merge cached threads + pending local comments
       let threads = _cache?.threads || [];
@@ -3615,6 +3640,34 @@ async function main() {
     }
   });
 
+  // Image proxy: serve an embedded image a spec references with a repo-relative
+  // path (e.g. `Images/foo.png`). The spec's rendered `<img src>` is rewritten
+  // to this route; here we resolve the path against that file's directory, fetch
+  // the blob from ADO with the server-side token (the browser can't — the token
+  // isn't in the page and the user's ADO cookies are SameSite), and stream it
+  // with the right content-type. Limited to image extensions so it can't be used
+  // as a general repo file-read proxy.
+  app.get("/file/:index/media", async (req, res) => {
+    try {
+      const idx = parseInt(req.params.index);
+      if (isNaN(idx) || idx < 0 || idx >= _changedFiles.length) return res.status(404).end();
+      const specPath = _changedFiles[idx].path;
+      const resolved = resolveImagePath(specPath, req.query.src);
+      if (!resolved) return res.status(404).end();
+      const type = imageContentType(resolved);
+      if (!type) return res.status(404).end();
+      if (_isOffline || !_conn) return res.status(503).end();
+      const buf = await getImageBlob(_conn, resolved, _branch);
+      if (!buf || buf.length === 0) return res.status(404).end();
+      res.set("Content-Type", type)
+         .set("Cache-Control", "private, max-age=300")
+         .send(buf);
+    } catch (e) {
+      console.error("Image proxy error:", e.message);
+      res.status(404).end();
+    }
+  });
+
   // GitHub-style diff of a staged spec edit for one file. Returns change hunks
   // (rendered "current" + "proposed" HTML, anchored to original line ranges) so
   // the file view can overlay red/green boxes without swapping the whole doc.
@@ -3656,7 +3709,7 @@ async function main() {
       content = raw || "";
     }
     const { body } = stripFrontmatter(content);
-    const { html } = await renderSpecBody(body, specSanitizeSchema);
+    const { html } = await renderSpecBody(body, specSanitizeSchema, { rewriteImagesForFileIndex: idx });
     return { html };
   }
 

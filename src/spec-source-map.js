@@ -17,6 +17,7 @@ import rehypeSlug from "rehype-slug";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypeStringify from "rehype-stringify";
 import { normalizeMermaidContainers } from "./mermaid-normalize.js";
+import { rehypeRewriteImageSrc } from "./image-src.js";
 
 // The tags the client's commentable selector matches, in the same set.
 export const COMMENTABLE_TAGS = new Set(["p", "li", "blockquote", "table", "pre"]);
@@ -63,13 +64,20 @@ export async function collectBlockRanges(content) {
 // Render a spec body to sanitized HTML and return the aligned block ranges.
 // The range collector runs before sanitize so hast positions are intact; the
 // sanitize step preserves the allowed block elements in the same order.
-export async function renderSpecBody(content, sanitizeSchema) {
+// When `options.rewriteImagesForFileIndex` is set, relative `<img src>` values
+// are rewritten to the Tippani image proxy for that file index (before sanitize
+// so the root-relative src survives the protocol filter).
+export async function renderSpecBody(content, sanitizeSchema, options = {}) {
   const ranges = [];
-  const result = await unified()
+  let proc = unified()
     .use(remarkParse)
     .use(remarkGfm)
     .use(remarkRehype)
-    .use(rehypeCollectBlockRanges(ranges))
+    .use(rehypeCollectBlockRanges(ranges));
+  if (options.rewriteImagesForFileIndex != null) {
+    proc = proc.use(rehypeRewriteImageSrc(options.rewriteImagesForFileIndex));
+  }
+  const result = await proc
     .use(rehypeSanitize, sanitizeSchema)
     .use(rehypeSlug)
     .use(rehypeAutolinkHeadings, { behavior: "wrap" })
