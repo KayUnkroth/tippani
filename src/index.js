@@ -42,7 +42,7 @@ import {
   deriveRepoContext,
   summarizeNonMarkdown,
 } from "./config-util.js";
-import { resolveImagePath, imageContentType } from "./image-src.js";
+import { resolveImagePath, imageContentType, isLfsPointer } from "./image-src.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -257,7 +257,10 @@ async function getFileContent(conn, filePath, branch) {
 
 // Fetch a binary blob (an embedded image) from the repo as raw bytes. Same ADO
 // call as getFileContent, but returns the Buffer undecoded so the image proxy
-// route can stream it with the right content-type.
+// route can stream it with the right content-type. resolveLfs=true makes ADO
+// return the real object for Git-LFS-tracked images (the specs store screenshots
+// in LFS); without it the call returns the ~130-byte LFS pointer text, which
+// would stream as a broken image.
 async function getImageBlob(conn, filePath, branch) {
   const gitApi = await conn.getGitApi();
   const versionDesc = branch.replace("refs/heads/", "");
@@ -265,12 +268,14 @@ async function getImageBlob(conn, filePath, branch) {
     ADO_REPO,
     filePath,
     ADO_PROJECT,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    { version: versionDesc, versionType: 0 }
+    undefined,        // scopePath
+    undefined,        // recursionLevel
+    undefined,        // includeContentMetadata
+    undefined,        // latestProcessedChange
+    true,             // download — raw bytes
+    { version: versionDesc, versionType: 0 },
+    undefined,        // includeContent
+    true              // resolveLfs — return the real blob, not the LFS pointer
   );
   const chunks = [];
   for await (const chunk of item) {
@@ -3659,6 +3664,12 @@ async function main() {
       if (_isOffline || !_conn) return res.status(503).end();
       const buf = await getImageBlob(_conn, resolved, _branch);
       if (!buf || buf.length === 0) return res.status(404).end();
+      if (isLfsPointer(buf)) {
+        // resolveLfs was requested but ADO still returned the pointer — better
+        // to fail loudly than stream a text pointer mislabeled as an image.
+        console.error(`Image proxy: LFS pointer not resolved for ${resolved}`);
+        return res.status(502).end();
+      }
       res.set("Content-Type", type)
          .set("Cache-Control", "private, max-age=300")
          .send(buf);

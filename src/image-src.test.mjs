@@ -7,6 +7,7 @@ import {
   buildImageProxyUrl,
   resolveImagePath,
   rehypeRewriteImageSrc,
+  isLfsPointer,
 } from "./image-src.js";
 import { renderSpecBody } from "./spec-source-map.js";
 import { defaultSchema } from "rehype-sanitize";
@@ -81,6 +82,19 @@ ok("resolve deep traversal stays image-only",
   (() => { const r = resolveImagePath("/a/b/spec.md", "../../../../../../etc/x.png"); return r === "/etc/x.png"; })());
 eq("resolve traversal to non-image → null",
   resolveImagePath("/a/b/spec.md", "../../../../etc/passwd"), null);
+
+// --- isLfsPointer ------------------------------------------------------------
+{
+  const pointer = "version https://git-lfs.github.com/spec/v1\noid sha256:8fec7622f1b6452e76ec97846c31b3246410b89e85b6f66fb2a2cd850d4b5e1a\nsize 42299\n";
+  ok("detects real LFS pointer text", isLfsPointer(pointer));
+  ok("detects LFS pointer as Buffer", isLfsPointer(Buffer.from(pointer, "utf8")));
+  // A real PNG header must not be mistaken for a pointer.
+  ok("PNG bytes are not a pointer", !isLfsPointer(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])));
+  ok("JPEG bytes are not a pointer", !isLfsPointer(Buffer.from([0xff, 0xd8, 0xff, 0xe0])));
+  ok("empty string not a pointer", !isLfsPointer(""));
+  ok("null not a pointer", !isLfsPointer(null));
+  ok("unrelated text not a pointer", !isLfsPointer("version 1.2.3 of something"));
+}
 
 // --- rehypeRewriteImageSrc (via full render pipeline) ------------------------
 (async () => {

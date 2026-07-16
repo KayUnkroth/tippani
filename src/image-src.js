@@ -87,6 +87,19 @@ function normalizeRepoPath(p) {
   return s;
 }
 
+// A Git-LFS pointer is a tiny text file, not an image. If ADO returns one (the
+// resolveLfs fetch failed to substitute the real object), the bytes start with
+// the LFS version line — detect that so the proxy can 502 instead of streaming
+// a text pointer mislabeled as an image. Accepts a Buffer or a string.
+export function isLfsPointer(bytes) {
+  if (bytes == null) return false;
+  let head;
+  if (typeof bytes === "string") head = bytes.slice(0, 64);
+  else if (typeof bytes.toString === "function") head = bytes.toString("utf8", 0, 64);
+  else return false;
+  return /^version https:\/\/git-lfs\.github\.com\/spec\//.test(head);
+}
+
 // rehype plugin: rewrite every relative `<img src>` in the tree to the Tippani
 // proxy route for `fileIndex`. External srcs (absolute/data/already-proxied)
 // are left untouched. Runs BEFORE sanitize so the rewritten root-relative src
