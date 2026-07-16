@@ -1334,6 +1334,7 @@ table.wi-results { width: 100%; table-layout: fixed; border-collapse: collapse; 
   <div class="container">
     <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 discovery</span></div>
     <h1>Discovery</h1>
+    <div class="sub">Find what to work on \u2014 a review to pick up, a work item, or a spec.</div>
     <div class="tabs">
       <button class="tab" data-tab="queue" type="button">Review queue</button>
       <button class="tab" data-tab="workitems" type="button">Work items</button>
