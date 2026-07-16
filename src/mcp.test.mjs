@@ -109,9 +109,9 @@ try {
     "resolve_thread", "stage_resolve_thread", "mark_viewed", "get_spec",
     "stage_spec_edit", "get_spec_draft", "clear_spec_edit", "commit_spec",
     "edit_spec", "set_view", "set_feedback_filter",
-    "list_prs",
+    "list_prs", "search_work_items",
   ];
-  check("tools: exactly 23 registered", tools.length === 23);
+  check("tools: exactly 24 registered", tools.length === 24);
   for (const n of expected) {
     check(`tools: includes ${n}`, !!byName[n]);
     check(`tools: ${n} has description`, typeof byName[n].description === "string" && byName[n].description.length > 20);

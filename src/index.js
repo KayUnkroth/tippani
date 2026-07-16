@@ -29,6 +29,7 @@ import {
 } from "./api-state.js";
 import { registerControlApi } from "./control-api.js";
 import { renderSpecBody } from "./spec-source-map.js";
+import { isReadOnlyWiql, summarizeWorkItem, buildWorkItemUrl, WORK_ITEM_FIELDS } from "./work-item.js";
 import { isTableBlock, computeTableDiff } from "./table-diff.js";
 import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
@@ -1220,6 +1221,7 @@ function buildHomePage(prs, project) {
       <div class="pr-title">${escHtml(pr.title || "")}</div>
       <div class="pr-meta">${escHtml(pr.author || "")} \u00b7 ${escHtml(pr.source || "")} \u2192 ${escHtml(pr.target || "")}${pr.repo ? " \u00b7 " + escHtml(pr.repo) : ""}</div>
     </a>`).join("\n");
+  const sampleWiql = "SELECT [System.Id], [System.Title], [System.State]\nFROM workitems\nWHERE [System.WorkItemType] = 'Bug' AND [System.State] = 'Active'\nORDER BY [System.ChangedDate] DESC";
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tippani \u2014 Discovery</title>
@@ -1231,8 +1233,13 @@ body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, sans-serif; backg
 .brand-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
 .logo { width: 32px; height: 32px; border-radius: 8px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-weight: 700; font-size: 12px; }
 h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
-h2 { font-size: 14px; font-weight: 700; margin: 8px 0 10px; color: var(--cp-text); }
 .sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 16px; }
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--cp-border); margin: 14px 0 18px; }
+.tab { padding: 8px 16px; font-family: inherit; font-size: 13px; font-weight: 600; color: var(--cp-text-muted); background: none; border: none; border-bottom: 2px solid transparent; cursor: pointer; }
+.tab:hover { color: var(--cp-text); }
+.tab.active { color: var(--cp-accent); border-bottom-color: var(--cp-accent); }
+.pane { display: none; }
+.pane.active { display: block; }
 .filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
 .filters input { font-family: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--cp-border); border-radius: 8px; background: var(--cp-surface); color: var(--cp-text); flex: 1; min-width: 200px; }
 .pr-list { display: flex; flex-direction: column; gap: 8px; }
@@ -1248,6 +1255,21 @@ h2 { font-size: 14px; font-weight: 700; margin: 8px 0 10px; color: var(--cp-text
 .pr-title { font-size: 15px; font-weight: 600; line-height: 1.35; }
 .pr-meta { font-size: 12px; color: var(--cp-text-muted); margin-top: 4px; }
 .empty { font-size: 14px; color: var(--cp-text-muted); padding: 24px; text-align: center; }
+.wi-row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.wi-label { font-size: 12px; font-weight: 700; color: var(--cp-text); }
+.wi-project { font-family: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--cp-border); border-radius: 8px; background: var(--cp-surface); color: var(--cp-text); }
+.wi-note { font-size: 12px; color: var(--cp-text-muted); }
+.wi-query { width: 100%; min-height: 128px; font-family: Consolas, "Courier New", monospace; font-size: 13px; line-height: 1.5; color: #d4d4d4; background: #1e1e1e; border: 1px solid var(--cp-border); border-radius: 10px; padding: 12px 14px; resize: vertical; }
+.wi-actions { display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin: 10px 0 6px; }
+.wi-status { font-size: 12px; color: var(--cp-text-muted); }
+.wi-search { font-family: inherit; font-size: 13px; font-weight: 700; color: var(--cp-accent-fg); background: var(--cp-accent); border: none; border-radius: 8px; padding: 8px 20px; cursor: pointer; }
+.wi-search:hover { background: var(--cp-accent-hover, var(--cp-accent)); }
+table.wi-results { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+.wi-results th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; color: var(--cp-text-muted); padding: 6px 8px; border-bottom: 1px solid var(--cp-border); }
+.wi-results td { padding: 8px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+.wi-results tr:hover td { background: var(--cp-surface); }
+.wi-id { font-weight: 700; color: var(--cp-accent); white-space: nowrap; }
+.wi-open { color: var(--cp-accent); text-decoration: none; font-weight: 700; }
 <\/style>
 <script>
   if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
@@ -1258,14 +1280,80 @@ h2 { font-size: 14px; font-weight: 700; margin: 8px 0 10px; color: var(--cp-text
       c.style.display = hit ? '' : 'none';
     });
   }
+  function activateTab(name) {
+    document.querySelectorAll('.tab').forEach(function (t) { t.classList.toggle('active', t.dataset.tab === name); });
+    document.querySelectorAll('.pane').forEach(function (p) { p.classList.toggle('active', p.dataset.pane === name); });
+    try { var u = new URL(location.href); u.searchParams.set('tab', name); history.replaceState(null, '', u); } catch (e) {}
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  async function runWiql() {
+    var wiql = document.getElementById('wiQuery').value;
+    var project = document.getElementById('wiProject').value;
+    var out = document.getElementById('wiResults');
+    var status = document.getElementById('wiStatus');
+    status.textContent = 'Searching\u2026'; out.innerHTML = '';
+    try {
+      var r = await fetch('/api/v1/workitems/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ wiql: wiql, project: project }) });
+      var d = await r.json();
+      if (d.error) { status.textContent = d.error; return; }
+      var items = d.workItems || [];
+      status.textContent = items.length + ' result' + (items.length === 1 ? '' : 's');
+      if (!items.length) { out.innerHTML = '<div class="empty">No work items matched.</div>'; return; }
+      var h = '<table class="wi-results"><thead><tr><th>ID</th><th>Title</th><th>Type</th><th>State</th><th>Assigned to</th><th></th></tr></thead><tbody>';
+      items.forEach(function (w) {
+        h += '<tr><td class="wi-id">' + esc(w.id) + '</td><td>' + esc(w.title) + '</td><td>' + esc(w.type) + '</td><td>' + esc(w.state) + '</td><td>' + esc(w.assignedTo) + '</td><td>' + (w.url ? '<a class="wi-open" href="' + esc(w.url) + '" target="_blank" rel="noopener">\u2197</a>' : '') + '</td></tr>';
+      });
+      h += '</tbody></table>';
+      out.innerHTML = h;
+    } catch (e) { status.textContent = 'Search failed: ' + e.message; }
+  }
+  window.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.tab').forEach(function (t) { t.addEventListener('click', function () { activateTab(t.dataset.tab); }); });
+    var params = new URLSearchParams(location.search);
+    var t = params.get('tab');
+    activateTab(t === 'workitems' || t === 'specs' ? t : 'queue');
+    var btn = document.getElementById('wiSearchBtn'); if (btn) btn.addEventListener('click', runWiql);
+    // Deep-link a query (e.g. from the search_work_items tool): prefill + run.
+    var qWiql = params.get('wiql');
+    if (qWiql) {
+      var qp = params.get('project');
+      var box = document.getElementById('wiQuery'); if (box) box.value = qWiql;
+      var sel = document.getElementById('wiProject');
+      if (sel && qp) { for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === qp) sel.selectedIndex = i; } }
+      runWiql();
+    }
+  });
 <\/script></head><body>
   <div class="container">
     <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 discovery</span></div>
     <h1>Discovery${project ? " \u2014 " + escHtml(project) : ""}</h1>
-    <div class="sub">Specs you're authoring or reviewing. Open one to review it here.</div>
-    <h2>Review queue</h2>
-    <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
-    <div class="pr-list">${rows || '<div class="empty">Nothing in your review queue.</div>'}</div>
+    <div class="sub">Find what to work on \u2014 a review to pick up, a work item, or a spec \u2014 without leaving Tippani.</div>
+    <div class="tabs">
+      <button class="tab" data-tab="queue" type="button">Review queue</button>
+      <button class="tab" data-tab="workitems" type="button">Work items</button>
+      <button class="tab" data-tab="specs" type="button">Specs</button>
+    </div>
+
+    <div class="pane" data-pane="queue">
+      <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
+      <div class="pr-list">${rows || '<div class="empty">Nothing in your review queue.</div>'}</div>
+    </div>
+
+    <div class="pane" data-pane="workitems">
+      <div class="wi-row">
+        <span class="wi-label">Project</span>
+        <select id="wiProject" class="wi-project"><option value="${escHtml(project || "")}">${escHtml(project || "(configured project)")}</option></select>
+        <span class="wi-note">single project \u2014 no across-all</span>
+      </div>
+      <textarea id="wiQuery" class="wi-query" spellcheck="false">${escHtml(sampleWiql)}</textarea>
+      <div class="wi-actions"><span id="wiStatus" class="wi-status"></span><button id="wiSearchBtn" class="wi-search" type="button">Search</button></div>
+      <div id="wiResults"></div>
+      <div class="wi-note" style="margin-top:12px">Enter a WIQL <code>SELECT</code> against <code>workitems</code>. Results open the item in Azure DevOps (\u2197). The MCP client can pass a freeform WIQL directly.</div>
+    </div>
+
+    <div class="pane" data-pane="specs">
+      <div class="empty">The spec tree lands in the next update \u2014 browse <code>Specs/</code> and open a spec read-only here.</div>
+    </div>
   </div>
 ${NAV_WATCHER}
 </body></html>`;
@@ -3883,6 +3971,35 @@ async function main() {
     return { prs: raw.map(summarizePr), mine: !!crit.creatorId, status: crit.status, project: ADO_PROJECT };
   }
 
+  // Discovery work-item search: run a read-only WIQL query against ADO and
+  // return compact rows (id/title/type/state/assignedTo + ADO web url). The UI
+  // picks the project; the MCP client passes the freeform WIQL. Read-only: the
+  // query is gated to a SELECT before it reaches ADO.
+  async function searchWorkItems({ project, wiql } = {}) {
+    if (_isOffline || !_conn) return { workItems: [], error: "offline" };
+    if (!isReadOnlyWiql(wiql)) return { workItems: [], error: "WIQL must be a read-only SELECT query." };
+    const proj = (project && String(project).trim()) || ADO_PROJECT;
+    const witApi = await _conn.getWorkItemTrackingApi();
+    let queryResult;
+    try {
+      queryResult = await witApi.queryByWiql({ query: wiql }, { project: proj });
+    } catch (e) {
+      return { workItems: [], project: proj, error: friendlyAdoError(e, "Work-item search") };
+    }
+    const ids = (queryResult.workItems || []).map((w) => w.id).filter((n) => Number.isFinite(n)).slice(0, 100);
+    if (ids.length === 0) return { workItems: [], project: proj, count: 0 };
+    const rows = [];
+    // ADO getWorkItems caps at 200 ids per call.
+    for (let i = 0; i < ids.length; i += 200) {
+      const chunk = ids.slice(i, i + 200);
+      const items = await witApi.getWorkItems(chunk, WORK_ITEM_FIELDS, undefined, undefined, undefined, proj);
+      for (const it of items || []) {
+        rows.push(summarizeWorkItem(it, buildWorkItemUrl(ADO_ORG, proj, it.id)));
+      }
+    }
+    return { workItems: rows, project: proj, count: rows.length };
+  }
+
   app.post("/api/comment", async (req, res) => {
     const action = addPending(_prId, { type: 'comment', filePath: req.body.filePath, line: req.body.line, content: req.body.content });
     if (!_isOffline && _conn) {
@@ -4199,6 +4316,7 @@ async function main() {
     specDiff: computeSpecDiff,
     renderDraft: renderSpecDraft,
     listPrs: doListPrs,
+    searchWorkItems,
   });
 
   const server = app.listen(PORT, "127.0.0.1", () => {

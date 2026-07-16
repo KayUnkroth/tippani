@@ -29,6 +29,7 @@ export function registerControlApi(app, deps) {
     specDiff,           // async (fileIndex) => {hunks, source?, updatedAt?} (optional)
     renderDraft,        // async (fileIndex, {draft}) => {html} (optional) — item 3 Current view
     listPrs,            // async (query) => {prs, ...} (optional) — item 6 list PRs
+    searchWorkItems,    // async ({project, wiql}) => {workItems, ...} (optional) — Discovery WIQL search
   } = deps;
 
   const ALLOWED_ORIGINS = new Set([
@@ -379,6 +380,19 @@ export function registerControlApi(app, deps) {
         top: req.query.top ? parseInt(req.query.top, 10) : undefined,
       };
       res.json(await listPrs(q));
+    } catch (e) {
+      res.status(502).json({ error: String(e?.message || e) });
+    }
+  });
+
+  // Discovery work-item search: POST a freeform WIQL (+ optional project); the
+  // portal runs it against ADO read-only and returns compact rows. POST because
+  // the WIQL is a body; same-origin (browser) or bearer (MCP) authorized.
+  app.post("/api/v1/workitems/search", requireAuth({ mutation: true }), async (req, res) => {
+    if (typeof searchWorkItems !== "function") return res.status(501).json({ error: "work-item search not wired" });
+    try {
+      const { wiql, project } = req.body || {};
+      res.json(await searchWorkItems({ wiql, project }));
     } catch (e) {
       res.status(502).json({ error: String(e?.message || e) });
     }

@@ -411,5 +411,33 @@ export function buildTools(http, session) {
         return data;
       },
     },
+    {
+      name: "search_work_items",
+      description:
+        "Search Azure DevOps work items with a WIQL query and open the Work items " +
+        "tab of the Discovery home in the user's browser. Pass a read-only WIQL " +
+        "SELECT (e.g. \"SELECT [System.Id],[System.Title],[System.State] FROM " +
+        "workitems WHERE [System.WorkItemType]='Bug' AND [System.State]='Active' " +
+        "ORDER BY [System.ChangedDate] DESC\"); optionally a project (defaults to " +
+        "the configured project). Use to find the work item a spec belongs to — " +
+        "results link out to ADO.",
+      inputSchema: {
+        wiql: z.string().describe("A read-only WIQL SELECT query against workitems"),
+        project: z.string().optional().describe("ADO project to run against (defaults to the configured project)"),
+      },
+      handler: async ({ wiql, project }) => {
+        if (session && typeof session.ensureBrowsePortal === "function") {
+          await session.ensureBrowsePortal();
+        }
+        const data = await http.post("/api/v1/workitems/search", { wiql, project });
+        // Carry the query in the URL so the Work items tab prefills it and
+        // auto-runs, showing the same results the tool returned to the agent.
+        const qs = new URLSearchParams({ tab: "workitems" });
+        if (typeof wiql === "string") qs.set("wiql", wiql);
+        if (project) qs.set("project", project);
+        await navigate("/prs?" + qs.toString());
+        return data;
+      },
+    },
   ];
 }
