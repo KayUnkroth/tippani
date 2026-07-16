@@ -70,6 +70,24 @@ try {
     check("empty string safe", normalizeMermaidContainers("") === "");
     check("null safe", normalizeMermaidContainers(null) === "");
   }
+
+  // breakout guard: a body containing a ``` line must NOT close the injected
+  // fence early (which would let following lines escape as raw markup). The
+  // wrapper fence grows longer than any backtick run in the body.
+  {
+    const src = ":::mermaid\ngraph LR\n```\n<img src=x onerror=alert(1)>\n:::";
+    const out = normalizeMermaidContainers(src);
+    const lines = out.split("\n");
+    check("breakout: wrapper fence outgrows body backticks", lines[0] === "````mermaid" && lines[4] === "````");
+    check("breakout: body ``` preserved, does not close the fence", lines[2] === "```");
+    check("breakout: injected line stays inside the block body", lines[3] === "<img src=x onerror=alert(1)>");
+    check("breakout: line count preserved", nl(out) === nl(src));
+  }
+  // no backticks in body → still the plain 3-tick fence (back-compat)
+  {
+    const out = normalizeMermaidContainers(":::mermaid\ngraph TD\n:::");
+    check("plain body keeps ```mermaid fence", out.split("\n")[0] === "```mermaid" && out.split("\n")[2] === "```");
+  }
 } catch (e) {
   fail++;
   console.error("UNEXPECTED THROW:", e && e.stack);

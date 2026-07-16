@@ -68,11 +68,12 @@ export function resolveImagePath(specPath, src) {
   let clean = String(src).split("#")[0].split("?")[0];
   try { clean = decodeURIComponent(clean); } catch { /* keep raw on bad encoding */ }
   if (!clean) return null;
+  // Reject repo-absolute srcs: a crafted spec could otherwise point the proxy at
+  // ANY image path in the repo, not just its own screenshots. Resolve ONLY
+  // relative to the spec's own directory.
+  if (clean.startsWith("/")) return null;
   const specDir = path.posix.dirname(normalizeRepoPath(specPath));
-  const base = clean.startsWith("/")
-    ? clean
-    : path.posix.join(specDir, clean);
-  const norm = path.posix.normalize(base);
+  const norm = path.posix.normalize(path.posix.join(specDir, clean));
   const abs = norm.startsWith("/") ? norm : "/" + norm;
   if (abs === "/" || abs.includes("/../") || abs.endsWith("/..")) return null;
   if (!imageContentType(abs)) return null;

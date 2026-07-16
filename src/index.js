@@ -3671,6 +3671,13 @@ async function main() {
         return res.status(502).end();
       }
       res.set("Content-Type", type)
+         // Defense-in-depth for an attacker-authored image blob — especially an
+         // SVG, which is script-capable if rendered as a TOP-LEVEL document (the
+         // <img> embed path is inert, but the /media URL is same-origin and
+         // navigable). Forbid MIME sniffing and neutralize any script via a
+         // sandboxed, deny-by-default CSP. Harmless for real images.
+         .set("X-Content-Type-Options", "nosniff")
+         .set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
          .set("Cache-Control", "private, max-age=300")
          .send(buf);
     } catch (e) {

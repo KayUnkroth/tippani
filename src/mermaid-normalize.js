@@ -26,8 +26,17 @@ export function normalizeMermaidContainers(md) {
       if (CLOSE.test(lines[k])) { close = k; break; }
     }
     if (close === -1) continue;            // unclosed → leave as-is
-    out[i] = "```mermaid";
-    out[close] = "```";
+    // Pick a fence longer than any backtick run in the body so an embedded ```
+    // line can't close the injected block early and let following lines escape
+    // as raw markup (defense-in-depth; rehypeSanitize is the backstop).
+    let maxTicks = 2;
+    for (let k = i + 1; k < close; k++) {
+      const runs = lines[k].match(/`+/g);
+      if (runs) for (const run of runs) if (run.length > maxTicks) maxTicks = run.length;
+    }
+    const fence = "`".repeat(maxTicks + 1);
+    out[i] = fence + "mermaid";
+    out[close] = fence;
     i = close;                             // resume after the close
   }
   return out.join("\n");

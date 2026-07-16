@@ -57,9 +57,9 @@ eq("resolve dot-slash",
 eq("resolve parent ref",
   resolveImagePath("/Specs/area/spec.md", "../shared/foo.png"),
   "/Specs/shared/foo.png");
-eq("resolve repo-absolute",
+eq("resolve repo-absolute src → null (no arbitrary-path reads)",
   resolveImagePath("/Specs/area/spec.md", "/assets/foo.png"),
-  "/assets/foo.png");
+  null);
 eq("resolve decodes percent",
   resolveImagePath("/Specs/spec.md", "Images/my%20shot.png"),
   "/Specs/Images/my shot.png");
