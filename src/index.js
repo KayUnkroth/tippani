@@ -1198,7 +1198,7 @@ h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
 <\/script></head><body>
   <div class="container">
     <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 pull requests</span></div>
-    <h1>Pull requests${project ? " \u2014 " + escHtml(project) : ""}</h1>
+    <h1>Pull requests</h1>
     <div class="sub">${list.length} PR${list.length !== 1 ? "s" : ""}</div>
     <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
     <div class="pr-list">${rows || '<div class="empty">No pull requests found.</div>'}</div>
@@ -1221,7 +1221,7 @@ function buildHomePage(prs, project) {
       <div class="pr-title">${escHtml(pr.title || "")}</div>
       <div class="pr-meta">${escHtml(pr.author || "")} \u00b7 ${escHtml(pr.source || "")} \u2192 ${escHtml(pr.target || "")}${pr.repo ? " \u00b7 " + escHtml(pr.repo) : ""}</div>
     </a>`).join("\n");
-  const sampleWiql = "SELECT [System.Id], [System.Title], [System.State]\nFROM workitems\nWHERE [System.WorkItemType] = 'Bug' AND [System.State] = 'Active'\nORDER BY [System.ChangedDate] DESC";
+  const sampleWiql = "SELECT [System.Id], [System.Title], [System.State]\nFROM workitems\nWHERE [System.WorkItemType] = 'Feature' AND [System.CreatedDate] >= @today - 30\nORDER BY [System.CreatedDate] DESC";
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Tippani \u2014 Discovery</title>
@@ -1264,10 +1264,16 @@ h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
 .wi-status { font-size: 12px; color: var(--cp-text-muted); }
 .wi-search { font-family: inherit; font-size: 13px; font-weight: 700; color: var(--cp-accent-fg); background: var(--cp-accent); border: none; border-radius: 8px; padding: 8px 20px; cursor: pointer; }
 .wi-search:hover { background: var(--cp-accent-hover, var(--cp-accent)); }
-table.wi-results { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
+table.wi-results { width: 100%; table-layout: fixed; border-collapse: collapse; margin-top: 8px; font-size: 13px; }
 .wi-results th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px; color: var(--cp-text-muted); padding: 6px 8px; border-bottom: 1px solid var(--cp-border); }
-.wi-results td { padding: 8px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+.wi-results td { padding: 8px; border-bottom: 1px solid var(--cp-border); vertical-align: top; overflow: hidden; }
 .wi-results tr:hover td { background: var(--cp-surface); }
+.wi-results th:nth-child(1), .wi-results td:nth-child(1) { width: 74px; }
+.wi-results th:nth-child(3), .wi-results td:nth-child(3) { width: 96px; }
+.wi-results th:nth-child(4), .wi-results td:nth-child(4) { width: 82px; }
+.wi-results th:nth-child(5), .wi-results td:nth-child(5) { width: 132px; }
+.wi-results th:nth-child(6), .wi-results td:nth-child(6) { width: 32px; text-align: center; }
+.wi-title, .wi-asg { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .wi-id { font-weight: 700; color: var(--cp-accent); white-space: nowrap; }
 .wi-open { color: var(--cp-accent); text-decoration: none; font-weight: 700; }
 <\/style>
@@ -1301,7 +1307,8 @@ table.wi-results { width: 100%; border-collapse: collapse; margin-top: 8px; font
       if (!items.length) { out.innerHTML = '<div class="empty">No work items matched.</div>'; return; }
       var h = '<table class="wi-results"><thead><tr><th>ID</th><th>Title</th><th>Type</th><th>State</th><th>Assigned to</th><th></th></tr></thead><tbody>';
       items.forEach(function (w) {
-        h += '<tr><td class="wi-id">' + esc(w.id) + '</td><td>' + esc(w.title) + '</td><td>' + esc(w.type) + '</td><td>' + esc(w.state) + '</td><td>' + esc(w.assignedTo) + '</td><td>' + (w.url ? '<a class="wi-open" href="' + esc(w.url) + '" target="_blank" rel="noopener">\u2197</a>' : '') + '</td></tr>';
+        var idCell = w.url ? '<a class="wi-open" href="' + esc(w.url) + '" target="_blank" rel="noopener">' + esc(w.id) + '</a>' : esc(w.id);
+        h += '<tr><td class="wi-id">' + idCell + '</td><td class="wi-title" title="' + esc(w.title) + '">' + esc(w.title) + '</td><td>' + esc(w.type) + '</td><td>' + esc(w.state) + '</td><td class="wi-asg" title="' + esc(w.assignedTo) + '">' + esc(w.assignedTo) + '</td><td>' + (w.url ? '<a class="wi-open" href="' + esc(w.url) + '" target="_blank" rel="noopener">\u2197</a>' : '') + '</td></tr>';
       });
       h += '</tbody></table>';
       out.innerHTML = h;
@@ -1326,7 +1333,7 @@ table.wi-results { width: 100%; border-collapse: collapse; margin-top: 8px; font
 <\/script></head><body>
   <div class="container">
     <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 discovery</span></div>
-    <h1>Discovery${project ? " \u2014 " + escHtml(project) : ""}</h1>
+    <h1>Discovery</h1>
     <div class="sub">Find what to work on \u2014 a review to pick up, a work item, or a spec \u2014 without leaving Tippani.</div>
     <div class="tabs">
       <button class="tab" data-tab="queue" type="button">Review queue</button>
@@ -1343,7 +1350,7 @@ table.wi-results { width: 100%; border-collapse: collapse; margin-top: 8px; font
       <div class="wi-row">
         <span class="wi-label">Project</span>
         <select id="wiProject" class="wi-project"><option value="${escHtml(project || "")}">${escHtml(project || "(configured project)")}</option></select>
-        <span class="wi-note">single project \u2014 no across-all</span>
+        <span class="wi-note">The query runs against the selected Azure DevOps project.</span>
       </div>
       <textarea id="wiQuery" class="wi-query" spellcheck="false">${escHtml(sampleWiql)}</textarea>
       <div class="wi-actions"><span id="wiStatus" class="wi-status"></span><button id="wiSearchBtn" class="wi-search" type="button">Search</button></div>
