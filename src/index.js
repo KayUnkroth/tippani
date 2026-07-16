@@ -17,6 +17,8 @@ import { fileURLToPath } from "url";
 import os from "os";
 import crypto from "crypto";
 import { EDITOR_JS } from "./client/editor.bundle.js";
+import { MERMAID_JS } from "./client/mermaid.bundle.js";
+import { MERMAID_VIEW_JS } from "./client/mermaid-view.bundle.js";
 import { isConflict } from "./conflict.js";
 import { decideCanEdit } from "./canedit.js";
 import {
@@ -40,6 +42,7 @@ import {
   deriveRepoContext,
   summarizeNonMarkdown,
 } from "./config-util.js";
+import { resolveImagePath, imageContentType, isLfsPointer } from "./image-src.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -250,6 +253,35 @@ async function getFileContent(conn, filePath, branch) {
     chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
   }
   return Buffer.concat(chunks).toString("utf-8");
+}
+
+// Fetch a binary blob (an embedded image) from the repo as raw bytes. Same ADO
+// call as getFileContent, but returns the Buffer undecoded so the image proxy
+// route can stream it with the right content-type. resolveLfs=true makes ADO
+// return the real object for Git-LFS-tracked images (the specs store screenshots
+// in LFS); without it the call returns the ~130-byte LFS pointer text, which
+// would stream as a broken image.
+async function getImageBlob(conn, filePath, branch) {
+  const gitApi = await conn.getGitApi();
+  const versionDesc = branch.replace("refs/heads/", "");
+  const item = await gitApi.getItemContent(
+    ADO_REPO,
+    filePath,
+    ADO_PROJECT,
+    undefined,        // scopePath
+    undefined,        // recursionLevel
+    undefined,        // includeContentMetadata
+    undefined,        // latestProcessedChange
+    true,             // download — raw bytes
+    { version: versionDesc, versionType: 0 },
+    undefined,        // includeContent
+    true              // resolveLfs — return the real blob, not the LFS pointer
+  );
+  const chunks = [];
+  for await (const chunk of item) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
 }
 
 async function getPRChangedFiles(conn, prId) {
@@ -1556,6 +1588,11 @@ details[open] .resolved-summary::before { content: '▾ '; }
 .spec .section-focused { box-shadow: 0 0 0 2px #6d071a; border-radius: 6px; }
 [data-theme="dark"] .comment-thread.thread-focused { box-shadow: 0 0 0 2px #b23a58; border-color: #b23a58 !important; }
 [data-theme="dark"] .spec .section-focused { box-shadow: 0 0 0 2px #b23a58; }
+/* Phase 119: rendered Mermaid diagrams. */
+.mermaid-block { margin: 14px 0; text-align: center; overflow-x: auto; }
+.mermaid-block svg { max-width: 100%; height: auto; }
+.mermaid-block.mermaid-error { text-align: left; }
+.mermaid-error-note { font-size: 12px; color: var(--cp-text-muted); margin-bottom: 6px; }
 /* Item 3: Current / Diff / Proposed view toggle. */
 .view-toggle { display: inline-flex; border: 1px solid var(--cp-border); border-radius: 7px; overflow: hidden; margin-right: 6px; }
 .view-btn { font-family: inherit; font-size: 12px; padding: 4px 10px; border: none; background: var(--cp-surface); color: var(--cp-text-muted); cursor: pointer; border-right: 1px solid var(--cp-border); }
@@ -1813,6 +1850,7 @@ details[open] .resolved-summary::before { content: '▾ '; }
 <div class="toast" id="toast"></div>
 
 <script>${EDITOR_JS}</script>
+<script>${MERMAID_VIEW_JS}</script>
 <script>
 // #47 edit/view toggle. Read-only rendered view is the default; editing is opt-in.
 // The CM editor is mounted lazily on first entry and reused, so edits persist
@@ -2565,7 +2603,7 @@ async function applyView(view) {
   if (view === 'proposed') {
     try {
       const r = await fetch('/api/v1/specs/' + CURRENT_FILE_INDEX + '/render?draft=1');
-      if (r.ok) { const d = await r.json(); if (current) current.innerHTML = d.html || ''; }
+      if (r.ok) { const d = await r.json(); if (current) { current.innerHTML = d.html || ''; if (window.tippaniRenderMermaid) window.tippaniRenderMermaid(current); } }
     } catch {}
     if (!editing) { if (content) content.style.display = 'none'; if (current) current.style.display = ''; }
   } else {
@@ -3451,6 +3489,14 @@ async function main() {
     next();
   });
 
+  // Phase 119: serve the vendored Mermaid runtime (embedded string) for the
+  // spec page's lazy diagram rendering. Offline-safe; long-cache immutable.
+  app.get("/vendor/mermaid.min.js", (_req, res) => {
+    res.type("application/javascript")
+       .set("Cache-Control", "public, max-age=31536000, immutable")
+       .send(MERMAID_JS);
+  });
+
   // File picker or auto-redirect
   app.get("/", (_req, res) => {
     if (_changedFiles.length === 1) {
@@ -3548,7 +3594,7 @@ async function main() {
 
       const { metadata, body } = stripFrontmatter(raw);
       const { toc } = buildSourceMap(body);
-      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema);
+      const { html: specHtml, ranges: sourceMap } = await renderSpecBody(body, specSanitizeSchema, { rewriteImagesForFileIndex: idx });
 
       // Merge cached threads + pending local comments
       let threads = _cache?.threads || [];
@@ -3599,6 +3645,47 @@ async function main() {
     }
   });
 
+  // Image proxy: serve an embedded image a spec references with a repo-relative
+  // path (e.g. `Images/foo.png`). The spec's rendered `<img src>` is rewritten
+  // to this route; here we resolve the path against that file's directory, fetch
+  // the blob from ADO with the server-side token (the browser can't — the token
+  // isn't in the page and the user's ADO cookies are SameSite), and stream it
+  // with the right content-type. Limited to image extensions so it can't be used
+  // as a general repo file-read proxy.
+  app.get("/file/:index/media", async (req, res) => {
+    try {
+      const idx = parseInt(req.params.index);
+      if (isNaN(idx) || idx < 0 || idx >= _changedFiles.length) return res.status(404).end();
+      const specPath = _changedFiles[idx].path;
+      const resolved = resolveImagePath(specPath, req.query.src);
+      if (!resolved) return res.status(404).end();
+      const type = imageContentType(resolved);
+      if (!type) return res.status(404).end();
+      if (_isOffline || !_conn) return res.status(503).end();
+      const buf = await getImageBlob(_conn, resolved, _branch);
+      if (!buf || buf.length === 0) return res.status(404).end();
+      if (isLfsPointer(buf)) {
+        // resolveLfs was requested but ADO still returned the pointer — better
+        // to fail loudly than stream a text pointer mislabeled as an image.
+        console.error(`Image proxy: LFS pointer not resolved for ${resolved}`);
+        return res.status(502).end();
+      }
+      res.set("Content-Type", type)
+         // Defense-in-depth for an attacker-authored image blob — especially an
+         // SVG, which is script-capable if rendered as a TOP-LEVEL document (the
+         // <img> embed path is inert, but the /media URL is same-origin and
+         // navigable). Forbid MIME sniffing and neutralize any script via a
+         // sandboxed, deny-by-default CSP. Harmless for real images.
+         .set("X-Content-Type-Options", "nosniff")
+         .set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
+         .set("Cache-Control", "private, max-age=300")
+         .send(buf);
+    } catch (e) {
+      console.error("Image proxy error:", e.message);
+      res.status(404).end();
+    }
+  });
+
   // GitHub-style diff of a staged spec edit for one file. Returns change hunks
   // (rendered "current" + "proposed" HTML, anchored to original line ranges) so
   // the file view can overlay red/green boxes without swapping the whole doc.
@@ -3640,7 +3727,7 @@ async function main() {
       content = raw || "";
     }
     const { body } = stripFrontmatter(content);
-    const { html } = await renderSpecBody(body, specSanitizeSchema);
+    const { html } = await renderSpecBody(body, specSanitizeSchema, { rewriteImagesForFileIndex: idx });
     return { html };
   }
 
