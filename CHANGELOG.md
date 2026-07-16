@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.6.0 (2026-07-16)
+
+A review-optimized UX layer: surgical agent edits, a three-view spec toggle, a feedback triage filter, a PR picker, and editor find/replace — plus a security-hardening pass over the new surface. From [#67](https://github.com/mavaali/tippani/pull/67).
+
+### Added — review UX
+- **Surgical spec edits (`edit_spec`).** An agent can stage a small, anchored change to a spec (a guarded line-range edit or a find/replace) without resending the whole document. A pure engine (`spec-edit.js`) resolves all edits against one snapshot and applies them atomically: an out-of-range line, a failed `oldString` guard, an overlap, or a zero-match `find` fails the whole call and stages nothing (`422` with a machine-readable `code`). Staged review-only, never committed.
+- **Three-view toggle (`set_view`).** The spec reading view has three modes — the committed **Current** text, the **Diff** of the staged proposal, and the full **Proposed** text — switchable by the reader and drivable by the agent (seq-gated so a background stage never flips the reader's view). Diff/Proposed are disabled until a draft exists.
+- **Feedback triage filter (`set_feedback_filter`).** The feedback page gains a filter bar (thread state, reviewer, file, free-text search) the reviewer can drive and the agent can set to focus the triage.
+- **PR picker (`list_prs` + `/prs` + `--browse`).** List the PRs to review as openable tiles; the portal can boot PR-less in a browse mode that only lists PRs — a review inbox rather than needing to know the PR id up front.
+- **Find & Replace in the editor.** CodeMirror's search panel, opened from a toolbar button.
+- **Host-routable browser opener (`TIPPANI_OPEN_CMD`).** The portal can open its pages through a host-supplied command (e.g. the VS Code integrated Simple Browser) instead of the OS default browser, via a plain env-var hook.
+- **Persistent focus highlight.** Clicking a comment thread highlights it and its anchored spec section in a persistent Bordeaux ring that tracks focus instead of fading on a timer. Plus a **live-staged draft auto-load** and a **height-capped comment-thread pane**.
+
+### Security & robustness
+- **`edit_spec` honors the editor lock.** Staging returns `409 { code: "locked" }` while the user holds the file open in edit mode (the 3s heartbeat lock, matching `PUT /draft`), and the file-view auto-load is guarded on `!isDirty()` — so an agent edit never silently overwrites a reviewer's unsaved buffer.
+- **Shell-free host opener.** `TIPPANI_OPEN_CMD` no longer runs through a shell with the URL substituted into the command string. The template is tokenized and the URL is passed as a discrete argv element to a shell-less spawn, so URL content can never inject a command.
+- **Single-tab nav stays on the resolved same-origin target.** The nav watcher navigates to the resolved same-origin path (never the raw `navUrl`), and a new guard keeps a deliberate `?edit=1` deep-link from being stripped on a fresh browser.
+
+### Notes
+- New MCP tools: `edit_spec`, `set_view`, `set_feedback_filter`, `list_prs`. New `--browse` mode.
+- New pure engines with unit tests (`spec-edit`, `feedback-filter`, `pr-criteria`, `nav-guard`) plus two end-to-end review-UX smokes (`npm run smoke:review-ux`). Full suite green.
+
 ## 1.5.0 (2026-07-15)
 
 MCP reliability for long-lived and multi-PR sessions, single-tab navigation, and a security-hardening pass over the control API. From [#66](https://github.com/mavaali/tippani/pull/66).
