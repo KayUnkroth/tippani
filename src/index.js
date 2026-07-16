@@ -34,7 +34,7 @@ import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
 import { isExpiredJwt } from "./ado-token-check.js";
-import { buildPrCriteria, summarizePr } from "./pr-criteria.js";
+import { buildPrCriteria, summarizePr, mergeRolePrs } from "./pr-criteria.js";
 import { navSkipsBarePathClobber, navShouldNavigate, navTarget } from "./nav-guard.js";
 import {
   decodeConfigValue,
@@ -303,6 +303,36 @@ async function getPRChangedFiles(conn, prId) {
     .map((c) => ({ path: c.item.path, ext: extOf(c.item.path) }));
   return { mdFiles, otherFiles };
 }
+
+// Load a PR into module state: fetch it, re-point the repo context at its real
+// repository, resolve the source branch, fetch the changed .md files, and cache
+// contents + threads. Shared by the Discovery home's /open/:prId re-drive (the
+// browse portal binds a PR at runtime and switches to PR-bound pages). Assumes
+// _conn is already authenticated. Returns the loaded PR.
+async function bindPr(prId) {
+  const pr = await getPullRequest(_conn, prId);
+  _pr = pr;
+  _prId = prId;
+  applyRepoContextFromPR(pr);
+  _branch = pr.sourceRefName;
+  const fileResult = await getPRChangedFiles(_conn, prId);
+  _changedFiles = fileResult.mdFiles;
+  _otherChangedFiles = fileResult.otherFiles;
+  const fileContents = {};
+  for (const f of _changedFiles) {
+    try { fileContents[f.path] = await getFileContent(_conn, f.path, _branch); } catch { /* skip uncacheable file */ }
+  }
+  let threads = [];
+  try { threads = await getCommentThreads(_conn, prId); } catch { /* threads optional */ }
+  _cache = {
+    pr: _pr, branch: _branch, changedFiles: _changedFiles,
+    otherChangedFiles: _otherChangedFiles, fileContents, threads,
+    cachedAt: new Date().toISOString(),
+  };
+  saveCache(prId, _cache);
+  return pr;
+}
+
 
 async function getSpecFiles(conn, branch) {
   const gitApi = await conn.getGitApi();
@@ -1171,6 +1201,71 @@ h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
     <div class="sub">${list.length} PR${list.length !== 1 ? "s" : ""}</div>
     <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
     <div class="pr-list">${rows || '<div class="empty">No pull requests found.</div>'}</div>
+  </div>
+${NAV_WATCHER}
+</body></html>`;
+}
+
+// Discovery home: the review queue — specs I'm authoring + reviewing, role-
+// tagged, whose cards open the PR INSIDE Tippani (/open/:id re-drive) rather
+// than linking out to ADO. Built on buildPrListPage's styling; later Discovery
+// slices add the work-item and spec-tree panes to this page.
+function buildHomePage(prs, project) {
+  const list = prs || [];
+  const statusLabel = (s) => (s === 1 ? "Active" : s === 3 ? "Completed" : s === 2 ? "Abandoned" : "");
+  const roleBadge = (roles) => (roles || []).map((r) =>
+    `<span class="pr-role pr-role-${r}">${r === "author" ? "Authoring" : "Reviewing"}</span>`).join("");
+  const rows = list.map((pr) => `<a class="pr-card" href="/open/${pr.id}" data-title="${escHtml((pr.title || "").toLowerCase())}" data-author="${escHtml((pr.author || "").toLowerCase())}">
+      <div class="pr-top"><span class="pr-id">#${pr.id}</span><span class="pr-status">${statusLabel(pr.status)}</span>${pr.isDraft ? '<span class="pr-draft">Draft</span>' : ""}${roleBadge(pr.roles)}</div>
+      <div class="pr-title">${escHtml(pr.title || "")}</div>
+      <div class="pr-meta">${escHtml(pr.author || "")} \u00b7 ${escHtml(pr.source || "")} \u2192 ${escHtml(pr.target || "")}${pr.repo ? " \u00b7 " + escHtml(pr.repo) : ""}</div>
+    </a>`).join("\n");
+  return `<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tippani \u2014 Discovery</title>
+<style>
+${cssVariables()}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: "Segoe UI", Aptos, Calibri, -apple-system, sans-serif; background: var(--cp-bg); color: var(--cp-text); padding: 40px 24px; display: flex; flex-direction: column; align-items: center; }
+.container { width: 100%; max-width: 820px; }
+.brand-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 20px; }
+.logo { width: 32px; height: 32px; border-radius: 8px; background: var(--cp-accent); display: flex; align-items: center; justify-content: center; color: var(--cp-accent-fg); font-weight: 700; font-size: 12px; }
+h1 { font-size: 19px; font-weight: 700; margin-bottom: 4px; }
+h2 { font-size: 14px; font-weight: 700; margin: 8px 0 10px; color: var(--cp-text); }
+.sub { font-size: 13px; color: var(--cp-text-muted); margin-bottom: 16px; }
+.filters { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+.filters input { font-family: inherit; font-size: 13px; padding: 6px 10px; border: 1px solid var(--cp-border); border-radius: 8px; background: var(--cp-surface); color: var(--cp-text); flex: 1; min-width: 200px; }
+.pr-list { display: flex; flex-direction: column; gap: 8px; }
+.pr-card { display: block; text-decoration: none; color: inherit; padding: 14px 18px; background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 12px; cursor: pointer; }
+.pr-card:hover { border-color: var(--cp-accent); }
+.pr-top { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; }
+.pr-id { font-size: 13px; font-weight: 700; color: var(--cp-accent); }
+.pr-status { font-size: 11px; color: var(--cp-text-muted); }
+.pr-draft { font-size: 11px; background: var(--cp-border); padding: 1px 7px; border-radius: 99px; }
+.pr-role { font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.3px; }
+.pr-role-author { background: var(--cp-accent-soft); color: var(--cp-accent); }
+.pr-role-reviewer { background: var(--cp-border); color: var(--cp-text-muted); }
+.pr-title { font-size: 15px; font-weight: 600; line-height: 1.35; }
+.pr-meta { font-size: 12px; color: var(--cp-text-muted); margin-top: 4px; }
+.empty { font-size: 14px; color: var(--cp-text-muted); padding: 24px; text-align: center; }
+<\/style>
+<script>
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) document.documentElement.dataset.theme = 'dark';
+  function applyPrFilter() {
+    const q = (document.getElementById('prSearch').value || '').toLowerCase();
+    document.querySelectorAll('.pr-card').forEach((c) => {
+      const hit = !q || c.dataset.title.includes(q) || c.dataset.author.includes(q);
+      c.style.display = hit ? '' : 'none';
+    });
+  }
+<\/script></head><body>
+  <div class="container">
+    <div class="brand-bar"><div class="logo">FS</div><span style="font-weight:600">Tippani</span><span style="font-size:13px;color:var(--cp-text-muted)"> \u00b7 discovery</span></div>
+    <h1>Discovery${project ? " \u2014 " + escHtml(project) : ""}</h1>
+    <div class="sub">Specs you're authoring or reviewing. Open one to review it here.</div>
+    <h2>Review queue</h2>
+    <div class="filters"><input id="prSearch" type="search" placeholder="Filter by title or author\u2026" oninput="applyPrFilter()"></div>
+    <div class="pr-list">${rows || '<div class="empty">Nothing in your review queue.</div>'}</div>
   </div>
 ${NAV_WATCHER}
 </body></html>`;
@@ -3279,41 +3374,27 @@ async function main() {
   // Browse mode (item 6): a PR-less portal that only lists pull requests
   // (/prs + /api/v1/prs), so list_prs works before any PR is opened. Reads
   // org/project from config; needs an ADO token.
+  // Discovery: the browse portal is the SAME server as a PR-bound portal, just
+  // with no PR loaded yet. It authenticates, serves the Discovery home ("/"),
+  // and re-drives into PR-bound mode at runtime via GET /open/:prId (bindPr).
+  // So browse mode only sets up the connection + empty PR state here, then falls
+  // through to the shared app below.
   if (browseMode) {
     if (adoToken) _conn = getAdoConnectionBearer(adoToken);
     else { const pat = loadPat(); if (pat) _conn = getAdoConnection(pat); }
     if (!_conn) { console.error("Browse mode requires an ADO token (--ado-token / TIPPANI_ADO_TOKEN)."); process.exit(1); }
     _prId = 0;
-    const bapp = express();
-    bapp.use(express.json());
-    registerControlApi(bapp, {
-      port: PORT, sessionToken: _sessionToken, focus: _focus, drafts: _drafts, locks: _locks,
-      getThreads: () => [], getChangedFiles: () => [], listPrs: doListPrs,
-    });
-    bapp.get("/prs", async (_req, res) => {
-      try { const d = await doListPrs({}); res.type("html").send(buildPrListPage(d.prs || [], ADO_PROJECT)); }
-      catch (e) { res.status(500).send("Error listing PRs."); console.error("PR list error:", e.message); }
-    });
-    bapp.get("/", (_req, res) => res.redirect("/prs"));
-    const bserver = bapp.listen(PORT, "127.0.0.1", () => {
-      try {
-        fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
-        const tokenPath = path.join(CONFIG_DIR, `session-token-${PORT}`);
-        fs.writeFileSync(tokenPath, _sessionToken + "\n", { mode: 0o600 });
-        writeInstance({ port: PORT, prId: 0, token: _sessionToken, pid: process.pid, url: `http://localhost:${PORT}`, shimPid: Number(process.env.TIPPANI_SHIM_PID) || null });
-        const cleanup = () => { try { fs.unlinkSync(tokenPath); } catch {} removeInstance(PORT); };
-        process.on("exit", cleanup);
-        process.on("SIGINT", () => { cleanup(); process.exit(0); });
-        process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-        if (process.channel) process.on("disconnect", () => { cleanup(); process.exit(0); });
-      } catch (e) { console.warn("  browse: token persist failed: " + e.message); }
-      console.log(`\n  Tippani (browse) running at http://localhost:${PORT}`);
-      console.log(`  Control API token: ${_sessionToken}`);
-      if (!headless) open(`http://localhost:${PORT}/prs`);
-    });
-    bserver.on("error", (err) => { console.error("  browse server error: " + err.message); process.exit(1); });
-    return;
+    _pr = null;
+    _branch = null;
+    _changedFiles = [];
+    _otherChangedFiles = [];
   }
+
+  let openIndex = null;
+
+  // PR-bound startup: authenticate, then load the PR into module state. Skipped
+  // in browse mode (no PR yet) — the Discovery home binds a PR later via /open.
+  if (!browseMode) {
 
   // Try cache first
   _cache = loadCache(_prId);
@@ -3463,11 +3544,12 @@ async function main() {
   _canEdit = await computeCanEdit(_conn, _pr, _isOffline);
 
   // Resolve explicit file to an index
-  let openIndex = null;
   if (explicitFile) {
     const idx = _changedFiles.findIndex((f) => f.path === explicitFile);
     openIndex = idx >= 0 ? idx : 0;
   }
+
+  } // end if (!browseMode)
 
   // Start server
   const app = express();
@@ -3497,12 +3579,41 @@ async function main() {
        .send(MERMAID_JS);
   });
 
-  // File picker or auto-redirect
-  app.get("/", (_req, res) => {
+  // Home. In browse mode (no PR bound) this is the Discovery home — the review
+  // queue (specs I'm authoring + reviewing), whose cards open a PR in-portal via
+  // /open/:prId. Once a PR is bound it behaves as the PR file picker / redirect.
+  app.get("/", async (_req, res) => {
+    if (!_prId) {
+      try {
+        const d = await doListPrs({ role: "queue" });
+        return res.type("html").send(buildHomePage(d.prs || [], ADO_PROJECT));
+      } catch (e) {
+        console.error("Home (review queue) error:", e.message);
+        return res.status(500).send("Error loading the Discovery home.");
+      }
+    }
     if (_changedFiles.length === 1) {
       return res.redirect("/file/0");
     }
     res.type("html").send(buildPickerPage(_pr, _changedFiles, _cache?.threads || []));
+  });
+
+  // Discovery re-drive: bind a PR into this (browse) portal at runtime and jump
+  // to its spec view — the review-queue cards point here so a PR opens INSIDE
+  // Tippani instead of bouncing to ADO. Re-binding a different PR just swaps the
+  // loaded PR.
+  app.get("/open/:prId", async (req, res) => {
+    const prId = parseInt(req.params.prId, 10);
+    if (!Number.isFinite(prId) || prId <= 0) return res.redirect("/");
+    if (_isOffline || !_conn) return res.status(503).send("Cannot open a PR while offline.");
+    try {
+      await bindPr(prId);
+      _canEdit = await computeCanEdit(_conn, _pr, _isOffline);
+      return res.redirect("/file/0");
+    } catch (e) {
+      console.error(`/open/${prId} failed:`, e.message);
+      return res.status(502).send("Could not open PR #" + prId + ". Check the server console.");
+    }
   });
 
   // Cross-PR feedback triage page (all threads across the PR, no file drill-in).
@@ -3738,8 +3849,24 @@ async function main() {
     if (_isOffline || !_conn) return { prs: [], error: "offline" };
     let currentUserId = null;
     try { const cd = await _conn.connect(); currentUserId = cd && cd.authenticatedUser && cd.authenticatedUser.id; } catch { /* fall back to no creator filter */ }
-    const crit = buildPrCriteria(query, { currentUserId });
     const top = Number.isFinite(query.top) ? query.top : 50;
+
+    // Review queue (Discovery home): specs I'm authoring + specs I'm reviewing,
+    // merged and de-duped. ADO PR criteria ANDs creator+reviewer, so the two
+    // roles are two separate queries unioned via mergeRolePrs.
+    if (query.role === "queue") {
+      const status = query.status || "active";
+      const authoredCrit = buildPrCriteria({ status, creator: "me" }, { currentUserId });
+      const reviewingCrit = buildPrCriteria({ status, creator: "any", reviewer: currentUserId }, { currentUserId });
+      const [authoredRaw, reviewingRaw] = await Promise.all([
+        listPullRequests(_conn, authoredCrit, top),
+        currentUserId ? listPullRequests(_conn, reviewingCrit, top) : Promise.resolve([]),
+      ]);
+      const prs = mergeRolePrs(authoredRaw.map(summarizePr), reviewingRaw.map(summarizePr));
+      return { prs, role: "queue", project: ADO_PROJECT };
+    }
+
+    const crit = buildPrCriteria(query, { currentUserId });
     const raw = await listPullRequests(_conn, crit, top);
     return { prs: raw.map(summarizePr), mine: !!crit.creatorId, status: crit.status, project: ADO_PROJECT };
   }

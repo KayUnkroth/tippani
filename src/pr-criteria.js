@@ -39,3 +39,24 @@ export function summarizePr(pr) {
     webUrl: pr._links?.web?.href || repo.webUrl || null,
   };
 }
+
+// Merge the two role-scoped result sets (specs I'm authoring + specs I'm
+// reviewing) into one list, de-duped by PR id (a PR I both authored and review
+// appears once) and tagged with the role(s) it matched. `authored` and
+// `reviewing` are arrays of summarized PRs (see summarizePr); order is authored
+// first, then any reviewing-only PRs, so my own specs lead the queue.
+export function mergeRolePrs(authored = [], reviewing = []) {
+  const byId = new Map();
+  const add = (pr, role) => {
+    const existing = byId.get(pr.id);
+    if (existing) {
+      if (!existing.roles.includes(role)) existing.roles.push(role);
+    } else {
+      byId.set(pr.id, { ...pr, roles: [role] });
+    }
+  };
+  for (const pr of authored) add(pr, "author");
+  for (const pr of reviewing) add(pr, "reviewer");
+  return [...byId.values()];
+}
+

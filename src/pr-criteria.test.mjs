@@ -1,5 +1,5 @@
 // Tests for the PR search-criteria builder + summarizer (item 6).
-import { buildPrCriteria, summarizePr, PR_STATUS } from "./pr-criteria.js";
+import { buildPrCriteria, summarizePr, PR_STATUS, mergeRolePrs } from "./pr-criteria.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) { if (cond) pass++; else { fail++; console.error("  FAIL: " + name); } }
@@ -42,6 +42,22 @@ try {
   check("summarize: source/target stripped", s.source === "feature/x" && s.target === "main");
   check("summarize: web url from _links", s.webUrl === "https://dev.azure.com/o/p/_git/specs/pullrequest/42");
   check("summarize: repo name", s.repo === "specs");
+
+  // mergeRolePrs — role-scoped review queue (authoring + reviewing, de-duped)
+  {
+    const authored = [{ id: 1, title: "A" }, { id: 2, title: "B" }];
+    const reviewing = [{ id: 2, title: "B" }, { id: 3, title: "C" }];
+    const merged = mergeRolePrs(authored, reviewing);
+    check("merge: de-dupes by id", merged.length === 3);
+    check("merge: authored first, reviewing-only appended", merged.map((p) => p.id).join(",") === "1,2,3");
+    check("merge: author-only tagged author", merged.find((p) => p.id === 1).roles.join() === "author");
+    check("merge: reviewer-only tagged reviewer", merged.find((p) => p.id === 3).roles.join() === "reviewer");
+    check("merge: both roles on the shared PR", merged.find((p) => p.id === 2).roles.join() === "author,reviewer");
+    check("merge: empty inputs -> empty", mergeRolePrs().length === 0);
+    check("merge: reviewing only", mergeRolePrs([], [{ id: 9 }]).length === 1);
+    // original objects are not mutated (roles added on a copy)
+    check("merge: does not mutate inputs", !("roles" in authored[0]));
+  }
 } catch (e) {
   fail++;
   console.error("UNEXPECTED THROW:", e && e.stack);
