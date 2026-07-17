@@ -111,12 +111,15 @@ async function main() {
     check("feedback search present", !!fbdoc.getElementById("fbSearch"));
     check("feedback filter apply logic wired", /applyFeedbackFilter\s*\(/.test(fb.html));
 
-    // ---- /prs : list page (offline can't reach ADO; assert the route is mounted) ----
-    const prs = await getPage("/prs");
-    check("/prs route mounted (200 tiles, or offline-degraded non-404)", prs.status !== 404, `status=${prs.status}`);
-    if (prs.status === 200) {
-      check("/prs shows a filter bar", /pr-filter|filter/i.test(prs.html));
+    // ---- /discovery : Discovery page (offline can't reach ADO; assert mounted) ----
+    const disc = await getPage("/discovery");
+    check("/discovery route mounted (200 tiles, or offline-degraded non-404)", disc.status !== 404, `status=${disc.status}`);
+    if (disc.status === 200) {
+      check("/discovery shows a filter bar", /pr-filter|filter/i.test(disc.html));
     }
+    // /prs is a backward-compatible alias that redirects to /discovery.
+    const prsRedirect = await fetch(BASE + "/prs", { headers: { "X-Tippani-Client": CLIENT }, redirect: "manual" });
+    check("/prs redirects to /discovery", prsRedirect.status >= 300 && prsRedirect.status < 400 && (prsRedirect.headers.get("location") || "").startsWith("/discovery"), `status=${prsRedirect.status} loc=${prsRedirect.headers.get("location")}`);
 
     // ---- auto-load (last-write-wins) server side ----
     await api("DELETE", "/api/v1/specs/0/draft");

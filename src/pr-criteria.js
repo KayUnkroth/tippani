@@ -35,6 +35,7 @@ export function summarizePr(pr) {
     source: (pr.sourceRefName || "").replace("refs/heads/", ""),
     target: (pr.targetRefName || "").replace("refs/heads/", ""),
     repo: repo.name || null,
+    project: repo.project?.name || null,
     created: pr.creationDate || null,
     webUrl: pr._links?.web?.href || repo.webUrl || null,
   };

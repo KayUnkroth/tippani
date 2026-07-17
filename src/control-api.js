@@ -30,6 +30,8 @@ export function registerControlApi(app, deps) {
     renderDraft,        // async (fileIndex, {draft}) => {html} (optional) — item 3 Current view
     listPrs,            // async (query) => {prs, ...} (optional) — item 6 list PRs
     searchWorkItems,    // async ({project, wiql}) => {workItems, ...} (optional) — Discovery WIQL search
+    searchSpecs,        // async ({project, query}) => {specs, ...} (optional) — Discovery spec full-text search
+    getFileCommits,     // async ({files, top}) => {files:[{repo,path,branch,commits}]} (optional) — bulk commit info
   } = deps;
 
   const ALLOWED_ORIGINS = new Set([
@@ -393,6 +395,33 @@ export function registerControlApi(app, deps) {
     try {
       const { wiql, project } = req.body || {};
       res.json(await searchWorkItems({ wiql, project }));
+    } catch (e) {
+      res.status(502).json({ error: String(e?.message || e) });
+    }
+  });
+
+  // Discovery spec search: POST freeform text (+ optional project); the portal
+  // runs a full-text ADO Code Search and returns .md hits (repo + path) that
+  // open read-only at main. POST because the query is a body; same-origin
+  // (browser) or bearer (MCP) authorized.
+  app.post("/api/v1/specs/search", requireAuth({ mutation: true }), async (req, res) => {
+    if (typeof searchSpecs !== "function") return res.status(501).json({ error: "spec search not wired" });
+    try {
+      const { query, project, enrich, top } = req.body || {};
+      res.json(await searchSpecs({ query, project, enrich, top }));
+    } catch (e) {
+      res.status(502).json({ error: String(e?.message || e) });
+    }
+  });
+
+  // Bulk commit info for spec files (max 25). Returns full commit records for
+  // each file — everything ADO carries, not just a "last modified by". POST body
+  // { files:[{repo,path,branch?}], top? }; same-origin (browser) or bearer (MCP).
+  app.post("/api/v1/commits/info", requireAuth({ mutation: true }), async (req, res) => {
+    if (typeof getFileCommits !== "function") return res.status(501).json({ error: "commit info not wired" });
+    try {
+      const { files, top } = req.body || {};
+      res.json(await getFileCommits({ files, top }));
     } catch (e) {
       res.status(502).json({ error: String(e?.message || e) });
     }

@@ -383,7 +383,7 @@ export function buildTools(http, session) {
     {
       name: "list_prs",
       description:
-        "List pull requests to review and open the /prs page in the user's " +
+        "List pull requests to review and open the Discovery page in the user's " +
         "browser (tiles, each links to open the PR). Defaults to YOUR open " +
         "(active) PRs; widen with creator:'any' to find anyone's open PRs, or " +
         "filter by status / reviewer / target branch. Use this to pick a PR " +
@@ -407,7 +407,7 @@ export function buildTools(http, session) {
         if (target) qs.set("target", target);
         if (typeof top === "number") qs.set("top", String(top));
         const data = await http.get("/api/v1/prs" + (qs.toString() ? "?" + qs.toString() : ""));
-        await navigate("/prs");
+        await navigate("/discovery");
         return data;
       },
     },
@@ -435,8 +435,66 @@ export function buildTools(http, session) {
         const qs = new URLSearchParams({ tab: "workitems" });
         if (typeof wiql === "string") qs.set("wiql", wiql);
         if (project) qs.set("project", project);
-        await navigate("/prs?" + qs.toString());
+        await navigate("/discovery?" + qs.toString());
         return data;
+      },
+    },
+    {
+      name: "search_specs",
+      description:
+        "Full-text search specs (Markdown) across Azure DevOps and open the Specs " +
+        "tab of the Discovery home in the user's browser. Pass freeform search " +
+        "text; optionally a project (defaults to the configured project). Results " +
+        "are .md specs that open read-only at main; use to find an existing spec " +
+        "by its content.",
+      inputSchema: {
+        query: z.string().describe("Freeform full-text search over spec content"),
+        project: z.string().optional().describe("ADO project to search (defaults to the configured project)"),
+      },
+      handler: async ({ query, project }) => {
+        if (session && typeof session.ensureBrowsePortal === "function") {
+          await session.ensureBrowsePortal();
+        }
+        const data = await http.post("/api/v1/specs/search", { query, project });
+        // Carry the query in the URL so the Specs tab prefills it and auto-runs,
+        // showing the same results the tool returned to the agent.
+        const qs = new URLSearchParams({ tab: "specs" });
+        if (typeof query === "string") qs.set("q", query);
+        if (project) qs.set("project", project);
+        await navigate("/discovery?" + qs.toString());
+        return data;
+      },
+    },
+    {
+      name: "get_file_commits",
+      description:
+        "Get the raw commit history for one or more spec files in bulk (max 25 " +
+        "files per call). Returns full commit records per file — commit id, " +
+        "author and committer (name, email, date), message, change counts, and " +
+        "url — not just a 'last modified by'. Use when you need authorship or " +
+        "history beyond what search_specs carries. Pass `files` as an array of " +
+        "{ repo, path, branch? } where `repo` is the repository GUID and `path` " +
+        "is the file path (both come straight from search_specs); `branch` " +
+        "defaults to the file's default branch. Optionally `top` = commits per " +
+        "file (default 10, max 50). Read-only; opens nothing.",
+      inputSchema: {
+        files: z
+          .array(
+            z.object({
+              repo: z.string().describe("Repository GUID (from search_specs)"),
+              path: z.string().describe("File path within the repo (from search_specs)"),
+              branch: z.string().optional().describe("Branch (defaults to the file's default branch)"),
+            })
+          )
+          .max(25)
+          .describe("Files to fetch commits for (max 25)"),
+        top: z.number().int().positive().optional().describe("Commits per file (default 10, max 50)"),
+      },
+      handler: async ({ files, top }) => {
+        if (session && typeof session.ensureBrowsePortal === "function") {
+          await session.ensureBrowsePortal();
+        }
+        return await http.post("/api/v1/commits/info", { files, top });
       },
     },
   ];
