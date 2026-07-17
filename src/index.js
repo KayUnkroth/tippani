@@ -44,6 +44,8 @@ import {
   summarizeNonMarkdown,
 } from "./config-util.js";
 import { resolveImagePath, imageContentType, isLfsPointer, secureImageHeaders, isValidRepoId } from "./image-src.js";
+import { cssVariables, changeTypeBadge, escHtml, stripMarkdown } from "./html-util.js";
+import { getSpecContentAt, getSpecBlobAt, buildSpecWebUrl, getLastCommitAuthor } from "./ado-read.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -328,65 +330,6 @@ async function getImageBlob(conn, filePath, branch) {
   return Buffer.concat(chunks);
 }
 
-// Read a spec's markdown from an ARBITRARY Git repo at a fixed branch (Discovery
-// spec search opens results read-only off main). Unlike getFileContent, the repo
-// is passed explicitly (a repo GUID from the Code Search hit), not the configured
-// ADO_REPO — a repo GUID is globally unique so the project arg is left undefined.
-async function getSpecContentAt(conn, repoId, filePath, branch = "main") {
-  const gitApi = await conn.getGitApi();
-  const item = await gitApi.getItemContent(
-    repoId, filePath, undefined,
-    undefined, undefined, undefined, undefined, undefined,
-    { version: branch, versionType: 0 }
-  );
-  const chunks = [];
-  for await (const chunk of item) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf-8");
-}
-
-// Fetch an embedded image from an arbitrary Git repo at a fixed branch (the
-// read-only spec view's image proxy). Same shape as getImageBlob but repo-scoped
-// by GUID and branch — download=true (raw bytes), resolveLfs=true (real blob).
-async function getSpecBlobAt(conn, repoId, filePath, branch = "main") {
-  const gitApi = await conn.getGitApi();
-  const item = await gitApi.getItemContent(
-    repoId, filePath, undefined,
-    undefined, undefined, undefined, undefined,
-    true,                                     // download — raw bytes
-    { version: branch, versionType: 0 },
-    undefined,
-    true                                      // resolveLfs — real blob, not pointer
-  );
-  const chunks = [];
-  for await (const chunk of item) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks);
-}
-
-// Build the ADO web URL for a spec file so a result can open in Azure DevOps.
-function buildSpecWebUrl(org, project, repoName, filePath) {
-  const base = String(org || "").replace(/\/+$/, "");
-  const p = filePath.startsWith("/") ? filePath : "/" + filePath;
-  return `${base}/${encodeURIComponent(project)}/_git/${encodeURIComponent(repoName)}?path=${encodeURIComponent(p)}`;
-}
-
-// Who last changed a file: the author of its most recent commit on `branch`.
-// Code Search doesn't return this, so the Discovery spec results enrich each hit
-// with one top-1 commit lookup. Best-effort — returns "" on any failure so a
-// single unreachable repo never fails the whole result set.
-async function getLastCommitAuthor(conn, repoId, filePath, branch = "main") {
-  try {
-    const gitApi = await conn.getGitApi();
-    const commits = await gitApi.getCommits(
-      repoId,
-      { itemPath: filePath, itemVersion: { version: branch, versionType: 0 } },
-      undefined, 0, 1
-    );
-    const c = commits && commits[0];
-    return (c && ((c.author && c.author.name) || (c.committer && c.committer.name))) || "";
-  } catch {
-    return "";
-  }
-}
 
 // Review history for a spec: the comment threads anchored to THIS file across
 // the closed PRs that touched it. There's no "PRs that changed this file" API,
@@ -893,86 +836,6 @@ function buildSourceMap(content) {
 }
 
 // --- Shared CSS variable system ---
-function cssVariables() {
-  return `
-:root {
-  color-scheme: light;
-  --cp-bg: #f7f4ef;
-  --cp-bg-elevated: #fcfbf8;
-  --cp-surface: #ffffff;
-  --cp-surface-soft: #f5f5f5;
-  --cp-border: #dedede;
-  --cp-border-strong: #919191;
-  --cp-text: #242424;
-  --cp-text-muted: #5c5c5c;
-  --cp-text-soft: #6f6f6f;
-  --cp-accent: #b11f4b;
-  --cp-accent-hover: #9a1a41;
-  --cp-accent-soft: rgba(177, 31, 75, 0.08);
-  --cp-accent-fg: #ffffff;
-  --cp-success: #16a34a;
-  --cp-danger: #dc2626;
-  --cp-warning: #f59e0b;
-  --cp-link: #0078d4;
-  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12);
-  --cp-overlay: rgba(255, 255, 255, 0.8);
-  --cp-panel: rgba(255, 255, 255, 0.86);
-  --cp-panel-strong: rgba(255, 255, 255, 0.96);
-  --cp-sheen: rgba(255, 255, 255, 0.55);
-  --cp-highlight: rgba(177, 31, 75, 0.12);
-}
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --cp-bg: #3d3b3a;
-  --cp-bg-elevated: #343231;
-  --cp-surface: #292929;
-  --cp-surface-soft: #2e2e2e;
-  --cp-border: #474747;
-  --cp-border-strong: #5f5f5f;
-  --cp-text: #dedede;
-  --cp-text-muted: #919191;
-  --cp-text-soft: #b0b0b0;
-  --cp-accent: #fd8ea1;
-  --cp-accent-hover: #fb7b91;
-  --cp-accent-soft: rgba(253, 142, 161, 0.14);
-  --cp-accent-fg: #1a1a1a;
-  --cp-success: #4ade80;
-  --cp-danger: #f87171;
-  --cp-warning: #fbbf24;
-  --cp-link: #4da6ff;
-  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
-  --cp-overlay: rgba(41, 41, 41, 0.88);
-  --cp-panel: rgba(41, 41, 41, 0.72);
-  --cp-panel-strong: rgba(41, 41, 41, 0.96);
-  --cp-sheen: rgba(255, 255, 255, 0.04);
-  --cp-highlight: rgba(253, 142, 161, 0.12);
-}`;
-}
-
-function changeTypeBadge(changeType) {
-  // ADO changeType: 1=add, 2=edit, 8=rename, etc.
-  if (changeType === 1) return { label: "Added", color: "success" };
-  return { label: "Modified", color: "accent" };
-}
-
-function escHtml(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function stripMarkdown(s) {
-  return String(s)
-    .replace(/^#{1,6}\s+/gm, "")       // headings
-    .replace(/\*\*([^*]+)\*\*/g, "$1")  // bold
-    .replace(/\*([^*]+)\*/g, "$1")      // italic
-    .replace(/__([^_]+)__/g, "$1")      // bold alt
-    .replace(/_([^_]+)_/g, "$1")        // italic alt
-    .replace(/`([^`]+)`/g, "$1")        // inline code
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1") // links
-    .replace(/^[-*]\s+/gm, "• ")        // list items
-    .replace(/\n{2,}/g, " ")            // collapse newlines
-    .replace(/\n/g, " ")
-    .trim();
-}
 
 // Shared single-tab navigation watcher, injected into EVERY portal page. When
 // an MCP nav tool sets a target via POST /api/v1/nav (single-tab mode), the
