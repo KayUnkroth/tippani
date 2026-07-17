@@ -35,7 +35,7 @@ import { parseViewedMap, updateViewed } from "./viewed-map.js";
 import { writeInstance, removeInstance } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
 import { isExpiredJwt } from "./ado-token-check.js";
-import { buildPrCriteria, summarizePr, mergeRolePrs } from "./pr-criteria.js";
+import { buildPrCriteria, summarizePr, mergeRolePrs, prStatusLabel } from "./pr-criteria.js";
 import { navSkipsBarePathClobber, navShouldNavigate, navTarget } from "./nav-guard.js";
 import {
   decodeConfigValue,
@@ -43,7 +43,7 @@ import {
   deriveRepoContext,
   summarizeNonMarkdown,
 } from "./config-util.js";
-import { resolveImagePath, imageContentType, isLfsPointer } from "./image-src.js";
+import { resolveImagePath, imageContentType, isLfsPointer, secureImageHeaders, isValidRepoId } from "./image-src.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1320,7 +1320,7 @@ ${NAV_WATCHER}
 // --- Pull-request list page (item 6) — tiles + client-side title/author filter.
 function buildPrListPage(prs, project) {
   const list = prs || [];
-  const statusLabel = (s) => (s === 1 ? "Active" : s === 3 ? "Completed" : s === 2 ? "Abandoned" : "");
+  const statusLabel = prStatusLabel;
   const rows = list.map((pr) => `<div class="pr-card" data-title="${escHtml((pr.title || "").toLowerCase())}" data-author="${escHtml((pr.author || "").toLowerCase())}">
       <div class="pr-top"><span class="pr-id">#${pr.id}</span><span class="pr-status">${statusLabel(pr.status)}</span>${pr.isDraft ? '<span class="pr-draft">Draft</span>' : ""}</div>
       <div class="pr-title">${escHtml(pr.title || "")}</div>
@@ -1384,7 +1384,7 @@ function buildHomePage(prs, project, projects) {
   const projectNames = (projects && projects.length ? projects : [project].filter(Boolean));
   const projectOptions = projectNames.map((p) =>
     `<option value="${escHtml(p)}"${p === project ? " selected" : ""}>${escHtml(p)}</option>`).join("");
-  const statusLabel = (s) => (s === 1 ? "Active" : s === 3 ? "Completed" : s === 2 ? "Abandoned" : "");
+  const statusLabel = prStatusLabel;
   const roleBadge = (roles) => (roles || []).map((r) =>
     `<span class="pr-role pr-role-${r}">${r === "author" ? "Authoring" : "Reviewing"}</span>`).join("");
   const rows = list.map((pr) => {
@@ -4255,6 +4255,12 @@ ${NAV_WATCHER}
 
 // --- Module-level state ---
 let _conn, _pr, _prId, _branch, _changedFiles, _otherChangedFiles = [], _cache, _isOffline, _canEdit = false;
+// True when this portal was launched in browse mode (no PR on the command line).
+// A browse portal is anchored on the Discovery home: opening a PR from the queue
+// binds it (setting _prId) but must NOT make the home unreachable, so the home
+// routes gate on this flag, not on the absence of _prId. Without it, the first
+// /open is a one-way door — the tabbed home can never be returned to.
+let _browseMode = false;
 let _adoToken = null;
 
 // Swap the live ADO bearer token at runtime. Coforce is the token authority and
@@ -4295,6 +4301,7 @@ async function main() {
   const explicitFile = args.find((a) => a.startsWith("--file="))?.split("=").slice(1).join("=") || positional[1] || null;
 
   const browseMode = args.includes("--browse");
+  _browseMode = browseMode;
   if (!_prId && !browseMode) {
     console.log("Usage: tippani <PR_ID> [options]");
     console.log("");
@@ -4564,7 +4571,7 @@ async function main() {
   // queue (specs I'm authoring + reviewing), whose cards open a PR in-portal via
   // /open/:prId. Once a PR is bound it behaves as the PR file picker / redirect.
   app.get("/", async (_req, res) => {
-    if (!_prId) {
+    if (_browseMode) {
       try {
         const d = await doListPrs({ role: "queue" });
         const projects = _conn ? await listAdoProjects(_conn) : [ADO_PROJECT];
@@ -4663,7 +4670,7 @@ async function main() {
       // and the single-tab nav steering may pull other tabs here too, so it must
       // be the same clickable home as "/". Once a PR is bound, keep the classic
       // PR-list page (buildPrListPage) for backward compatibility.
-      if (!_prId) {
+      if (_browseMode) {
         const d = await doListPrs({ role: "queue" });
         const projects = _conn ? await listAdoProjects(_conn) : [ADO_PROJECT];
         return res.type("html").send(buildHomePage(d.prs || [], ADO_PROJECT, projects));
@@ -4688,7 +4695,7 @@ async function main() {
     const repoName = String(req.query.repoName || "").trim();
     const project = String(req.query.project || ADO_PROJECT).trim();
     const branch = String(req.query.branch || "main").trim().replace(/^refs\/heads\//, "") || "main";
-    if (!repoId || !specPath || !specPath.toLowerCase().endsWith(".md")) return res.redirect("/discovery?tab=specs");
+    if (!isValidRepoId(repoId) || !specPath || !specPath.toLowerCase().endsWith(".md")) return res.redirect("/discovery?tab=specs");
     if (_isOffline || !_conn) return res.status(503).send("Cannot open a spec while offline.");
     try {
       const raw = await getSpecContentAt(_conn, repoId, specPath, branch);
@@ -4721,7 +4728,7 @@ async function main() {
       const repoId = String(req.query.repo || "").trim();
       const specPath = String(req.query.path || "").trim();
       const branch = String(req.query.branch || "main").trim().replace(/^refs\/heads\//, "") || "main";
-      if (!repoId || !specPath) return res.json({ html: "" });
+      if (!isValidRepoId(repoId) || !specPath) return res.json({ html: "" });
       if (_isOffline || !_conn) return res.json({ html: '<div class="ro-empty">Review history is unavailable offline.</div>' });
       const history = await getFileReviewHistory(_conn, repoId, specPath, branch);
       res.json({ html: buildHistoryCardsHtml(history, specPath) });
@@ -4738,7 +4745,7 @@ async function main() {
     try {
       const repoId = String(req.query.repo || "").trim();
       const specPath = String(req.query.spec || "").trim();
-      if (!repoId || !specPath) return res.status(404).end();
+      if (!isValidRepoId(repoId) || !specPath) return res.status(404).end();
       const resolved = resolveImagePath(specPath, req.query.src);
       if (!resolved) return res.status(404).end();
       const type = imageContentType(resolved);
@@ -4751,7 +4758,7 @@ async function main() {
         console.error(`Spec image proxy: LFS pointer not resolved for ${resolved}`);
         return res.status(502).end();
       }
-      res.set("Content-Type", type).set("Cache-Control", "private, max-age=300").send(buf);
+      res.set("Content-Type", type).set(secureImageHeaders()).send(buf);
     } catch (e) {
       console.error("Spec image proxy error:", e.message);
       res.status(404).end();
@@ -4861,14 +4868,11 @@ async function main() {
         return res.status(502).end();
       }
       res.set("Content-Type", type)
-         // Defense-in-depth for an attacker-authored image blob — especially an
-         // SVG, which is script-capable if rendered as a TOP-LEVEL document (the
-         // <img> embed path is inert, but the /media URL is same-origin and
-         // navigable). Forbid MIME sniffing and neutralize any script via a
-         // sandboxed, deny-by-default CSP. Harmless for real images.
-         .set("X-Content-Type-Options", "nosniff")
-         .set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox")
-         .set("Cache-Control", "private, max-age=300")
+         // nosniff + sandboxed deny-by-default CSP: defense-in-depth against an
+         // attacker-authored blob (esp. a script-capable SVG served top-level).
+         // Shared with /spec/media via secureImageHeaders() — the single source
+         // of truth so a copy can't silently drop the hardening.
+         .set(secureImageHeaders())
          .send(buf);
     } catch (e) {
       console.error("Image proxy error:", e.message);
@@ -4934,6 +4938,10 @@ async function main() {
     // merged and de-duped. ADO PR criteria ANDs creator+reviewer, so the two
     // roles are two separate queries unioned via mergeRolePrs.
     if (query.role === "queue") {
+      // Without a resolved identity, "creator = me" silently drops its filter and
+      // listOrgPullRequests returns EVERY active PR in the org, all mis-tagged
+      // "authoring". Fail closed rather than leak the whole org into the queue.
+      if (!currentUserId) return { prs: [], role: "queue", project: ADO_PROJECT, error: "identity" };
       const status = query.status || "active";
       const authoredCrit = buildPrCriteria({ status, creator: "me" }, { currentUserId });
       const reviewingCrit = buildPrCriteria({ status, creator: "any", reviewer: currentUserId }, { currentUserId });
@@ -4963,7 +4971,8 @@ async function main() {
     try {
       queryResult = await witApi.queryByWiql({ query: wiql }, { project: proj });
     } catch (e) {
-      return { workItems: [], project: proj, error: friendlyAdoError(e, "Work-item search") };
+      console.error("Work-item search failed:", friendlyAdoError(e, "Work-item search"));
+      return { workItems: [], project: proj, error: "Work-item search failed. Check the server console." };
     }
     const ids = (queryResult.workItems || []).map((w) => w.id).filter((n) => Number.isFinite(n)).slice(0, 100);
     if (ids.length === 0) return { workItems: [], project: proj, count: 0 };
@@ -5002,7 +5011,8 @@ async function main() {
       const resp = await _conn.rest.create(url, body);
       result = resp && resp.result;
     } catch (e) {
-      return { specs: [], project: proj, error: friendlyAdoError(e, "Spec search") };
+      console.error("Spec search failed:", friendlyAdoError(e, "Spec search"));
+      return { specs: [], project: proj, error: "Spec search failed. Check the server console." };
     }
     const hits = (result && result.results) || [];
     const seen = new Set();
@@ -5077,15 +5087,16 @@ async function main() {
           branch,
           commits: (commits || []).map((c) => ({
             commitId: c.commitId || null,
-            author: c.author ? { name: c.author.name || null, email: c.author.email || null, date: c.author.date || null } : null,
-            committer: c.committer ? { name: c.committer.name || null, email: c.committer.email || null, date: c.committer.date || null } : null,
+            author: c.author ? { name: c.author.name || null, date: c.author.date || null } : null,
+            committer: c.committer ? { name: c.committer.name || null, date: c.committer.date || null } : null,
             comment: c.comment || null,
             changeCounts: c.changeCounts || null,
             url: c.remoteUrl || c.url || null,
           })),
         };
       } catch (e) {
-        return { repo: repoId, path: filePath, branch, error: friendlyAdoError(e, "Commit lookup") };
+        console.error(`Commit lookup failed for ${filePath}:`, friendlyAdoError(e, "Commit lookup"));
+        return { repo: repoId, path: filePath, branch, error: "Commit lookup failed. Check the server console." };
       }
     };
     // Bounded concurrency over the (≤25) files, preserving input order.

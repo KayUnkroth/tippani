@@ -41,6 +41,20 @@ export function summarizePr(pr) {
   };
 }
 
+// A pull request's status arrives in two shapes depending on the source: the
+// SDK PR-search returns the numeric GitPullRequestStatus enum (active=1,
+// abandoned=2, completed=3), while the org-wide REST endpoint returns it as a
+// STRING ("active"/"completed"/"abandoned"). Normalize both to a display label
+// so a consumer (e.g. the Discovery home cards) doesn't render a blank chip when
+// it's handed the form it didn't expect. Same string-vs-enum discrepancy that
+// bit getPullRequestQuery's status filter.
+export function prStatusLabel(s) {
+  if (s === 1 || s === "active") return "Active";
+  if (s === 3 || s === "completed") return "Completed";
+  if (s === 2 || s === "abandoned") return "Abandoned";
+  return "";
+}
+
 // Merge the two role-scoped result sets (specs I'm authoring + specs I'm
 // reviewing) into one list, de-duped by PR id (a PR I both authored and review
 // appears once) and tagged with the role(s) it matched. `authored` and

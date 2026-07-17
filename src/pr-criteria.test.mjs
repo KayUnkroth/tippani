@@ -1,5 +1,5 @@
 // Tests for the PR search-criteria builder + summarizer (item 6).
-import { buildPrCriteria, summarizePr, PR_STATUS, mergeRolePrs } from "./pr-criteria.js";
+import { buildPrCriteria, summarizePr, PR_STATUS, mergeRolePrs, prStatusLabel } from "./pr-criteria.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) { if (cond) pass++; else { fail++; console.error("  FAIL: " + name); } }
@@ -62,6 +62,14 @@ try {
   fail++;
   console.error("UNEXPECTED THROW:", e && e.stack);
 } finally {
+  // --- prStatusLabel (handles both numeric enum and REST string) ------------
+  check("status label enum active", prStatusLabel(1) === "Active");
+  check("status label enum abandoned", prStatusLabel(2) === "Abandoned");
+  check("status label enum completed", prStatusLabel(3) === "Completed");
+  check("status label string active", prStatusLabel("active") === "Active");
+  check("status label string completed", prStatusLabel("completed") === "Completed");
+  check("status label string abandoned", prStatusLabel("abandoned") === "Abandoned");
+  check("status label unknown -> empty", prStatusLabel(0) === "" && prStatusLabel("notSet") === "" && prStatusLabel(undefined) === "");
   console.log(`\npr-criteria.test: ${pass} passed, ${fail} failed`);
   process.exit(fail === 0 ? 0 : 1);
 }

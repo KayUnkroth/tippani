@@ -2,21 +2,35 @@
 // in isolation. The portal route + the search_work_items MCP tool run a WIQL
 // query against ADO and project each result into a compact row.
 
-// WIQL is a read-only query language (SELECT … FROM workitems); it has no
-// mutation syntax. Still, gate the proxy so only a SELECT runs — reject empty
-// input, non-strings, and anything that isn't a SELECT after leading `//`
-// comments / whitespace. Belt-and-suspenders against a malformed or hostile
-// query reaching ADO.
+// WIQL is inherently a read-only query language, and ADO's queryByWiql is the
+// authoritative read-only boundary — it has no mutation grammar and cannot write
+// work items regardless of what is passed. This gate is DEFENSE-IN-DEPTH, not the
+// security boundary: it rejects obvious non-queries early (empty input, non-
+// strings, anything that isn't a single SELECT after stripping leading `//` line
+// and `/* … */` block comments) and refuses trailing statements after a `;` so a
+// hostile or malformed payload doesn't reach ADO in the first place.
 export function isReadOnlyWiql(wiql) {
   if (typeof wiql !== "string") return false;
-  // Drop leading line comments (WIQL allows `// …`) and whitespace.
+  // Strip leading line (`// …`) and block (`/* … */`) comments and whitespace.
   let s = wiql.replace(/\r\n/g, "\n");
-  while (true) {
+  for (;;) {
     const t = s.replace(/^\s+/, "");
     if (t.startsWith("//")) { s = t.replace(/^\/\/[^\n]*\n?/, ""); continue; }
-    s = t; break;
+    if (t.startsWith("/*")) {
+      const end = t.indexOf("*/");
+      if (end === -1) return false; // unterminated block comment
+      s = t.slice(end + 2);
+      continue;
+    }
+    s = t;
+    break;
   }
-  return /^select\b/i.test(s);
+  if (!/^select\b/i.test(s)) return false;
+  // Single statement only: reject a `;` that has anything non-trivial after it,
+  // so a chained/injected trailing statement can't ride along.
+  const semi = s.indexOf(";");
+  if (semi !== -1 && s.slice(semi + 1).trim() !== "") return false;
+  return true;
 }
 
 // The fields hydrated for each result row.

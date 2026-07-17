@@ -57,5 +57,19 @@ eq("url null id -> null", buildWorkItemUrl("https://x", "P", null), null);
 ok("fields include id + title + type + state + assignedTo",
   ["System.Id", "System.Title", "System.WorkItemType", "System.State", "System.AssignedTo"].every(f => WORK_ITEM_FIELDS.includes(f)));
 
+// --- isReadOnlyWiql hardening (block comments + statement chaining) ----------
+ok("leading /* */ block comment stripped",
+  isReadOnlyWiql("/* header */ SELECT [System.Id] FROM workitems"));
+ok("mixed // and /* */ comments",
+  isReadOnlyWiql("// a\n/* b */\nSELECT [System.Id]"));
+ok("reject unterminated block comment",
+  !isReadOnlyWiql("/* never closes SELECT [System.Id]"));
+ok("reject block comment hiding non-select",
+  !isReadOnlyWiql("/* SELECT */ DELETE FROM workitems"));
+ok("allow trailing semicolon (nothing after)",
+  isReadOnlyWiql("SELECT [System.Id] FROM workitems ;"));
+ok("reject chained statement after ;",
+  !isReadOnlyWiql("SELECT [System.Id] FROM workitems; DROP TABLE x"));
+
 console.log(`work-item: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

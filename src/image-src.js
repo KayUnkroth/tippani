@@ -88,6 +88,30 @@ function normalizeRepoPath(p) {
   return s;
 }
 
+// Response headers that make an attacker-authored image blob safe to serve
+// same-origin. An SVG is script-capable when rendered as a TOP-LEVEL document
+// (the <img> embed path is inert, but the /media URL is same-origin and
+// navigable), so every proxy route that streams a repo blob must forbid MIME
+// sniffing (nosniff) and neutralize any script via a sandboxed, deny-by-default
+// CSP. Harmless for real images. Both /file/:index/media and /spec/media set
+// these via this single source of truth — a copy that drops them (as /spec/media
+// originally did) reintroduces a stored-XSS on the portal origin.
+export function secureImageHeaders() {
+  return {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+    "Cache-Control": "private, max-age=300",
+  };
+}
+
+// An ADO repository id is a GUID (8-4-4-4-12 hex). The /spec and /spec/media
+// routes take the repo id from a Code Search hit as a query param and pass it to
+// the ADO blob fetch; validate its shape so a caller can't point the proxy at an
+// arbitrary value and widen it into a general repo read/existence oracle.
+export function isValidRepoId(s) {
+  return /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(String(s == null ? "" : s));
+}
+
 // A Git-LFS pointer is a tiny text file, not an image. If ADO returns one (the
 // resolveLfs fetch failed to substitute the real object), the bytes start with
 // the LFS version line — detect that so the proxy can 502 instead of streaming
