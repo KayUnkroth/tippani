@@ -8,6 +8,8 @@ import {
   resolveImagePath,
   rehypeRewriteImageSrc,
   isLfsPointer,
+  secureImageHeaders,
+  isValidRepoId,
 } from "./image-src.js";
 import { renderSpecBody } from "./spec-source-map.js";
 import { defaultSchema } from "rehype-sanitize";
@@ -131,6 +133,21 @@ eq("resolve traversal to non-image → null",
   ok("nested linked img rewritten to proxy",
     lh.includes('src="/file/0/media?src=Images%2FPicture1.jpg"'));
   ok("outer link href untouched", lh.includes('href="https://youtu.be/abc"'));
+
+  // --- secureImageHeaders (H1: SVG-as-document XSS hardening) ---------------
+  const H = secureImageHeaders();
+  ok("secureImageHeaders sets nosniff", H["X-Content-Type-Options"] === "nosniff");
+  ok("secureImageHeaders CSP sandboxes", /(^|;)\s*sandbox\b/.test(H["Content-Security-Policy"]));
+  ok("secureImageHeaders CSP is deny-by-default", H["Content-Security-Policy"].includes("default-src 'none'"));
+  ok("secureImageHeaders keeps private cache", H["Cache-Control"] === "private, max-age=300");
+
+  // --- isValidRepoId (M1: repo GUID validation on /spec routes) ------------
+  ok("valid GUID accepted", isValidRepoId("00000000-1111-2222-3333-444455556666"));
+  ok("valid mixed-case GUID accepted", isValidRepoId("AbCdEf01-1234-5678-9abc-DEF012345678"));
+  ok("reject non-GUID string", !isValidRepoId("not-a-guid"));
+  ok("reject GUID with path traversal", !isValidRepoId("../../etc/passwd"));
+  ok("reject empty / null", !isValidRepoId("") && !isValidRepoId(null) && !isValidRepoId(undefined));
+  ok("reject over-long", !isValidRepoId("00000000-1111-2222-3333-444455556666-extra"));
 
   console.log(`image-src: ${pass} passed, ${fail} failed`);
   if (fail > 0) process.exit(1);
