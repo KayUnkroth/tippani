@@ -1,6 +1,7 @@
 # Portal lifecycle: reference-counted, work-context navigation, in-place token refresh
 
-Status: Draft (design spec)
+Status: Implemented (ref-counted lifetime, in-place token refresh, browser-tab
+refs, graceful release) — see §8 for what landed and what is deferred.
 
 ## 1. Problem
 
@@ -205,3 +206,45 @@ Every module keeps its `src/<name>.test.mjs` and the `npm test` chain green.
   — this spec only requires the portal to survive a recycle when a ref remains.
 - Changing what a work context *is* beyond "a navigable review target".
 - Multi-user / remote portals; everything stays localhost.
+
+## 8. Implementation status
+
+Landed (each behind unit tests kept in the `npm test` chain):
+
+- **Ref-count core** — `portal-refcount.js`: TTL-bearing refs keyed by
+  kind+id, edge-triggered empty signal, pure clock-injected.
+- **Lifetime controller** — `portal-lifetime.js`: shim / tab / pending refs,
+  add-before-release conversion, exit-at-0 guard, `syncBrowserTabs`.
+- **Portal wiring** — `index.js`: shim-spawned portals attach a launch shim
+  ref and RELEASE it on IPC disconnect instead of force-exiting; a periodic
+  tick reconciles tab refs to the live browser sessions and sweeps expired
+  pending/idle refs; bootstrap mints add a pending ref. A foreground
+  (non-shim) portal is unchanged.
+- **Browser-tab refs** — `local-client-auth.js` `liveBrowserSessionIds()` +
+  the tick reconcile: a viewing tab holds the portal open; a closed/idle tab
+  (past `browserIdleTtlMs`) releases it.
+- **Registry + reaper** — `portal-registry.js`: entries record `buildId`; the
+  reaper spares a live portal that still holds refs and reaps only a confirmed
+  **idle** (0-ref) orphan, never a stranger or an unconfirmable holder.
+- **Graceful `stop()`** — `portal-launcher.js`: the shim closes the IPC channel
+  to release its ref (the portal self-exits at 0 or stays up for a viewing
+  browser) and only hard-kills a child with no IPC channel to release through.
+- **Build identity** — `portal-build-id.js`: `version@installPath`.
+- **`--refreshToken`** — `portal-token-refresh.js` + `mcp.js`: a throwaway shim
+  hands a host-provided token to a **same-build** portal on the target port over
+  the authenticated `ado-token` route and exits; a build mismatch or foreign
+  port holder is refused; a free port falls through to a normal start.
+
+Deferred (call out before relying on them):
+
+- **One portal navigating across *different* PRs in place.** Reuse-and-navigate
+  works for the contexts the portal can already switch (browse / branch / file)
+  and one MCP server keeps one portal for them. Serving two *different* PRs from
+  a single portal needs the portal to rebind its ADO connection, cache, and
+  threads to a new PR at runtime — a separate capability, not a lifetime change.
+  Until then, a genuinely new PR still launches its own portal on the next port.
+- **Attaching a shim ref on *adoption* + re-stamping `shimPid`.** The ref-aware
+  reaper already spares an adopted portal whose original shim died (its browser
+  refs keep it), so this is a refinement, not a correctness gap. It is deferred
+  because an HTTP-adopting shim would need matching release-on-stop plumbing to
+  avoid leaking a ref that never releases.
