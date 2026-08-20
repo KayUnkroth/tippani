@@ -32,6 +32,37 @@ import { cliFallbackEnabled, acquireAdoTokenFromCli } from "./ado-token-cli.js";
 import { selectGitHubToken } from "./github-target.js";
 import { execSync } from "node:child_process";
 import { maybeRefreshToken } from "./token-refresh.js";
+import { parseRefreshArgs, runTokenRefresh } from "./portal-token-refresh.js";
+import { portalBuildId } from "./portal-build-id.js";
+
+// `--refreshToken`: a throwaway invocation that hands the host-provided token to
+// a SAME-BUILD portal already running on the target port and exits in place —
+// no shim restart, no new port, no lost browser session. A build mismatch or a
+// foreign port holder is refused; a free port falls through to a normal cold
+// start with the token as the initial value. Runs before any CLI token
+// acquisition or portal work so a refresh never spawns a second portal.
+{
+  const refresh = parseRefreshArgs(process.argv.slice(2), process.env);
+  if (refresh.isRefresh) {
+    const outcome = await runTokenRefresh({
+      port: refresh.port,
+      token: refresh.token,
+      myBuildId: portalBuildId(),
+    });
+    if (outcome.action === "handoff") {
+      (outcome.ok ? console.log : console.error)(outcome.message);
+      process.exit(outcome.ok ? 0 : 1);
+    }
+    if (outcome.action === "refuse") {
+      console.error(outcome.message);
+      process.exit(1);
+    }
+    // action === "free": no portal to refresh — continue to a normal cold start
+    // and become the portal with the provided token.
+    console.error(outcome.message);
+    if (refresh.token) process.env.TIPPANI_ADO_TOKEN = refresh.token;
+  }
+}
 
 // Give MCP "Test connection" real meaning: validate the bound account's ADO
 // token before serving. If it isn't an Azure DevOps git/REST token (wrong
