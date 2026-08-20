@@ -97,6 +97,8 @@ let portalExits = 0;
 const lifetime = createPortalLifetime({ exit: () => portalExits++ });
 lifetime.start();
 lifetime.attachShim("launch-shim"); // simulate the launch shim's ref
+let lastRestampShim = null;
+let lastNavigateArgs = null;
 const app = express();
 app.use(express.json());
 // Clickstop 2: Custom-list fake store shared by the injected deps below.
@@ -127,6 +129,13 @@ registerControlApi(app, {
   setAdoToken: (t) => { lastAdoToken = t; return t !== "reject-me"; },
   lifetime,
   buildId: "test-build",
+  restampShim: (shimPid) => { lastRestampShim = shimPid; },
+  mcpOpenPr: async (args) => {
+    lastNavigateArgs = args;
+    if (!args.prId) return { ok: false, error: "invalid prId", code: 400 };
+    if (args.provider === "github" && !args.owner) return { ok: false, error: "provider-mismatch", code: 409 };
+    return { ok: true, prId: Number(args.prId), opened: `/open/${args.prId}` };
+  },
   focus, drafts, locks,
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
@@ -450,6 +459,7 @@ try {
   {
     const r = await call("/api/v1/portal/attach", { method: "POST", headers: authHeaders, body: { shimPid: 4242 } });
     check("portal attach: an adopting shim adds a ref", r.status === 200 && r.body.ok === true && r.body.count === 2);
+    check("portal attach: re-stamps the registry shimPid to the adopting shim", lastRestampShim === "4242");
   }
   {
     const r = await call("/api/v1/portal/attach", { method: "POST", headers: authHeaders, body: {} });
@@ -474,6 +484,29 @@ try {
     const r = await call("/api/v1/auth/browser-bootstrap", { method: "POST", headers: authHeaders, body: { returnTo: "/" } });
     const after = (await call("/api/v1/portal/state", { method: "GET", headers: authHeaders })).body.count;
     check("bootstrap mint: adds a pending-browser ref", r.status === 200 && r.body.ok === true && after === before + 1);
+  }
+
+  // --- POST /api/v1/pr/navigate (reuse-and-navigate) ---
+  {
+    const r = await call("/api/v1/pr/navigate", { method: "POST", headers: authHeaders, body: { prId: 222, provider: "ado" } });
+    check("pr navigate: rebinds the portal to the requested PR", r.status === 200 && r.body.ok === true && r.body.prId === 222 && r.body.opened === "/open/222");
+    check("pr navigate: forwards the request args", lastNavigateArgs.prId === 222 && lastNavigateArgs.provider === "ado");
+  }
+  {
+    const r = await call("/api/v1/pr/navigate", { method: "POST", headers: authHeaders, body: { prId: 0 } });
+    check("pr navigate: invalid prId -> 400", r.status === 400 && r.body.ok === false);
+  }
+  {
+    const r = await call("/api/v1/pr/navigate", { method: "POST", headers: authHeaders, body: { prId: 5, provider: "github" } });
+    check("pr navigate: provider mismatch -> 409 (shim falls back to launch)", r.status === 409 && r.body.ok === false);
+  }
+  {
+    const r = await fetch(BASE + "/api/v1/pr/navigate", {
+      method: "POST",
+      headers: { "X-Tippani-Client": "test", "Content-Type": "application/json" },
+      body: JSON.stringify({ prId: 1 }),
+    });
+    check("pr navigate: requires auth -> 401", r.status === 401);
   }
 
   // --- PUT /api/v1/threads/:id/draft ---

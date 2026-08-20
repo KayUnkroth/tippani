@@ -35,7 +35,7 @@ import { classifyLocalMedia } from "./local-media.js";
 import { isReadOnlyWiql, summarizeWorkItem, buildWorkItemUrl, WORK_ITEM_FIELDS } from "./work-item.js";
 import { isTableBlock, computeTableDiff } from "./table-diff.js";
 import { updateViewed } from "./viewed-map.js";
-import { writeInstance, removeInstance } from "./portal-registry.js";
+import { writeInstance, removeInstance, restampShimPid } from "./portal-registry.js";
 import { reattachFrontmatter } from "./frontmatter.js";
 import { sortThreadsByLine } from "./thread-order.js";
 import { identityFromAdoToken, isExpiredJwt } from "./ado-token-check.js";
@@ -7660,38 +7660,61 @@ async function main() {
   // to its spec view — the review-queue cards point here so a PR opens INSIDE
   // Tippani instead of bouncing to ADO. Re-binding a different PR just swaps the
   // loaded PR.
-  app.get("/open/:prId", async (req, res) => {
-    const prId = parseInt(req.params.prId, 10);
-    if (!Number.isFinite(prId) || prId <= 0) return res.redirect("/");
-    if (_isOffline || !_conn) return res.status(503).send("Cannot open a PR while offline.");
-    try {
-      if (_hostKind === "github") {
-        const target = normalizeGitHubCoordinates({
-          owner: req.query.owner || _githubOwner,
-          repo: req.query.repo || _githubRepo,
-        });
-        if (!target.owner || !target.repo) {
-          return res.status(400).send("GitHub owner and repository are required.");
-        }
-        if (target.owner !== _githubOwner || target.repo !== _githubRepo) {
-          _githubOwner = target.owner;
-          _githubRepo = target.repo;
-          ADO_PROJECT = target.owner;
-          ADO_REPO = `${target.owner}/${target.repo}`;
-          initGitHubProviders(githubToken, target);
-        }
+
+  // Rebind the running portal to a different PR in place — same connection, same
+  // port. Shared by GET /open/:prId (browser), the pr/navigate control route,
+  // and the open_pr MCP navigate path so a second PR reuses this portal instead
+  // of forking a new one. Returns the picker path to land on, or {ok:false} with
+  // an HTTP-ish code the callers map to their own responses.
+  async function openPrInPlace({ prId, provider = "ado", owner, repo } = {}) {
+    const id = parseInt(prId, 10);
+    if (!Number.isFinite(id) || id <= 0) return { ok: false, error: "invalid prId", code: 400 };
+    if (_isOffline || !_conn) return { ok: false, error: "offline", code: 503 };
+    if ((provider || "ado") !== _hostKind) return { ok: false, error: "provider-mismatch", code: 409 };
+    if (_hostKind === "github") {
+      const target = normalizeGitHubCoordinates({
+        owner: owner || _githubOwner,
+        repo: repo || _githubRepo,
+      });
+      if (!target.owner || !target.repo) {
+        return { ok: false, error: "GitHub owner and repository are required.", code: 400 };
       }
-      await bindPr(prId);
+      if (target.owner !== _githubOwner || target.repo !== _githubRepo) {
+        _githubOwner = target.owner;
+        _githubRepo = target.repo;
+        ADO_PROJECT = target.owner;
+        ADO_REPO = `${target.owner}/${target.repo}`;
+        initGitHubProviders(githubToken, target);
+      }
+    }
+    try {
+      await bindPr(id);
       _browseMode = false;
       _canEdit = await computeCanEdit(_conn, _pr, _isOffline);
-      // Always land on the PR overview (feedback card + changed md files), never
-      // straight into a file — even for single-file PRs (which `/` would bounce
-      // to /file/0). The Review Queue tiles point here.
-      return res.type("html").send(buildPickerPage(_pr, _changedFiles, _cache?.threads || []));
     } catch (e) {
-      console.error(`/open/${prId} failed:`, e.message);
-      return res.status(502).send("Could not open PR #" + prId + ". Check the server console.");
+      return { ok: false, error: e.message, code: 502 };
     }
+    const q = _hostKind === "github"
+      ? `?owner=${encodeURIComponent(_githubOwner)}&repo=${encodeURIComponent(_githubRepo)}`
+      : "";
+    return { ok: true, path: `/open/${id}${q}` };
+  }
+
+  app.get("/open/:prId", async (req, res) => {
+    const r = await openPrInPlace({
+      prId: req.params.prId,
+      provider: _hostKind,
+      owner: req.query.owner,
+      repo: req.query.repo,
+    });
+    if (!r.ok) {
+      if (r.error === "invalid prId") return res.redirect("/");
+      if (r.code === 503) return res.status(503).send("Cannot open a PR while offline.");
+      if (r.code === 400) return res.status(400).send(r.error);
+      console.error(`/open/${req.params.prId} failed:`, r.error);
+      return res.status(502).send("Could not open PR #" + req.params.prId + ". Check the server console.");
+    }
+    return res.type("html").send(buildPickerPage(_pr, _changedFiles, _cache?.threads || []));
   });
 
   // Cross-PR feedback triage page (all threads across the PR, no file drill-in).
@@ -8889,6 +8912,16 @@ async function main() {
     return { ok: true, opened: p, realpath: real, repo: ctx.repo, branch: ctx.branch, path: ctx.path };
   }
 
+  // Navigate THIS portal to a PR in place (no new port): rebind the PR and steer
+  // an open browser tab to it. The shim's open_pr reuses its own portal through
+  // here instead of forking a second one.
+  async function mcpOpenPr({ prId, provider = "ado", owner, repo } = {}) {
+    const r = await openPrInPlace({ prId, provider, owner, repo });
+    if (!r.ok) return r;
+    _focus.setNav(r.path);
+    return { ok: true, prId: parseInt(prId, 10), opened: r.path };
+  }
+
   // Discovery branch page: list the markdown files that are UNIQUE to a branch —
   // i.e. the files it changed relative to where it forked from the repo's default
   // branch (not every file in the tree). Diffs default..branch at the common
@@ -9584,6 +9617,7 @@ if ($path) { [Console]::Out.Write($path) }
     setAdoToken: applyAdoToken,
     lifetime: portalLifetime,
     buildId: portalBuildIdValue,
+    restampShim: (shimPid) => restampShimPid(PORT, shimPid),
     focus: _focus,
     drafts: _drafts,
     locks: _locks,
@@ -9715,6 +9749,7 @@ if ($path) { [Console]::Out.Write($path) }
     mcpOpenBranch,
     mcpOpenBranchFile,
     mcpOpenFile,
+    mcpOpenPr,
   });
 
   const server = app.listen(PORT, "127.0.0.1", () => {

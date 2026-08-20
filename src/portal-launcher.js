@@ -99,6 +99,10 @@ export function createPortalSession({
   // A single `child` var lost the handle to earlier portals across a multi-PR
   // session (open PR A then B), leaking A's process and its held port.
   const ownedChildren = new Map(); // port -> child process
+  // Portals another process launched that WE adopted. We hold a shim ref on each
+  // (attached over the control API) so they stay up while we use them; stop()
+  // releases those refs. port -> { url, token, clientName }.
+  const adoptedPortals = new Map();
 
   // A bearer only works with the exact client name it was minted for, and a
   // portal started by another process (CLI, another shim) binds its bearer to
@@ -117,6 +121,58 @@ export function createPortalSession({
     } catch {
       return false;
     }
+  }
+
+  // Authenticated POST to a portal's control API, presenting the portal's own
+  // bearer + client name. Used for reuse-and-navigate and adopt/release.
+  async function postControl(portal, apiPath, body) {
+    const res = await fetchImpl((portal.url || `http://localhost:${portal.port}`) + apiPath, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${portal.token}`,
+        "X-Tippani-Client": portal.clientName || clientName,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body || {}),
+    });
+    let parsed = null;
+    try { parsed = await res.json(); } catch {}
+    return { ok: res.ok, status: res.status, body: parsed };
+  }
+
+  // Steer our own portal to a PR in place (reuse-and-navigate). Returns the
+  // landing path on success; a refusal (e.g. cross-provider) leaves ok false so
+  // the caller falls back to adopt/launch.
+  async function navigateActivePortal(target) {
+    if (!active?.url || !active?.token) return { ok: false };
+    try {
+      const res = await postControl(active, "/api/v1/pr/navigate", {
+        prId: target.prId,
+        provider: target.provider,
+        owner: target.owner,
+        repo: target.repo,
+      });
+      return { ok: !!(res.ok && res.body?.ok), path: res.body?.opened };
+    } catch {
+      return { ok: false };
+    }
+  }
+
+  // Adopt a portal another process (or a recycled predecessor shim) launched:
+  // bind to it and attach OUR shim ref so it stays up while we use it, tracked
+  // for release on stop(). The portal re-stamps its registry shimPid to us so
+  // the reaper sees a live owner. Best-effort — the ref-aware reaper already
+  // spares a portal that still holds refs.
+  async function adoptPortal(found) {
+    active = found;
+    adoptedPortals.set(Number(found.port), {
+      port: Number(found.port),
+      url: found.url,
+      token: found.token,
+      clientName: found.clientName || clientName,
+    });
+    try { await postControl(found, "/api/v1/portal/attach", { shimPid: process.pid }); }
+    catch { /* best-effort */ }
   }
 
   function refreshActiveAppSession() {
@@ -229,29 +285,45 @@ export function createPortalSession({
     //    grace period, so a stale cache would misread a healthy portal as dead
     //    and spawn a duplicate.
     refreshActiveAppSession();
-    if (active && sameTarget(active, target) &&
-        (await healthyAt(active.url, active.token, active.clientName || clientName))) {
-      result = { reused: true, prId: id, url: active.url };
-    } else {
-      // 2. Adopt another process's live portal already open for this PR — don't
-      //    spawn a duplicate or collide on its port.
-      const found = await findLivePortalForPr(target);
-      if (found) {
-        active = found;
-        result = { reused: true, adopted: true, prId: id, url: found.url };
-      } else {
-        // 3. Launch a new portal on a free port, leaving other PRs' portals alone.
-        active = await launchNew({
-          prId: id,
-          org,
-          project,
-          repo: provider === "github" ? target.repo : repo,
-          refresh,
-          provider,
-          owner: target.owner,
-        });
-        result = { reused: false, prId: id, url: active.url };
+    const activeHealthy = active &&
+      (await healthyAt(active.url, active.token, active.clientName || clientName));
+    if (activeHealthy && sameTarget(active, target)) {
+      return exposePortal({ reused: true, prId: id, url: active.url }, { headless });
+    }
+    // 2. Reuse-and-navigate: we already OWN a live portal — steer it to this PR
+    //    in place instead of forking a second port. One MCP server == one portal.
+    if (activeHealthy && active.owned) {
+      const nav = await navigateActivePortal(target);
+      if (nav.ok) {
+        active.prId = id;
+        active.provider = provider;
+        active.owner = target.owner;
+        active.repo = target.repo;
+        return exposePortal(
+          { reused: true, navigated: true, prId: id, url: active.url },
+          { headless, returnTo: nav.path || `/open/${id}` },
+        );
       }
+      // Navigation refused (e.g. cross-provider) → fall through to adopt/launch.
+    }
+    // 3. Adopt another process's (or a recycled predecessor's) live portal for
+    //    this PR, attaching our shim ref — don't spawn a duplicate.
+    const found = await findLivePortalForPr(target);
+    if (found) {
+      await adoptPortal(found);
+      result = { reused: true, adopted: true, prId: id, url: found.url };
+    } else {
+      // 4. Launch a new portal on a free port, leaving other PRs' portals alone.
+      active = await launchNew({
+        prId: id,
+        org,
+        project,
+        repo: provider === "github" ? target.repo : repo,
+        refresh,
+        provider,
+        owner: target.owner,
+      });
+      result = { reused: false, prId: id, url: active.url };
     }
 
     // Headless by default: tippani returns the URL and lets the client (LLM or
@@ -315,7 +387,7 @@ export function createPortalSession({
       if (!sameTarget(inst, target)) continue;
       const url = inst.url || `http://localhost:${inst.port}`;
       if (await healthyAt(url, inst.token, inst.clientName || clientName)) {
-        active = {
+        await adoptPortal({
           port: Number(inst.port),
           url,
           token: inst.token,
@@ -325,7 +397,7 @@ export function createPortalSession({
           owner: target.owner,
           repo: target.repo,
           owned: false,
-        };
+        });
         return exposePortal({ reused: true, adopted: true }, { headless });
       }
     }
@@ -506,6 +578,8 @@ export function createPortalSession({
     // with no IPC channel to release through (it can't self-clean).
     const entries = [...ownedChildren.entries()];
     ownedChildren.clear();
+    const adopted = [...adoptedPortals.values()];
+    adoptedPortals.clear();
     for (const [port, proc] of entries) {
       if (proc.connected) {
         try { proc.disconnect(); } catch {}
@@ -513,6 +587,12 @@ export function createPortalSession({
         try { removeInstanceFn(port); } catch {}
         try { proc.kill(); } catch {}
       }
+    }
+    // Release our adopted-shim refs so those portals can exit once nothing else
+    // holds them. Fire-and-forget — we're shutting down.
+    for (const portal of adopted) {
+      try { postControl(portal, "/api/v1/portal/release", { shimPid: process.pid }).catch(() => {}); }
+      catch { /* best-effort */ }
     }
   }
 

@@ -209,7 +209,7 @@ Every module keeps its `src/<name>.test.mjs` and the `npm test` chain green.
 
 ## 8. Implementation status
 
-Landed (each behind unit tests kept in the `npm test` chain):
+Fully implemented; each piece is behind unit tests kept in the `npm test` chain.
 
 - **Ref-count core** — `portal-refcount.js`: TTL-bearing refs keyed by
   kind+id, edge-triggered empty signal, pure clock-injected.
@@ -234,17 +234,19 @@ Landed (each behind unit tests kept in the `npm test` chain):
   hands a host-provided token to a **same-build** portal on the target port over
   the authenticated `ado-token` route and exits; a build mismatch or foreign
   port holder is refused; a free port falls through to a normal start.
+- **Reuse-and-navigate** — `openPrInPlace` / `mcpOpenPr` + `POST
+  /api/v1/pr/navigate` rebind the running portal to a different PR in place
+  (same connection, same port); the shim's `ensurePortal` steers its own live
+  portal to a second PR through this route instead of forking a second port
+  (`navigateActivePortal`). A genuinely new portal is created only for a
+  different provider (a different connection) or as a separate MCP server for
+  simultaneous side-by-side windows. `GET /open/:prId` shares the same rebind.
+- **Adoption attaches a shim ref + re-stamps `shimPid`** — on adopting another
+  process's (or a recycled predecessor's) live portal the shim POSTs
+  `/api/v1/portal/attach`; the portal re-stamps its registry `shimPid`
+  (`restampShimPid`) to the adopting shim so the reaper sees a live owner, and
+  `stop()` releases the adopted ref via `/api/v1/portal/release`.
 
-Deferred (call out before relying on them):
-
-- **One portal navigating across *different* PRs in place.** Reuse-and-navigate
-  works for the contexts the portal can already switch (browse / branch / file)
-  and one MCP server keeps one portal for them. Serving two *different* PRs from
-  a single portal needs the portal to rebind its ADO connection, cache, and
-  threads to a new PR at runtime — a separate capability, not a lifetime change.
-  Until then, a genuinely new PR still launches its own portal on the next port.
-- **Attaching a shim ref on *adoption* + re-stamping `shimPid`.** The ref-aware
-  reaper already spares an adopted portal whose original shim died (its browser
-  refs keep it), so this is a refinement, not a correctness gap. It is deferred
-  because an HTTP-adopting shim would need matching release-on-stop plumbing to
-  avoid leaking a ref that never releases.
+Provider note: a single portal owns one upstream connection, so navigating
+across *different* providers (ADO ↔ GitHub) launches a separate portal — same
+rule as "a second portal is a second MCP server" for simultaneous windows.

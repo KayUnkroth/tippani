@@ -70,6 +70,26 @@ export function removeInstance(port) {
   }
 }
 
+/**
+ * Re-stamp an existing entry's shimPid (adoption across a shim recycle). Reads
+ * the current entry, updates only shimPid, and writes it back atomically so the
+ * reaper sees a live owner instead of treating the portal as an orphan. No-op if
+ * the entry is missing. Best-effort: returns true on success, false otherwise.
+ */
+export function restampShimPid(port, shimPid) {
+  try {
+    const target = path.join(REG_DIR, `${Number(port)}.json`);
+    const entry = JSON.parse(fs.readFileSync(target, "utf8"));
+    entry.shimPid = shimPid == null ? null : Number(shimPid);
+    const temporary = `${target}.${process.pid}.restamp.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(entry), { mode: 0o600 });
+    fs.renameSync(temporary, target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** All registry entries (unvalidated — callers should health-check). */
 export function listInstances() {
   try {

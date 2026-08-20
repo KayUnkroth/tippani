@@ -13,6 +13,7 @@ export function registerControlApi(app, deps) {
     setAdoToken,        // (token) => bool — swap the live ADO bearer (host token push, optional)
     lifetime,           // portal lifetime controller — attach/release refs + state (optional)
     buildId,            // string — this portal's build identity, surfaced in /portal/state (optional)
+    restampShim,        // (shimPid) => void — re-stamp the registry shimPid on adopt (optional)
     focus,
     drafts,
     locks,
@@ -57,6 +58,7 @@ export function registerControlApi(app, deps) {
     mcpResolvePersonalComment, mcpReplyPersonalComment, mcpDeleteResolvedPersonalComments, mcpClearPersonalComments,
     mcpNavPersonalComment, mcpJumpPersonalComment, mcpSetPcResolvedVisibility, // MCP personal-comment ops
     mcpRefreshSpec, mcpOpenBranch, mcpOpenBranchFile, mcpOpenFile, // MCP: refresh + open review surface
+    mcpOpenPr, // MCP: navigate THIS portal to a PR in place (reuse-and-navigate)
     mcpCreateBranch, // MCP: create/adopt a branch for remote authoring (clickstop 2)
     stageBranch, listStagedBranches, pushStagedBranches, stageSpecPr, unstageBranch, unstageSpecPr, stagePrPublish, unstagePrPublish, stageFile, unstageFile, updateStagedFileContent, listBranchFolders, createStagedFolder, deleteStagedFolder, renameStagedFolder, renderMarkdown, saveExistingEdit, // clickstop 2: staged (pre-push) branches
   } = deps;
@@ -277,6 +279,9 @@ export function registerControlApi(app, deps) {
       const id = shimRefId(req);
       if (id == null) return res.status(400).json({ error: "shimPid (non-empty) required" });
       lifetime.attachShim(id);
+      // Re-stamp the registry shimPid to the adopting shim so the reaper sees a
+      // live owner rather than treating the portal as an orphan.
+      try { if (typeof restampShim === "function") restampShim(id); } catch { /* best-effort */ }
       res.json({ ok: true, ...lifetime.snapshot() });
     },
   );
@@ -296,6 +301,20 @@ export function registerControlApi(app, deps) {
   app.get("/api/v1/portal/state", requireAuth(), (_req, res) => {
     if (!lifetime) return res.status(501).json({ error: "portal lifetime not wired in this deployment" });
     res.json({ ok: true, buildId: buildId || null, ...lifetime.snapshot() });
+  });
+
+  // Navigate THIS portal to a PR in place (reuse-and-navigate): the shim steers
+  // its own portal to a second PR instead of forking a new port.
+  app.post("/api/v1/pr/navigate", requireAuth({ mutation: true }), async (req, res) => {
+    if (typeof mcpOpenPr !== "function") {
+      return res.status(501).json({ error: "pr navigate not wired in this deployment" });
+    }
+    try {
+      const r = await mcpOpenPr(req.body || {});
+      res.status(r.ok ? 200 : (r.code || 400)).json(r);
+    } catch (e) {
+      res.status(500).json({ error: String(e?.message || e) });
+    }
   });
 
   // ---- Remote (pre-PR) spec authoring (clickstop 2, step 11) ----

@@ -22,11 +22,46 @@ let busyPorts = new Set();
 let spawnCalls = [];
 let openedUrls = [];
 let bootstrapCalls = [];
+let navigateCalls = [];
+let attachCalls = [];
+let releaseCalls = [];
 
 const listInstancesFn = () => registry.map((r) => ({ ...r }));
 
 // healthy iff the base URL matches a live registry entry.
 const fetchImpl = async (url, options = {}) => {
+  const matchInstance = (suffix) => {
+    const base = url.slice(0, url.length - suffix.length);
+    const instance = registry.find((i) => (i.url || `http://localhost:${i.port}`) === base);
+    const token = (options.headers?.Authorization || "").replace(/^Bearer\s+/, "");
+    const clientName = options.headers?.["X-Tippani-Client"];
+    const ok = !!instance && token === instance.token &&
+      (!instance.clientName || instance.clientName === clientName);
+    return { base, instance, ok };
+  };
+
+  if (url.endsWith("/api/v1/pr/navigate")) {
+    const { base, instance, ok } = matchInstance("/api/v1/pr/navigate");
+    const body = JSON.parse(options.body || "{}");
+    navigateCalls.push({ base, prId: body.prId, provider: body.provider, ok });
+    if (!ok) return { ok: false, status: 401, json: async () => ({ ok: false, error: "invalid app session" }) };
+    // Mirror the portal rebinding to the new PR in place — same port, same entry.
+    instance.prId = Number(body.prId);
+    if (body.provider) instance.provider = body.provider;
+    if (body.owner != null) instance.owner = body.owner;
+    if (body.repo != null) instance.repo = body.repo;
+    return { ok: true, status: 200, json: async () => ({ ok: true, prId: Number(body.prId), opened: `/open/${body.prId}` }) };
+  }
+  if (url.endsWith("/api/v1/portal/attach")) {
+    const { base, ok } = matchInstance("/api/v1/portal/attach");
+    attachCalls.push({ base, shimPid: JSON.parse(options.body || "{}").shimPid, ok });
+    return { ok, status: ok ? 200 : 401, json: async () => (ok ? { ok: true, count: 2 } : { error: "invalid app session" }) };
+  }
+  if (url.endsWith("/api/v1/portal/release")) {
+    const { base, ok } = matchInstance("/api/v1/portal/release");
+    releaseCalls.push({ base, shimPid: JSON.parse(options.body || "{}").shimPid, ok });
+    return { ok, status: ok ? 200 : 401, json: async () => ({ ok: true }) };
+  }
   if (url.endsWith("/api/v1/auth/browser-bootstrap")) {
     const base = url.replace("/api/v1/auth/browser-bootstrap", "");
     const instance = registry.find((i) =>
@@ -130,6 +165,9 @@ function reset() {
   spawnCalls = [];
   openedUrls = [];
   bootstrapCalls = [];
+  navigateCalls = [];
+  attachCalls = [];
+  releaseCalls = [];
 }
 
 try {
@@ -473,34 +511,35 @@ try {
     s.stop();
   }
 
-  // --- multi-PR session: every launched portal is released on stop() ---
+  // --- reuse-and-navigate: a second PR reuses the owned portal, no new port ---
   {
     reset();
     const s = newSession();
     await s.ensurePortal({ prId: 111 }); // launches on 3847
-    await s.ensurePortal({ prId: 222 }); // launches on 3848 (A not adopted, different PR)
+    const spawnsAfterFirst = spawnCalls.length;
+    const r2 = await s.ensurePortal({ prId: 222 }); // navigates 3847 in place
+    check("navigate: no second port spawned for a second PR", spawnCalls.length === spawnsAfterFirst);
+    check("navigate: reused-and-navigated the owned portal", r2.reused === true && r2.navigated === true);
+    check("navigate: stayed on the same base port", s.getBaseUrl() === "http://localhost:3847");
+    check("navigate: control call targeted the owned portal with the new PR",
+      navigateCalls.some((c) => c.base === "http://localhost:3847" && Number(c.prId) === 222));
     const childA = spawnCalls.find((c) => c.args.includes("--port=3847")).child;
-    const childB = spawnCalls.find((c) => c.args.includes("--port=3848")).child;
-    check("multi-pr: launched two portals", !!childA && !!childB && childA !== childB);
-    check("multi-pr: neither released before stop", !childA.disconnected && !childB.disconnected);
     s.stop();
-    check("multi-pr: stop released BOTH owned portals (graceful IPC close)", childA.disconnected && childB.disconnected);
-    check("multi-pr: released, not hard-killed", !childA.killed && !childB.killed);
+    check("navigate: the single portal is released on stop", childA.disconnected && !childA.killed);
   }
 
-  // --- stop() gracefully releases connected portals and lets them self-clean;
+  // --- stop() gracefully releases a connected portal and lets it self-clean;
   //     the shim does NOT hard-kill or delete a registry entry it can release ---
   {
     reset();
     const removed = [];
     const s = newSession({ removeInstanceFn: (port) => removed.push(Number(port)) });
     await s.ensurePortal({ prId: 111 }); // launches on 3847
-    await s.ensurePortal({ prId: 222 }); // launches on 3848
-    check("stop-release: nothing removed before stop", removed.length === 0);
+    const child = spawnCalls.find((c) => c.args.includes("--port=3847")).child;
+    check("stop-release: not released before stop", !child.disconnected);
     s.stop();
-    check("stop-release: shim did not remove connected portals' entries (portal self-cleans)", removed.length === 0);
-    check("stop-release: both portals cleared their own registry entries on exit",
-      !registry.some((e) => e.port === 3847) && !registry.some((e) => e.port === 3848));
+    check("stop-release: shim did not remove a connected portal's entry (portal self-cleans)", removed.length === 0);
+    check("stop-release: the portal cleared its own registry entry on exit", !registry.some((e) => e.port === 3847));
   }
 
   // --- fallback: a child with no IPC channel is hard-killed and its entry
@@ -557,15 +596,18 @@ try {
     second.stop();
   }
 
-  // --- adopted portals are NOT killed on stop (they belong to others) ---
+  // --- adopted portals are released (not killed) on stop; adoption attaches a
+  //     shim ref so the portal survives while we use it ---
   {
     reset();
     registry.push({ port: 3849, prId: 555, token: "other", url: "http://localhost:3849" });
     const s = newSession();
     await s.ensurePortal({ prId: 555 }); // adopts, no spawn
     check("adopt-stop: no spawn on adopt", spawnCalls.length === 0);
-    s.stop(); // must not throw and must not touch the adopted portal's registry entry
+    check("adopt-stop: adoption attached our shim ref", attachCalls.some((c) => c.base === "http://localhost:3849" && c.ok));
+    s.stop(); // must not throw, must not kill/remove the adopted portal, must release our ref
     check("adopt-stop: adopted portal left in registry", registry.some((i) => i.port === 3849 && i.prId === 555));
+    check("adopt-stop: stop released our adopted-shim ref", releaseCalls.some((c) => c.base === "http://localhost:3849"));
   }
 
   // --- reuse the already-bound portal on a repeat open_pr ---

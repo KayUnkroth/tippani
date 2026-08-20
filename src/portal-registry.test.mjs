@@ -8,7 +8,7 @@ const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), "tippani-reg-"));
 process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 
-const { writeInstance, removeInstance, listInstances, registryDir, isPidAlive, reapInstances } =
+const { writeInstance, removeInstance, listInstances, registryDir, isPidAlive, reapInstances, restampShimPid } =
   await import("./portal-registry.js");
 
 let pass = 0, fail = 0;
@@ -69,6 +69,14 @@ try {
   writeInstance({ port: 3903, prId: 8, token: "t", pid: 2004 });
   check("buildId defaults to null", listInstances().find((i) => i.port === 3903).buildId === null);
   removeInstance(3902); removeInstance(3903);
+
+  // --- restampShimPid (adoption re-stamps the owner) ---
+  writeInstance({ port: 3904, prId: 9, token: "t", pid: 2005, shimPid: 111 });
+  check("restamp: updates shimPid, leaves other fields", restampShimPid(3904, 222) === true &&
+    (() => { const e = listInstances().find((i) => i.port === 3904); return e.shimPid === 222 && e.prId === 9 && e.token === "t"; })());
+  check("restamp: null clears shimPid", restampShimPid(3904, null) === true && listInstances().find((i) => i.port === 3904).shimPid === null);
+  check("restamp: missing entry -> false", restampShimPid(4090, 1) === false);
+  removeInstance(3904);
 
   // --- isPidAlive ---
   check("isPidAlive: self is alive", isPidAlive(process.pid) === true);
