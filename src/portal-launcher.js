@@ -498,16 +498,21 @@ export function createPortalSession({
 
   function stop() {
     // Tear down every portal WE launched (adopted portals belong to others).
-    // Snapshot + clear first so nothing perturbs iteration. On Windows proc.kill()
-    // is TerminateProcess (a hard kill), so the portal's own exit handler never
-    // runs to delete its registry entry — the shim removes it here itself, then
-    // disconnects (graceful ipc close) and kills the child as a fallback.
+    // Snapshot + clear first so nothing perturbs iteration. Teardown now moves
+    // INTO the portal: closing the IPC channel releases this shim's launch ref,
+    // and the portal exits at ref 0 (removing its own registry entry) — or stays
+    // up if a browser or pending ref remains, so a user still viewing it is not
+    // stranded. A hard kill + registry delete is only the fallback for a child
+    // with no IPC channel to release through (it can't self-clean).
     const entries = [...ownedChildren.entries()];
     ownedChildren.clear();
     for (const [port, proc] of entries) {
-      try { removeInstanceFn(port); } catch {}
-      try { if (proc.connected) proc.disconnect(); } catch {}
-      try { proc.kill(); } catch {}
+      if (proc.connected) {
+        try { proc.disconnect(); } catch {}
+      } else {
+        try { removeInstanceFn(port); } catch {}
+        try { proc.kill(); } catch {}
+      }
     }
   }
 

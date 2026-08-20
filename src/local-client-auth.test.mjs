@@ -238,6 +238,27 @@ try {
   check("browser session: idle expiry enforced", response.status === 401);
   check("audit: rejection events contain no token fields",
     auth.getAuditEvents().every((event) => !Object.hasOwn(event, "token")));
+
+  // --- liveBrowserSessionIds (portal tab-ref reconciliation source) ---
+  {
+    let c = 1000;
+    let seq = 0;
+    const a = createLocalClientAuth({
+      port: 3847,
+      now: () => c,
+      randomBytes: (n) => Buffer.alloc(n, ++seq),
+      browserIdleTtlMs: 2_000,
+      browserAbsoluteTtlMs: 100_000,
+      bootstrapTtlMs: 1_000,
+    });
+    check("live sessions: none initially", a.liveBrowserSessionIds().length === 0);
+    a.exchangeBrowserBootstrap(a.createBrowserBootstrap({ returnTo: "/" }).token);
+    check("live sessions: one after a browser connects", a.liveBrowserSessionIds().length === 1);
+    a.exchangeBrowserBootstrap(a.createBrowserBootstrap({ returnTo: "/" }).token);
+    check("live sessions: two after a second connect", a.liveBrowserSessionIds().length === 2);
+    c += 2_001; // idle past browserIdleTtlMs
+    check("live sessions: idle tabs are pruned from the live set", a.liveBrowserSessionIds().length === 0);
+  }
 } finally {
   await new Promise((resolve) => server.close(resolve));
 }

@@ -60,6 +60,18 @@ export function createPortalLifetime({
     browserSeen(sessionId, { ttlMs = browserIdleTtlMs } = {}) { return rc.add(REF.TAB, sessionId, { ttlMs }); },
     closeBrowser(sessionId) { return rc.release(REF.TAB, sessionId); },
 
+    // Reconcile the tab refs to the portal's live browser sessions. Live ids get
+    // an added/renewed tab ref; tab refs whose session is gone are released.
+    // Adds happen BEFORE releases so a session-id change never dips the count to
+    // 0 mid-sync; when the live set is empty (browser truly closed) releasing the
+    // last tab drops to 0 and exits, which is the intended outcome.
+    syncBrowserTabs(sessionIds, { ttlMs = browserIdleTtlMs } = {}) {
+      const live = new Set((sessionIds || []).map(String));
+      for (const id of live) rc.add(REF.TAB, id, { ttlMs });
+      for (const id of rc.keysOfKind(REF.TAB)) if (!live.has(id)) rc.release(REF.TAB, id);
+      return rc.size();
+    },
+
     // Periodic sweep so expired pending/idle refs are collected and the exit
     // fires even with no attach/release traffic.
     tick() { return rc.tick(); },

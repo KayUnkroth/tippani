@@ -182,6 +182,23 @@ export function createLocalClientAuth({
     return { token, key, record };
   }
 
+  // Ids (session digests) of browser tabs currently live — neither past their
+  // absolute TTL nor idle past browserIdleTtlMs — pruning expired ones as it
+  // goes. The portal reconciles its tab refs against this set so a viewing tab
+  // holds the portal open and a closed/idle tab releases it.
+  function liveBrowserSessionIds() {
+    const current = now();
+    const live = [];
+    for (const [key, record] of browserSessions) {
+      if (record.expiresAt <= current || record.lastSeenAt + browserIdleTtlMs <= current) {
+        browserSessions.delete(key);
+        continue;
+      }
+      live.push(key);
+    }
+    return live;
+  }
+
   function revokeBrowserSession(req) {
     const session = browserSessionFromRequest(req);
     if (!session) return false;
@@ -374,6 +391,7 @@ export function createLocalClientAuth({
     rotateBearerSession,
     revokeBearerSession,
     requireControlAuth,
+    liveBrowserSessionIds,
     mount,
     getAuditEvents: () => auditEvents.map((event) => ({ ...event })),
   };

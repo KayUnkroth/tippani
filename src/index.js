@@ -9788,7 +9788,14 @@ if ($path) { [Console]::Out.Write($path) }
       const launchShimId = process.env.TIPPANI_SHIM_PID || "launch";
       portalLifetime.attachShim(launchShimId);
       portalLifetime.start();
-      portalTickTimer = setInterval(() => portalLifetime.tick(), 15_000);
+      portalTickTimer = setInterval(() => {
+        // Reconcile tab refs to the live browser sessions FIRST (a viewing tab
+        // holds the portal open; a closed/idle tab releases it), THEN sweep so
+        // an expired pending ref can't drop the count before a just-connected
+        // tab is counted.
+        try { portalLifetime.syncBrowserTabs(localClientAuth.liveBrowserSessionIds()); } catch {}
+        portalLifetime.tick();
+      }, 15_000);
       portalTickTimer.unref?.();
       process.on("disconnect", () => portalLifetime.releaseShim(launchShimId));
     }

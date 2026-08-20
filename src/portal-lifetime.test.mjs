@@ -127,6 +127,33 @@ try {
     check("snapshot count and started", snap.count === 2 && snap.started === true && snap.exited === false);
     check("snapshot lists two holders", snap.holders.length === 2);
   }
+
+  // --- syncBrowserTabs reconciles tab refs to the live session set ---
+  {
+    clock = 10000;
+    const { lt, exitCount } = make();
+    lt.start();
+    lt.attachShim(1001);
+    lt.syncBrowserTabs(["s-a", "s-b"]);
+    check("sync: adds a ref per live tab", lt.count() === 3 && exitCount() === 0);
+    lt.syncBrowserTabs(["s-b", "s-c"]); // a closed, c opened
+    check("sync: releases gone tabs and adds new ones", lt.count() === 3);
+    lt.releaseShim(1001);
+    check("sync: two tabs keep the portal up after the shim leaves", lt.count() === 2 && exitCount() === 0);
+    lt.syncBrowserTabs([]); // all browsers closed
+    check("sync: empty live set releases all tabs and exits", lt.count() === 0 && exitCount() === 1);
+  }
+
+  // --- syncBrowserTabs add-before-release avoids a transient exit on id change ---
+  {
+    clock = 11000;
+    const { lt, exitCount } = make();
+    lt.start();
+    lt.syncBrowserTabs(["old"]);      // only holder is one tab
+    check("sync: single tab holds the portal", lt.count() === 1 && exitCount() === 0);
+    lt.syncBrowserTabs(["new"]);      // session id rotates; must not dip to 0
+    check("sync: id rotation does not trigger a premature exit", lt.count() === 1 && exitCount() === 0);
+  }
 } finally {
   console.log(`portal-lifetime: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);

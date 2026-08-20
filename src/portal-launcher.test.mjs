@@ -72,7 +72,20 @@ function fakeSpawn(bin, args, opts) {
   const provider = github ? "github" : "ado";
   const child = new EventEmitter();
   child.killed = false;
-  child.kill = () => { child.killed = true; child.emit("exit", 0); };
+  child.disconnected = false;
+  child.connected = true;
+  child._registered = false;
+  child.disconnect = () => { child.disconnected = true; child.connected = false; child.emit("exit", 0); };
+  child.kill = () => { child.killed = true; child.connected = false; child.emit("exit", 0); };
+  // The portal owns its registry entry: on process exit (graceful IPC release
+  // or a hard kill) it removes its own entry and frees its port, mirroring the
+  // real portal's process-exit cleanup. Only a portal that actually registered
+  // (won its port) cleans up — an EADDRINUSE loser must not touch the winner's.
+  child.on("exit", () => {
+    if (!child._registered) return;
+    registry = registry.filter((e) => Number(e.port) !== port);
+    busyPorts.delete(port);
+  });
   spawnCalls.push({ bin, args, opts, child });
   setTimeout(() => {
     if (busyPorts.has(port)) { child.emit("exit", 1); return; } // EADDRINUSE
@@ -87,6 +100,7 @@ function fakeSpawn(bin, args, opts) {
       url: `http://localhost:${port}`,
     });
     busyPorts.add(port); // a launched portal now holds its port (mirror reality)
+    child._registered = true;
   }, 15);
   return child;
 }
@@ -459,7 +473,7 @@ try {
     s.stop();
   }
 
-  // --- multi-PR session: every launched portal is torn down on stop() ---
+  // --- multi-PR session: every launched portal is released on stop() ---
   {
     reset();
     const s = newSession();
@@ -468,24 +482,39 @@ try {
     const childA = spawnCalls.find((c) => c.args.includes("--port=3847")).child;
     const childB = spawnCalls.find((c) => c.args.includes("--port=3848")).child;
     check("multi-pr: launched two portals", !!childA && !!childB && childA !== childB);
-    check("multi-pr: neither killed before stop", !childA.killed && !childB.killed);
+    check("multi-pr: neither released before stop", !childA.disconnected && !childB.disconnected);
     s.stop();
-    check("multi-pr: stop killed BOTH owned portals (no orphan)", childA.killed && childB.killed);
+    check("multi-pr: stop released BOTH owned portals (graceful IPC close)", childA.disconnected && childB.disconnected);
+    check("multi-pr: released, not hard-killed", !childA.killed && !childB.killed);
   }
 
-  // --- stop() removes each owned portal's registry entry itself (on Windows
-  //     proc.kill() is a hard TerminateProcess, so the portal's own exit handler
-  //     never runs to delete it — the shim must, or it leaks a zombie file) ---
+  // --- stop() gracefully releases connected portals and lets them self-clean;
+  //     the shim does NOT hard-kill or delete a registry entry it can release ---
   {
     reset();
     const removed = [];
     const s = newSession({ removeInstanceFn: (port) => removed.push(Number(port)) });
     await s.ensurePortal({ prId: 111 }); // launches on 3847
     await s.ensurePortal({ prId: 222 }); // launches on 3848
-    check("stop-cleanup: nothing removed before stop", removed.length === 0);
+    check("stop-release: nothing removed before stop", removed.length === 0);
     s.stop();
-    check("stop-cleanup: stop removed BOTH owned registry entries",
-      removed.includes(3847) && removed.includes(3848));
+    check("stop-release: shim did not remove connected portals' entries (portal self-cleans)", removed.length === 0);
+    check("stop-release: both portals cleared their own registry entries on exit",
+      !registry.some((e) => e.port === 3847) && !registry.some((e) => e.port === 3848));
+  }
+
+  // --- fallback: a child with no IPC channel is hard-killed and its entry
+  //     removed by the shim (it cannot self-clean) ---
+  {
+    reset();
+    const removed = [];
+    const s = newSession({ removeInstanceFn: (port) => removed.push(Number(port)) });
+    await s.ensurePortal({ prId: 111 }); // launches on 3847
+    const child = spawnCalls.find((c) => c.args.includes("--port=3847")).child;
+    child.connected = false; // simulate a portal with no live IPC channel
+    s.stop();
+    check("stop-fallback: no-IPC child is hard-killed", child.killed === true);
+    check("stop-fallback: shim removes the entry the portal can't self-clean", removed.includes(3847));
   }
 
   // --- host token rotation replaces the shim/portal, then reuses the same

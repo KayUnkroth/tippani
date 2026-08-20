@@ -93,5 +93,17 @@ export function createPortalRefCount({ now = () => Date.now() } = {}) {
       .map(([k]) => k);
   }
 
-  return { add, release, has, size, isEmpty, tick, onEmpty, keys, REF };
+  // Live ids currently held for one kind (e.g. all live "tab" refs). Used to
+  // reconcile a ref set against an external source of truth (live browser tabs).
+  function keysOfKind(kind) {
+    const prefix = `${kind}\u0000`;
+    const t = now();
+    const out = [];
+    for (const [k, expiresAt] of refs) {
+      if (k.startsWith(prefix) && (expiresAt == null || expiresAt > t)) out.push(k.slice(prefix.length));
+    }
+    return out;
+  }
+
+  return { add, release, has, size, isEmpty, tick, onEmpty, keys, keysOfKind, REF };
 }

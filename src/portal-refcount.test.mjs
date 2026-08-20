@@ -152,6 +152,19 @@ try {
     try { rc.add(REF.SHIM, ""); } catch { threw = true; }
     check("empty id throws", threw);
   }
+
+  // --- keysOfKind lists only live ids of one kind ---
+  {
+    const rc = createPortalRefCount({ now });
+    clock = 1000;
+    rc.add(REF.SHIM, "s1");
+    rc.add(REF.TAB, "t1");
+    rc.add(REF.TAB, "t2", { ttlMs: 100 }); // expires at 1100
+    check("keysOfKind: two live tabs before expiry", rc.keysOfKind(REF.TAB).sort().join(",") === "t1,t2");
+    check("keysOfKind: does not mix kinds", rc.keysOfKind(REF.SHIM).join(",") === "s1");
+    clock = 1200;
+    check("keysOfKind: drops the expired tab", rc.keysOfKind(REF.TAB).join(",") === "t1");
+  }
 } finally {
   console.log(`portal-refcount: ${pass} passed, ${fail} failed`);
   process.exit(fail ? 1 : 0);
