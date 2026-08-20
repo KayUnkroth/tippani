@@ -9747,6 +9747,7 @@ if ($path) { [Console]::Out.Write($path) }
         pid: process.pid,
         url: base,
         shimPid: Number(process.env.TIPPANI_SHIM_PID) || null,
+        buildId: portalBuildIdValue,
       });
       if (!registered) throw new Error("could not update the portal registry");
     };
