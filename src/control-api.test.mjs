@@ -11,6 +11,7 @@ import {
   createKeyedLockStore,
 } from "./api-state.js";
 import { registerControlApi } from "./control-api.js";
+import { createPortalLifetime } from "./portal-lifetime.js";
 import { BROWSER_SESSION_COOKIE, createLocalClientAuth } from "./local-client-auth.js";
 
 let pass = 0, fail = 0;
@@ -92,6 +93,10 @@ const openPr = async (args) => {
 };
 
 let lastAdoToken = null;
+let portalExits = 0;
+const lifetime = createPortalLifetime({ exit: () => portalExits++ });
+lifetime.start();
+lifetime.attachShim("launch-shim"); // simulate the launch shim's ref
 const app = express();
 app.use(express.json());
 // Clickstop 2: Custom-list fake store shared by the injected deps below.
@@ -120,6 +125,8 @@ const stageFile = ({ repo, branch, title, folder, path } = {}) => {
 registerControlApi(app, {
   clientAuth,
   setAdoToken: (t) => { lastAdoToken = t; return t !== "reject-me"; },
+  lifetime,
+  buildId: "test-build",
   focus, drafts, locks,
   getThreads: () => threads,
   getChangedFiles: () => changedFiles,
@@ -433,6 +440,40 @@ try {
     // exercising the previously-dead "token rejected" branch.
     const r = await call("/api/v1/ado-token", { method: "POST", headers: authHeaders, body: { token: "reject-me" } });
     check("ado-token: rejected token -> 400", r.status === 400);
+  }
+
+  // --- Portal lifetime (reference-counted attach/release/state) ---
+  {
+    const r = await call("/api/v1/portal/state", { method: "GET", headers: authHeaders });
+    check("portal state: reports build id and the launch-shim ref", r.status === 200 && r.body.buildId === "test-build" && r.body.count === 1 && r.body.started === true);
+  }
+  {
+    const r = await call("/api/v1/portal/attach", { method: "POST", headers: authHeaders, body: { shimPid: 4242 } });
+    check("portal attach: an adopting shim adds a ref", r.status === 200 && r.body.ok === true && r.body.count === 2);
+  }
+  {
+    const r = await call("/api/v1/portal/attach", { method: "POST", headers: authHeaders, body: {} });
+    check("portal attach: missing shimPid -> 400", r.status === 400);
+  }
+  {
+    const r = await call("/api/v1/portal/release", { method: "POST", headers: authHeaders, body: { shimPid: 4242 } });
+    check("portal release: drops the adopted ref, portal stays up on the launch shim", r.status === 200 && r.body.count === 1 && portalExits === 0);
+  }
+  {
+    const r = await fetch(BASE + "/api/v1/portal/attach", {
+      method: "POST",
+      headers: { "X-Tippani-Client": "test", "Content-Type": "application/json" },
+      body: JSON.stringify({ shimPid: 1 }),
+    });
+    check("portal attach: requires auth -> 401", r.status === 401);
+  }
+  {
+    // Minting a bootstrap adds a pending ref that holds the portal across the
+    // mint -> first-connect gap.
+    const before = (await call("/api/v1/portal/state", { method: "GET", headers: authHeaders })).body.count;
+    const r = await call("/api/v1/auth/browser-bootstrap", { method: "POST", headers: authHeaders, body: { returnTo: "/" } });
+    const after = (await call("/api/v1/portal/state", { method: "GET", headers: authHeaders })).body.count;
+    check("bootstrap mint: adds a pending-browser ref", r.status === 200 && r.body.ok === true && after === before + 1);
   }
 
   // --- PUT /api/v1/threads/:id/draft ---

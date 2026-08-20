@@ -11,6 +11,8 @@ export function registerControlApi(app, deps) {
   const {
     clientAuth,
     setAdoToken,        // (token) => bool — swap the live ADO bearer (host token push, optional)
+    lifetime,           // portal lifetime controller — attach/release refs + state (optional)
+    buildId,            // string — this portal's build identity, surfaced in /portal/state (optional)
     focus,
     drafts,
     locks,
@@ -223,6 +225,10 @@ export function registerControlApi(app, deps) {
       const result = clientAuth.createBrowserBootstrap({
         returnTo: req.body?.returnTo || "/",
       });
+      // Hold the portal across the mint -> first-connect gap: a shim recycle in
+      // that window must not drop the ref count to 0. The connect converts this
+      // to a tab ref; otherwise it lapses by TTL.
+      if (lifetime && result?.nonce) lifetime.mintPending(result.nonce);
       res.json({ ok: true, url: result.url, expiresAt: result.expiresAt });
     },
   );
@@ -251,6 +257,46 @@ export function registerControlApi(app, deps) {
       res.json({ ok: true });
     },
   );
+
+  // ---- Portal lifetime (reference-counted) --------------------------------
+  // A portal stays up while anything holds a ref and exits at 0. A recycled or
+  // adopting shim attaches/releases its own ref here (the launch shim uses the
+  // IPC-disconnect path); the state route backs the lifecycle view and the
+  // same-build check for an in-place token refresh.
+  const shimRefId = (req) => {
+    const raw = req.body?.shimPid ?? req.body?.holderId;
+    if (raw == null || raw === "") return null;
+    return String(raw);
+  };
+
+  app.post(
+    "/api/v1/portal/attach",
+    requireAuth({ mutation: true, capability: "portal:lifecycle", allowBrowser: false }),
+    (req, res) => {
+      if (!lifetime) return res.status(501).json({ error: "portal lifetime not wired in this deployment" });
+      const id = shimRefId(req);
+      if (id == null) return res.status(400).json({ error: "shimPid (non-empty) required" });
+      lifetime.attachShim(id);
+      res.json({ ok: true, ...lifetime.snapshot() });
+    },
+  );
+
+  app.post(
+    "/api/v1/portal/release",
+    requireAuth({ mutation: true, capability: "portal:lifecycle", allowBrowser: false }),
+    (req, res) => {
+      if (!lifetime) return res.status(501).json({ error: "portal lifetime not wired in this deployment" });
+      const id = shimRefId(req);
+      if (id == null) return res.status(400).json({ error: "shimPid (non-empty) required" });
+      lifetime.releaseShim(id);
+      res.json({ ok: true, ...lifetime.snapshot() });
+    },
+  );
+
+  app.get("/api/v1/portal/state", requireAuth(), (_req, res) => {
+    if (!lifetime) return res.status(501).json({ error: "portal lifetime not wired in this deployment" });
+    res.json({ ok: true, buildId: buildId || null, ...lifetime.snapshot() });
+  });
 
   // ---- Remote (pre-PR) spec authoring (clickstop 2, step 11) ----
   // A whole-file markdown draft is STAGED durably keyed by (project,repo,branch,

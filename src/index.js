@@ -49,6 +49,8 @@ import { buildReadingList, isPinnedManual, manualRoot } from "./reading-list.js"
 import { fileReviewContext } from "./comment-key.js";
 import { isAllowedHost } from "./host-guard.js";
 import { createLocalClientAuth } from "./local-client-auth.js";
+import { createPortalLifetime } from "./portal-lifetime.js";
+import { portalBuildId } from "./portal-build-id.js";
 import {
   createAppSessionRotation,
   ROTATION_INTERVAL_MS,
@@ -9566,9 +9568,22 @@ if ($path) { [Console]::Out.Write($path) }
   // bootstrapping the full ADO flow. Token is generated above; external
   // clients send `Authorization: Bearer <token>` + `X-Tippani-Client: <name>`
   // for mutations, just `X-Tippani-Client` for reads.
+  // Reference-counted portal lifetime. cleanup() is defined later in the
+  // server-listen callback and wired in via portalCleanup once it exists; the
+  // tick timer is stored so cleanup can clear it.
+  let portalCleanup = null;
+  let portalTickTimer = null;
+  const portalBuildIdValue = portalBuildId();
+  const portalLifetime = createPortalLifetime({
+    exit: () => { try { portalCleanup?.(); } finally { process.exit(0); } },
+    log: (message) => console.log(`  ${message}`),
+  });
+
   registerControlApi(app, {
     clientAuth: localClientAuth,
     setAdoToken: applyAdoToken,
+    lifetime: portalLifetime,
+    buildId: portalBuildIdValue,
     focus: _focus,
     drafts: _drafts,
     locks: _locks,
@@ -9747,6 +9762,7 @@ if ($path) { [Console]::Out.Write($path) }
     rotationTimer.unref?.();
     const cleanup = () => {
       clearInterval(rotationTimer);
+      if (portalTickTimer) clearInterval(portalTickTimer);
       rotation.revokeCurrent();
       try { fs.unlinkSync(tokenPath); } catch {}
       removeInstance(PORT);
@@ -9758,11 +9774,22 @@ if ($path) { [Console]::Out.Write($path) }
     process.on("exit", cleanup);
     process.on("SIGINT", () => { cleanup(); process.exit(0); });
     process.on("SIGTERM", () => { cleanup(); process.exit(0); });
-    // Spawned by the shim over an IPC pipe (stdio ipc). When the shim dies for
-    // ANY reason, the OS closes the pipe and this fires — so a portal never
-    // outlives the shim that owns it. No timer, no polling.
+    portalCleanup = cleanup;
+    // Reference-counted lifetime, shim-spawned only. The launch shim holds a
+    // ref and an IPC disconnect RELEASES it instead of force-exiting, so a
+    // browser or pending ref keeps the portal alive across a host shim recycle;
+    // the portal exits only at ref count 0 (the controller runs cleanup +
+    // process.exit). A periodic tick reaps expired pending/idle refs. Adopting
+    // and refreshing shims attach/release over the authenticated control API.
+    // A portal run directly in the foreground (no IPC channel) is not
+    // ref-count-governed — it stays up until the user stops it, as before.
     if (process.channel) {
-      process.on("disconnect", () => { cleanup(); process.exit(0); });
+      const launchShimId = process.env.TIPPANI_SHIM_PID || "launch";
+      portalLifetime.attachShim(launchShimId);
+      portalLifetime.start();
+      portalTickTimer = setInterval(() => portalLifetime.tick(), 15_000);
+      portalTickTimer.unref?.();
+      process.on("disconnect", () => portalLifetime.releaseShim(launchShimId));
     }
     try {
       persistAppSession(appBearer);
@@ -9775,6 +9802,7 @@ if ($path) { [Console]::Out.Write($path) }
     if (!headless) {
       const returnTo = openIndex !== null ? `/file/${openIndex}` : "/";
       const bootstrap = localClientAuth.createBrowserBootstrap({ returnTo });
+      portalLifetime.mintPending(bootstrap.nonce);
       Promise.resolve(open(bootstrap.url)).catch(() => { /* handled below */ });
       // The link handed to open() is single-use — consumed the moment the
       // browser follows it — and open() fails silently over SSH/WSL or when
@@ -9782,6 +9810,7 @@ if ($path) { [Console]::Out.Write($path) }
       // user always has a working way in from the terminal (the bare base
       // URL above is refused as unauthenticated).
       const printed = localClientAuth.createBrowserBootstrap({ returnTo });
+      portalLifetime.mintPending(printed.nonce);
       console.log("  If no browser window opened, sign in with this single-use link");
       console.log(`  (expires in 2 minutes): ${printed.url}\n`);
       console.log("  Any time later: run `tippani open` to sign a browser in to this portal.\n");

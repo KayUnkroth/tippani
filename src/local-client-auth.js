@@ -3,7 +3,7 @@ import crypto from "crypto";
 export const BROWSER_SESSION_COOKIE = "tippani_app_session";
 
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
-const DEFAULT_CAPABILITIES = ["read", "mutate", "browser:bootstrap", "provider:credential"];
+const DEFAULT_CAPABILITIES = ["read", "mutate", "browser:bootstrap", "provider:credential", "portal:lifecycle"];
 
 function tokenDigest(token) {
   return crypto.createHash("sha256").update(String(token || "")).digest("hex");
@@ -124,6 +124,10 @@ export function createLocalClientAuth({
     audit("bootstrap_created", { expiresAt });
     return {
       token,
+      // Stable, non-secret id for this bootstrap. The portal keys its
+      // pending-browser ref on this so a mint holds the portal across the
+      // mint -> first-connect gap; the connect handler releases the same nonce.
+      nonce: tokenDigest(token),
       expiresAt,
       url: `${baseUrl}/auth/bootstrap?token=${encodeURIComponent(token)}`,
     };

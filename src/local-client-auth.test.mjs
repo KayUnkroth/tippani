@@ -42,6 +42,7 @@ check("origin: normalization is explicit", normalizeRequestOrigin("http://LOCALH
 
 const firstBootstrap = auth.createBrowserBootstrap({ returnTo: "/file/1?view=current" });
 check("bootstrap: points at local exchange", firstBootstrap.url.startsWith("http://localhost:3847/auth/bootstrap?token="));
+check("bootstrap: exposes a stable non-secret nonce", typeof firstBootstrap.nonce === "string" && firstBootstrap.nonce.length > 0 && !firstBootstrap.url.includes(firstBootstrap.nonce));
 const exchanged = auth.exchangeBrowserBootstrap(firstBootstrap.token);
 check("bootstrap: preserves safe return path", exchanged.returnTo === "/file/1?view=current");
 check("bootstrap: one-time replay rejected", auth.exchangeBrowserBootstrap(firstBootstrap.token) === null);
