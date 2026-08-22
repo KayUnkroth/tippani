@@ -99,14 +99,14 @@ export function createLocalClientAuth({
     const maxAge = Math.max(0, Math.floor(maxAgeMs / 1000));
     res.setHeader(
       "Set-Cookie",
-      `${BROWSER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${maxAge}`,
+      `${BROWSER_SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}`,
     );
   }
 
   function clearBrowserCookie(res) {
     res.setHeader(
       "Set-Cookie",
-      `${BROWSER_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`,
+      `${BROWSER_SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`,
     );
   }
 

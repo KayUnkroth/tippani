@@ -118,7 +118,7 @@ try {
   const setCookie = response.headers.get("set-cookie") || "";
   const cookie = setCookie.split(";")[0];
   check("bootstrap route: redirects after exchange", response.status === 303 && response.headers.get("location") === "/");
-  check("bootstrap route: cookie is HttpOnly SameSite Strict", setCookie.includes("HttpOnly") && setCookie.includes("SameSite=Strict"));
+  check("bootstrap route: cookie is HttpOnly SameSite Lax", setCookie.includes("HttpOnly") && setCookie.includes("SameSite=Lax"));
   check("bootstrap route: uses named app-session cookie", cookie.startsWith(BROWSER_SESSION_COOKIE + "="));
 
   response = await request("/", { headers: { Cookie: cookie } });
@@ -220,8 +220,9 @@ try {
     method: "POST",
     headers: { Cookie: rotatedCookie, Origin: "http://localhost:3847" },
   });
+  const logoutCookie = response.headers.get("set-cookie") || "";
   check("browser session: logout clears the cookie",
-    response.status === 200 && (response.headers.get("set-cookie") || "").includes("Max-Age=0"));
+    response.status === 200 && logoutCookie.includes("SameSite=Lax") && logoutCookie.includes("Max-Age=0"));
   response = await request("/", { headers: { Cookie: rotatedCookie } });
   check("browser session: logout revokes server-side", response.status === 401);
 

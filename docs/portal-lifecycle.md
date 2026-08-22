@@ -223,6 +223,12 @@ Fully implemented; each piece is behind unit tests kept in the `npm test` chain.
 - **Browser-tab refs** — `local-client-auth.js` `liveBrowserSessionIds()` +
   the tick reconcile: a viewing tab holds the portal open; a closed/idle tab
   (past `browserIdleTtlMs`) releases it.
+- **Browser bootstrap cookie** — the one-time bootstrap exchange sets the
+  HttpOnly portal-session cookie with `SameSite=Lax`. The exchange ends in a
+  303 to the requested portal page, and Lax permits that cookie on the
+  top-level safe-method landing even when navigation began on another site;
+  Strict withheld it for that redirect chain. Cookie clearing uses the same
+  policy. Exact-origin checks still protect authenticated mutations.
 - **Registry + reaper** — `portal-registry.js`: entries record `buildId`; the
   reaper spares a live portal that still holds refs and reaps only a confirmed
   **idle** (0-ref) orphan, never a stranger or an unconfirmable holder.
