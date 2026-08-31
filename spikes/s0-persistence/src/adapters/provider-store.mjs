@@ -60,7 +60,10 @@ export class BackingPathStore {
     if (!sandbox.namespace) problems.push("per-run namespace missing");
     if (!sandbox.coordinates || typeof sandbox.coordinates !== "object") problems.push("sandbox coordinates missing");
     if (!sandbox.defaultBranchExcluded) problems.push("default/protected branch not excluded");
-    if (!sandbox.cleanup?.manifestId || !sandbox.cleanup?.expiresAt) problems.push("cleanup manifest/expiry missing");
+    if (!sandbox.cleanup?.manifestId ||
+        (!sandbox.cleanup?.expiresAt && !sandbox.cleanup?.retentionHours)) {
+      problems.push("cleanup manifest/expiry missing");
+    }
     if (problems.length) throw new ProviderPreflightError(problems);
   }
 

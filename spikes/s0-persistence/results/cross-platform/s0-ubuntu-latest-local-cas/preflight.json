@@ -1,22 +1,24 @@
 {
-  "configurationId": "CFG-REF-MEM",
-  "runId": "s0-reference-selftest",
-  "adapter": "reference-memory",
+  "configurationId": "CFG-LOCAL-CAS",
+  "runId": "s0-local-cas-ubuntu-latest-33450465982",
+  "adapter": "local-cas",
   "backingPath": "local",
   "syntheticDataOnly": true,
   "sandbox": {
     "approved": true,
-    "kind": "local-reference",
+    "kind": "local-temp",
     "identityLabel": "Synthetic Local Harness",
     "identityVerified": false,
-    "ownershipMarker": "tippani-s0:s0-reference-selftest",
+    "ownershipMarker": "tippani-s0:s0-local-cas-ubuntu-latest-33450465982",
     "namespace": null,
     "defaultBranchExcluded": false,
-    "corporateFallbackDisabled": true
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [],
+    "cleanup": null
   },
   "budgets": {
     "maxOperations": 100,
-    "maxDurationMs": 60000,
+    "maxDurationMs": 300000,
     "maxObjects": 10000,
     "maxBytes": 104857600
   }

@@ -5,17 +5,17 @@
 // These are recorded as `Blocked` (not `Incomplete`): the invariant is real and
 // required, the harness is ready, and only the live sandbox is missing.
 
-const ONEDRIVE = "an approved non-production OneDrive/SharePoint sandbox with \u22652 test identities";
+const ONEDRIVE = "an approved non-production OneDrive/SharePoint sandbox";
 const ADO = "an approved disposable Azure DevOps sandbox repository and least-privilege identity";
 const GITHUB = "an approved disposable GitHub sandbox repository and repository-scoped identity";
 const ANY_PROVIDER = "an approved live OneDrive/ADO/GitHub sandbox";
 
 export const BLOCKED_REASONS = Object.freeze({
-  "S0-COL-002": `Blocked \u2014 requires ${ANY_PROVIDER} with two test identities on one shared backing path.`,
-  "S0-COL-003": `Blocked \u2014 requires ${ANY_PROVIDER} exercised from two devices/generations with reconnect.`,
+  "S0-COL-002": `Blocked \u2014 requires ${ANY_PROVIDER} exercised by two client processes on one shared backing path.`,
+  "S0-COL-003": `Blocked \u2014 requires ${ANY_PROVIDER} exercised by two client processes reconnecting from different generations.`,
   "S0-COL-004": `Blocked \u2014 requires ${ANY_PROVIDER} with lost-response fault injection against a real commit.`,
   "S0-COL-005": `Blocked \u2014 requires ${ANY_PROVIDER} with offline write then authoritative CAS confirmation.`,
-  "S0-COL-006": `Blocked \u2014 requires ${ANY_PROVIDER} change-discovery feed observed by a second collaborator.`,
+  "S0-COL-006": `Blocked \u2014 requires ${ANY_PROVIDER} change discovery observed by a second client process.`,
   "S0-BCK-002": `Blocked \u2014 requires ${ONEDRIVE} for ETag/version precondition and version-restore tests.`,
   "S0-BCK-003": `Blocked \u2014 requires ${ADO} for object/ref precondition and auditable-commit tests.`,
   "S0-BCK-004": `Blocked \u2014 requires ${GITHUB} for object/ref precondition and auditable-commit tests.`,
@@ -37,7 +37,8 @@ export const PROVIDER_PREREQUISITES = Object.freeze([
   "Dedicated non-corporate sandbox identity (Visual Studio subscription), with corporate-account fallback impossible.",
   "Azure DevOps: sandbox org URL, project, disposable repo, per-run branch namespace, least-privilege token/identity.",
   "GitHub: sandbox account/org, disposable private repo, repository-scoped fine-grained token or App installation.",
-  "OneDrive/SharePoint: non-production location with \u22652 test identities, versioning, and delete permission.",
+  "OneDrive/SharePoint: non-production location with versioning and delete permission.",
+  "Collaboration gates use two independent client processes; both may authenticate with the same sandbox account.",
   "Budgets: operation/request/object/time/storage limits and a cleanup manifest with an expiry.",
   "Explicit approval of the generated preflight sheet before any live provider call.",
 ]);

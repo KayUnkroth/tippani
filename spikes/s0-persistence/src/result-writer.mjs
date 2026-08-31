@@ -1,42 +1,71 @@
 import fs from "node:fs";
 import path from "node:path";
+import { gateSummary } from "./eligibility.mjs";
 
 function fixed(value, digits = 3) {
   return typeof value === "number" ? value.toFixed(digits) : "";
 }
 
 function reportRecommendation(run) {
-  const results = run.results;
-  const failedAbsolute = results.some((result) =>
-    result.criterionType === "absolute" && result.status === "Fail");
-  if (failedAbsolute) return "Do not proceed";
-  const unresolved = results.some((result) =>
-    ["Blocked", "Incomplete"].includes(result.status));
-  const executed = new Set(results.map((result) => result.scenarioId));
-  const missingAbsolute = run.catalog
-    .filter((scenario) => scenario.criterionType === "absolute")
-    .some((scenario) => !executed.has(scenario.id));
-  if (unresolved || missingAbsolute) return "Incomplete";
-  return "Proceed to candidate-specific testing";
+  const gates = gateSummary(run);
+  if (gates.failed.length) return "Do not proceed";
+  if (gates.unresolved.length || gates.missing.length) return "Incomplete";
+  return "Proceed to architecture-mapping evaluation";
+}
+
+function outcomeFor(run, scenario) {
+  const applicable = new Set(run.applicableScenarioIds || []);
+  if (!applicable.has(scenario.id)) {
+    return {
+      status: "Not applicable",
+      reason: "Assigned to another engine/backing-path configuration by the applicability matrix.",
+    };
+  }
+  return run.results.find((result) => result.scenarioId === scenario.id) || {
+    status: "Not executed",
+    reason: "Applicable scenario has no result.",
+  };
+}
+
+function display(value) {
+  if (value === undefined || value === null || value === "") return "—";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value).replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
 function coverageSection(run) {
-  const executed = new Set(run.results.map((result) => result.scenarioId));
-  const notRun = run.catalog.filter((scenario) => !executed.has(scenario.id));
-  const absoluteNotRun = notRun.filter((scenario) => scenario.criterionType === "absolute");
+  const outcomes = run.catalog.map((scenario) => outcomeFor(run, scenario));
+  const counts = new Map();
+  for (const outcome of outcomes) {
+    counts.set(outcome.status, (counts.get(outcome.status) || 0) + 1);
+  }
+  const applicable = new Set(run.applicableScenarioIds || []);
+  const applicableAbsolute = run.catalog.filter((scenario) =>
+    scenario.criterionType === "absolute" && applicable.has(scenario.id));
+  const missingApplicable = applicableAbsolute.filter((scenario) =>
+    outcomeFor(run, scenario).status === "Not executed");
   const lines = [
     "## Coverage",
     "",
-    `Executed ${run.results.length} of ${run.catalog.length} catalog scenarios ` +
-    `(${absoluteNotRun.length} absolute gates not executed).`,
+    `Executed ${run.results.length} of ${run.catalog.length} catalog scenarios. ` +
+    `${applicable.size} apply to this configuration; ${missingApplicable.length} applicable absolute gates were not executed.`,
+    "",
+    "| Outcome class | Count | Meaning |",
+    "|---|---:|---|",
+    `| Pass | ${counts.get("Pass") || 0} | Executed and satisfied |`,
+    `| Fail | ${counts.get("Fail") || 0} | Executed and violated |`,
+    `| Blocked | ${counts.get("Blocked") || 0} | Applicable, but a prerequisite is unavailable |`,
+    `| Incomplete | ${counts.get("Incomplete") || 0} | Applicable implementation or evidence is incomplete |`,
+    `| N/A | ${counts.get("N/A") || 0} | Applicable family, contract-level exception approved by review |`,
+    `| Not applicable | ${counts.get("Not applicable") || 0} | Assigned to another configuration by design |`,
+    `| Not executed | ${counts.get("Not executed") || 0} | Applicable, but no result exists |`,
     "",
   ];
-  if (notRun.length) {
+  if (missingApplicable.length) {
     lines.push(
-      "Not executed in this configuration:",
+      "Applicable absolute gates not executed:",
       "",
-      ...notRun.map((scenario) =>
-        `- \`${scenario.id}\` (${scenario.criterionType}) — ${scenario.title}`),
+      ...missingApplicable.map((scenario) => `- \`${scenario.id}\` — ${scenario.title}`),
       "",
       "An unexecuted absolute gate is missing evidence, not a pass.",
       "",
@@ -45,7 +74,33 @@ function coverageSection(run) {
   return lines;
 }
 
+function criterionSummary(run, prefixes) {
+  const applicable = new Set(run.applicableScenarioIds || []);
+  const scenarios = run.catalog.filter((scenario) =>
+    applicable.has(scenario.id) && prefixes.some((prefix) => scenario.id.startsWith(prefix)));
+  if (!scenarios.length) return "Not applicable";
+  const statuses = scenarios.map((scenario) => outcomeFor(run, scenario).status);
+  if (statuses.includes("Fail")) return "Fail";
+  if (statuses.includes("Blocked")) return "Blocked";
+  if (statuses.includes("Incomplete") || statuses.includes("Not executed")) return "Incomplete";
+  return "Pass";
+}
+
+function ownerFor(scenarioId) {
+  if (scenarioId === "S0-BCK-006") return "Windows sync-client test owner";
+  if (/^S0-(COL|BCK|MIG|BKP|REC|PER)-/.test(scenarioId)) return "S0 provider test owner";
+  return "S0 implementation owner";
+}
+
+function measurementUnit(name) {
+  if (/bytes/i.test(name)) return "bytes";
+  if (/ratio/i.test(name)) return "ratio";
+  if (/count|samples|repetitions/i.test(name)) return "count";
+  return "ms";
+}
+
 export function renderOutcomeReport(run) {
+  const gates = gateSummary(run);
   const lines = [
     `# S0 Outcome: ${run.configuration.configurationId}`,
     "",
@@ -56,9 +111,41 @@ export function renderOutcomeReport(run) {
     `**Authoritative backing path:** ${run.configuration.backingPath}`,
     `**Dataset scale:** ${run.configuration.scale}`,
     `**Recommendation:** ${reportRecommendation(run)}`,
+    `**Applicable absolute gates:** ${gates.applicable.length}`,
+    `**Eligibility:** ${gates.eligible}`,
     "",
     ...coverageSection(run),
-    "## Preflight",
+    "## Configuration and environment",
+    "",
+    "| Dimension | Value |",
+    "|---|---|",
+    `| OS | ${display(run.environment?.os)} |`,
+    `| Architecture | ${display(run.environment?.architecture)} |`,
+    `| CPU | ${display(run.environment?.cpuModel)} |`,
+    `| Logical CPUs | ${display(run.environment?.logicalCpuCount)} |`,
+    `| Total memory | ${display(run.environment?.totalMemoryBytes)} bytes |`,
+    `| Runtime | Node ${display(run.environment?.nodeVersion)} |`,
+    `| Provider/API version | ${display(run.environment?.providerApiVersion)} |`,
+    `| Configured platform/filesystem | ${display(run.environment?.configuredPlatform)} |`,
+    `| Detected filesystem | ${display(run.environment?.filesystem)} |`,
+    `| Temporary store root | ${display(run.environment?.temporaryStoreRoot)} |`,
+    `| Network characteristics | ${display(run.environment?.networkCharacteristics)} |`,
+    `| Provider region | ${display(run.environment?.providerRegion)} |`,
+    `| Storage characteristics | ${display(run.environment?.storageCharacteristics)} |`,
+    `| Sync-client state | ${display(run.environment?.syncClientState)} |`,
+    `| Repository protections | ${display(run.environment?.repositoryProtections)} |`,
+    `| Dependency versions | ${display(run.environment?.dependencyVersions)} |`,
+    `| Workload mix | ${display(run.environment?.workloadMix)} |`,
+    `| Known limitations | ${display(run.environment?.knownLimitations)} |`,
+    `| Process topology | ${display(run.environment?.processTopology)} |`,
+    `| Dataset scale | ${display(run.configuration.scale)} |`,
+    `| Applicability profile | ${display(run.configuration.applicabilityProfile)} |`,
+    `| Store namespace | ${display(run.preflight.sandbox.namespace)} |`,
+    `| Authentication setup | ${display(run.preflight.sandbox.identityLabel)} |`,
+    `| Cleanup manifest | ${display(run.preflight.sandbox.cleanup?.manifestId)} |`,
+    `| Cleanup expiry | ${display(run.preflight.sandbox.cleanup?.expiresAt)} |`,
+    "",
+    "## Method and preflight",
     "",
     "| Check | Result |",
     "|---|---|",
@@ -67,24 +154,45 @@ export function renderOutcomeReport(run) {
     `| Ownership marker | \`${run.preflight.sandbox.ownershipMarker}\` |`,
     `| Operation budget | ${run.preflight.budgets.maxOperations} |`,
     `| Duration budget | ${run.preflight.budgets.maxDurationMs} ms |`,
+    `| Object budget | ${run.preflight.budgets.maxObjects} |`,
+    `| Storage/transfer budget | ${run.preflight.budgets.maxBytes} bytes |`,
+    `| Declared provider operations | ${display(run.preflight.sandbox.dryRunOperations)} |`,
+    "| Timer | `performance.now()` monotonic elapsed time |",
+    "| Performance statistics | Minimum, p50, p95, maximum, mean, sample variability |",
+    "| Raw evidence | [raw-results.json](raw-results.json) |",
+    "| Redacted preflight | [preflight.json](preflight.json) |",
     "",
     "## Scenario results",
     "",
-    "| Scenario ID | Type | Status | Duration (ms) | Evidence |",
-    "|---|---|---|---:|---|",
+    "| Scenario ID | Type | Applicability/result | Duration (ms) | Evidence / reason | Raw |",
+    "|---|---|---|---:|---|---|",
   ];
 
-  for (const result of run.results) {
+  for (const scenario of run.catalog) {
+    const result = outcomeFor(run, scenario);
     const evidence = Object.entries(result.evidence || {})
-      .map(([key, value]) => `${key}=${value}`)
+      .filter(([key]) => key !== "rawSamples")
+      .map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : value}`)
       .join("; ");
     lines.push(
-      `| \`${result.scenarioId}\` | ${result.criterionType} | ${result.status} | ` +
-      `${fixed(result.durationMs)} | ${evidence || result.reason || ""} |`,
+      `| \`${scenario.id}\` | ${scenario.criterionType} | ${result.status} | ` +
+      `${fixed(result.durationMs)} | ${display(evidence || result.reason)} | [JSON](raw-results.json) |`,
     );
   }
 
   lines.push(
+    "",
+    "## Correctness summary",
+    "",
+    "| Criterion | Outcome |",
+    "|---|---|",
+    `| Atomicity and concurrency | ${criterionSummary(run, ["S0-ATM-", "S0-CON-", "S0-JRN-"])} |`,
+    `| Collaboration | ${criterionSummary(run, ["S0-COL-"])} |`,
+    `| Crash and operational recovery | ${criterionSummary(run, ["S0-CRS-", "S0-REC-"])} |`,
+    `| Corruption and rehydration | ${criterionSummary(run, ["S0-COR-", "S0-HYD-"])} |`,
+    `| Migration and import | ${criterionSummary(run, ["S0-MIG-", "S0-IMP-"])} |`,
+    `| Backup and restore | ${criterionSummary(run, ["S0-BKP-"])} |`,
+    `| Safety and security | ${criterionSummary(run, ["S0-SEC-"])} |`,
     "",
     "## Measurements",
     "",
@@ -95,10 +203,33 @@ export function renderOutcomeReport(run) {
   for (const result of run.results) {
     for (const [metric, value] of Object.entries(result.measurements || {})) {
       measurementCount++;
-      lines.push(`| \`${result.scenarioId}\` | ${metric} | ${fixed(value)} | ms |`);
+      lines.push(`| \`${result.scenarioId}\` | ${metric} | ${fixed(value)} | ${measurementUnit(metric)} |`);
     }
   }
   if (measurementCount === 0) lines.push("| - | No measurements emitted | - | - |");
+
+  if (run.campaigns?.length) {
+    lines.push(
+      "",
+      "## Repeated live campaigns",
+      "",
+      "| Campaign | Report | Raw evidence |",
+      "|---|---|---|",
+      ...run.campaigns.map((campaign) =>
+        `| ${campaign.name} | [report](${campaign.report}) | [JSON](${campaign.raw}) |`),
+      "",
+      "### Between-campaign variability",
+      "",
+      "| Metric | Samples | Minimum | p50 | p95 | Maximum | Mean | Std. dev. |",
+      "|---|---:|---:|---:|---:|---:|---:|---:|",
+    );
+    for (const [metric, summary] of Object.entries(run.campaignVariability || {})) {
+      lines.push(
+        `| ${metric} | ${summary.count} | ${fixed(summary.min)} | ${fixed(summary.p50)} | ` +
+        `${fixed(summary.p95)} | ${fixed(summary.max)} | ${fixed(summary.mean)} | ${fixed(summary.stddev)} |`,
+      );
+    }
+  }
 
   const failures = run.results.filter((result) => result.status === "Fail");
   lines.push(
@@ -118,8 +249,37 @@ export function renderOutcomeReport(run) {
     "",
     "## Risks and required follow-up",
     "",
-    "- Reference-memory results validate the harness, not a production candidate.",
-    "- Candidate adapters must implement every applicable absolute scenario before ADR comparison.",
+    "| Gate | State | Owner | Evidence required |",
+    "|---|---|---|---|",
+  );
+  const followUp = [
+    ...gates.failed,
+    ...gates.unresolved,
+    ...gates.missing.map((scenario) => ({ ...scenario, scenarioId: scenario.id, status: "Not executed" })),
+  ];
+  if (!followUp.length) {
+    lines.push("| — | None | — | — |");
+  } else {
+    for (const item of followUp) {
+      const scenario = run.catalog.find((entry) => entry.id === item.scenarioId);
+      lines.push(
+        `| \`${item.scenarioId}\` | ${item.status} | ${ownerFor(item.scenarioId)} | ` +
+        `${display(item.reason || item.error?.message || scenario?.title)} |`,
+      );
+    }
+  }
+  lines.push(
+    "",
+    "## Configuration recommendation",
+    "",
+    gates.eligible === "Yes"
+      ? "This component may proceed into an architecture mapping. Relative evidence remains non-decisional until an entire mapping is eligible."
+      : "Do not treat this component as selected. Close every applicable failed, blocked, incomplete, or unexecuted absolute gate first.",
+    "",
+    "## Evidence",
+    "",
+    "- [Raw machine-readable results](raw-results.json)",
+    "- [Redacted preflight](preflight.json)",
     "",
     "## Sign-off",
     "",

@@ -1,6 +1,6 @@
 {
   "configurationId": "CFG-ONEDRIVE-LIVE",
-  "runId": "s0-onedrive-live-20260815233143",
+  "runId": "cfg-onedrive-live-aggregate",
   "adapter": "onedrive",
   "backingPath": "onedrive",
   "syntheticDataOnly": true,
@@ -9,10 +9,21 @@
     "kind": "provider-live",
     "identityLabel": "Live delegated identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "tippani-s0:s0-onedrive-live-20260815233143",
-    "namespace": "tippani-s0/s0-onedrive-live-20260815233143",
+    "ownershipMarker": "redacted-per-campaign",
+    "namespace": "redacted-per-campaign",
     "defaultBranchExcluded": true,
-    "corporateFallbackDisabled": true
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "ensure-folder",
+      "put-content",
+      "get-content",
+      "list-children",
+      "delete-folder"
+    ],
+    "cleanup": {
+      "manifestId": "see-campaign-preflights",
+      "expiresAt": "see-campaign-preflights"
+    }
   },
   "budgets": {
     "maxOperations": 100,

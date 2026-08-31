@@ -27,7 +27,7 @@ Under this architecture:
 - **Local** backing runs through the same backing-path facade as every provider — it is not a bypass or a special case. The facade delegates to a durable local engine (generation-CAS envelope or SQLite) and executes every operation as private authority; no sandbox is required.
 - **Provider** backing (OneDrive/ADO/GitHub) runs the same facade over a provider-native transport (OneDrive version/ETag, ADO object/ref, GitHub Contents blob-sha). It is preflight-gated: without an approved sandbox it makes **zero** network calls, dry-running by recording the exact operation manifest it would issue and refusing any live call with a typed, fail-closed error. With an approved synthetic-only sandbox it issues real provider CAS.
 
-S0's job is therefore twofold: prove the local backing path now on Windows/NTFS, and land the provider architecture behind the same contract. Both are done — the local candidates run through the facade, and all three provider transports are implemented and executed live: the nine single-identity provider gates pass on OneDrive, ADO, and GitHub against approved synthetic-only sandboxes. The provider-backed gates that still need a second identity or a performance pass — two-user collaboration (`COL-002/003/006`), synced-folder (`BCK-006`), and provider performance (`PER-004`) — remain `Blocked` with the precise prerequisite each waits on, rather than unowned.
+S0's job is therefore twofold: prove the local backing path on Windows/NTFS and evaluate the provider architecture behind the same contract. The local candidates run through the facade, and all three provider transports are implemented. Result claims must come from the current applicability-aware comparison, not stale or partial outcome files. The two-user collaboration gates (`COL-002/003/006`) use two independent client processes and may authenticate with the same sandbox account. Treating a second provider identity as a storage-layer prerequisite was a **wrong assumption**; the clients identify logical user 1 and user 2. Synced-folder behavior (`BCK-006`) and provider performance (`PER-004`) retain their separate prerequisites.
 
 ## Supported configuration matrix
 
@@ -83,6 +83,7 @@ This rule applies even when a sandbox account is private, disposable, or accessi
 
 #### Sandbox identity and authentication
 
+- Identity tokens for live provider runs will be supplied externally at runtime. They are never stored in the plan, configuration, workspace state, logs, or result artifacts.
 - A dedicated non-corporate sandbox identity funded or entitled through Kay's Visual Studio subscription.
 - Confirmation of the exact signed-in identity expected for each sandbox, using a non-secret account label or email only.
 - An explicit statement that Kay's Microsoft corporate account has no access to these sandboxes and must not be used as an authentication fallback.
@@ -119,7 +120,7 @@ Kay must provide:
 
 Kay must provide:
 
-- A non-production OneDrive or SharePoint document-library location accessible to at least two test identities when multi-user collaboration is exercised.
+- A non-production OneDrive or SharePoint document-library location accessible to the approved sandbox account. Multi-user collaboration is exercised by two independent client processes acting as logical user 1 and user 2; the storage layer does not require multiple provider accounts.
 - Confirmation that the location contains no production or personal content.
 - Permission to create, version, restore, and delete synthetic S0 files.
 - The approved quota, retention, sharing, and cleanup settings.

@@ -12,9 +12,9 @@ The harness provides:
 - A common Draft Workspace store contract with generation-CAS semantics.
 - Deterministic, synthetic-only workspace fixtures at small, medium, and stress scales.
 - Named fault injection for commit and restore boundaries.
-- Five adapters: a reference in-memory store (harness validation only), the two
-  local candidates `local-cas` and `local-sqlite`, and three provider transports
-  `onedrive`, `ado`, and `github`.
+- Five candidate engine/backing-path configurations plus a reference in-memory
+  adapter for harness validation: local `local-cas`, local `local-sqlite`, and
+  the `onedrive`, `ado`, and `github` provider transports.
 - The provider transports run two modes on one code path: a preflight-gated
   dry-run that makes zero network calls and records the intended operation
   manifest, and a live mode (env-supplied identity and coordinates) that issues
@@ -31,6 +31,60 @@ The harness provides:
   non-secret provider preflight sheet listing the dry-run operation manifest and
   the prerequisites required before any live provider run.
 
+## Testing methodology
+
+Every adapter configuration is evaluated against the same machine-readable
+scenario catalog and deterministic synthetic fixtures. Applicable absolute
+scenarios are eligibility gates: failed, blocked, incomplete, or unexecuted
+gates never count as passes. Relative measurements are used to compare
+candidates only after all applicable absolute gates pass.
+
+- **Applicability and mapping:** Eligibility is calculated separately for local
+  SQLite, the local generation-CAS envelope, the OneDrive envelope, the ADO
+  envelope, and the GitHub envelope. Results are then rolled up into candidate
+  architecture mappings. A gate owned by another configuration is `Not
+  applicable`; `N/A` is reserved for a reviewer-approved contract exception;
+  `Blocked`, `Incomplete`, and `Not executed` remain distinct states.
+- **Isolation and repeatability:** Each local scenario receives an isolated
+  temporary store root. Fixtures are generated deterministically at the
+  configured small, medium, or stress scale. Provider runs use a per-run
+  namespace and ownership-checked cleanup.
+- **Concurrency and recovery:** Contending writers run as separate OS child
+  processes, wait at a common barrier, and then race the same generation.
+  Named fault injection and hard process exits exercise commit, alias-update,
+  atomic-replace, and restore boundaries.
+- **Two-client collaboration:** Two client processes act as user 1 and user 2
+  while authenticating through the same provider account. `COL-002` races the
+  processes, `COL-003` reconnects a stale client after the other commits, and
+  `COL-006` measures when the second client discovers the committed generation.
+  The harness distinguishes the actors by client. Multiple accounts are not
+  needed; requiring two actual provider identities is a **wrong assumption**,
+  and the storage layer imposes no such requirement.
+- **Provider safety:** Dry runs record the exact provider operations and
+  concurrency preconditions while making zero network calls. Live runs use the
+  same adapter path only after preflight validates the configured sandbox,
+  identity, ownership marker, namespace, permissions, budgets, and cleanup
+  controls. Credentials must remain external to configuration and reports.
+- **Detection power:** Deliberately broken mutant stores must fail the scenario
+  that owns the violated invariant. Mutants are enabled only for the dedicated
+  detection-power suites and cannot produce reported candidate results.
+- **Performance method:** Cold-start, backup, restore, footprint, and write
+  amplification discard one warm-up run and retain five measured runs per
+  scale. Local operation latency uses three warm-ups and 40/20/8 measured
+  iterations at small/medium/stress scale. Provider latency uses three warm-ups
+  and 10/6/3 measured iterations. Reports include minimum, p50, p95, maximum,
+  mean, standard deviation, environment details, provider request/application-
+  payload byte counts, throttling behavior, collaborator-discovery latency, and
+  the same eight-dimension complexity/operability rubric for every candidate.
+- **Evidence and reporting:** Each scenario records its status, duration,
+  evidence, optional measurements, and raw samples. Reports expose missing
+  absolute-gate evidence rather than presenting unexecuted coverage as a pass.
+  The comparison links each summary cell to its configuration report and raw
+  JSON, lists exact open gates with owners and evidence requirements, rolls up
+  candidate mappings, and provides sign-off fields. Relative metrics remain
+  explicitly provisional and unranked until an architecture mapping is
+  eligible.
+
 ## Candidates
 
 | Adapter | Design |
@@ -43,57 +97,260 @@ The `onedrive`/`ado`/`github` transports are implemented behind the same
 version/ETag, ADO object/ref preconditions, GitHub Contents blob-sha) on a
 per-run branch/namespace that never touches a default or protected branch. They
 are transports, not local-store candidates: without an approved sandbox they
-still fail closed and only dry-run. The nine single-identity provider gates now
-pass live (see below). The two-user collaboration gates (`COL-002/003/006`), the
-synced-folder probe (`BCK-006`), and provider performance (`PER-004`) remain
-`Blocked`/deferred pending a second identity and a performance pass.
+still fail closed and only dry-run.
 
-## Provider live results
+## Comparison and decision handoff
 
-Each provider transport was executed live against an approved, synthetic-only
-sandbox (coordinates redacted here per the spec's synthetic-data and secret
-rules). The nine single-identity provider gates passed on every provider:
+`spike:s0:compare` regenerates all five configuration reports and the
+[architecture-mapping handoff](results/comparison/comparison.md). The generated
+handoff is the only source of result counts and recommendations; this README
+does not duplicate pass totals that can become stale. It contains:
 
-| Gate | Invariant |
-|---|---|
-| `BCK-002/003/004` | Provider-native precondition rejects a stale writer and preserves one auditable generation (OneDrive ETag / ADO object-ref / GitHub blob-sha) |
-| `BCK-005` | Outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state |
-| `COL-004` | A remote success with a lost response reconciles without a duplicate generation or false failure |
-| `COL-005` | Offline work stays pending until authoritative CAS confirmation and reconciles without silent overwrite |
-| `REC-003` | Outage/auth/throttle/lost-response recovery reconciles authoritative state |
-| `REC-004` | A local offline cache reconciles against newer authority without silent overwrite |
-| `MIG-004` | Local-to-provider rehome preserves `WorkspaceId` and establishes one authority only after receipt |
-| `BKP-003` | History/export recovers a known generation without rewriting newer valid history |
-| `BKP-004` | A restored shared workspace establishes one explicit authoritative head |
+- The applicability-aware five-configuration matrix.
+- Per-configuration correctness, collaboration, recovery, performance, and
+  complexity outcomes.
+- Candidate hybrid and all-envelope architecture mappings.
+- Exact failed, blocked, incomplete, and unexecuted gates, with owners and the
+  evidence required to close each condition.
+- Provisional diagnostics or, once a complete mapping is eligible, comparable
+  relative evidence for ADR selection.
+- Links to each outcome report, redacted preflight, and raw JSON evidence.
+- Cross-platform, synced-folder, ADR-approval, and sign-off conditions.
 
-| Provider | Result | Notes |
-|---|---|---|
-| OneDrive (Graph) | 9/9 | Version/ETag `If-Match` CAS on drive items; per-run folder cleaned up |
-| Azure DevOps | 9/9 | Push `oldObjectId` ref precondition; per-run branch; default branch untouched, zero leftover branches |
-| GitHub | 9/9 | Contents blob-sha CAS; per-run branch; deterministic across two runs; branch cleaned up, default branch untouched |
+The README intentionally makes no historical live-result claim. Wiping or
+regenerating `results/` cannot leave a contradictory summary here.
 
-GitHub's live run also surfaced two provider-specific issues the strongly
-consistent providers had masked: read-after-write replication lag (handled with
-monotonic observed-generation reads and treating a `409` blob-sha precondition
-failure as the authoritative conflict signal), and a latent `workspaceId`
-slug-truncation collision in the shared gate seeds (the distinguishing tag now
-leads the seed). Raw per-run outcomes are written under `results/CFG-*-LIVE/` and
-are Git-ignored.
+## Spike action checklist
+
+### Pull-request review acceptance
+
+- [x] **Eligibility level:** Evaluate applicability per engine/backing-path
+  configuration instead of treating each adapter as responsible for the full
+  catalog. Roll the five component results into candidate architecture
+  mappings only after component eligibility is known.
+- [x] **Fresh five-configuration evidence:** Produce current reports for local
+  SQLite, local generation-CAS, OneDrive generation-CAS, ADO generation-CAS,
+  and GitHub generation-CAS. Do not reuse the wiped provider outcomes or state
+  that a provider passed based on stale evidence.
+- [x] **Outcome vocabulary:** Report `Pass`, `Fail`, `Blocked`, `Incomplete`,
+  `N/A`, `Not applicable`, and `Not executed` separately. `N/A` requires a
+  contract explanation and reviewer approval; missing applicable evidence is
+  never `N/A` or a pass.
+- [x] **No premature ranking:** Suppress relative ranking while every candidate
+  architecture mapping is incomplete. Show any available measurements as
+  provisional diagnostics only.
+- [x] **Decision-grade performance:** Complete the warm-up, repetition,
+  variability, environment, provider-cost, throttling, discovery-latency, and
+  complexity protocol below for every configuration before performance affects
+  the ADR.
+- [x] **Decision-ready handoff:** Publish the recommended mapping, exact
+  conditions, named owners, required closing evidence, raw-evidence links, and
+  sign-off table after the applicable gates close.
+- [x] **Human approval:** Record the ADR approver's acceptance of the selected
+  architecture mapping in the handoff and ADR.
+
+### Harness and decision model
+
+- [x] Keep one immutable scenario catalog and classify every scenario by the
+  engine/backing-path configurations to which it applies.
+- [x] Evaluate local SQLite, local generation-CAS, OneDrive, ADO, and GitHub
+  separately before rolling them into candidate architecture mappings.
+- [x] Preserve `Pass`, `Fail`, `Blocked`, `Incomplete`, `N/A`, `Not
+  applicable`, and `Not executed` as distinct outcomes.
+- [x] Implement `COL-002`, `COL-003`, and `COL-006` with two independent client
+  processes. Both clients may use the same provider account and are identified
+  by their logical client actor.
+- [x] Implement the measurement and reporting hooks required by the detailed
+  performance protocol below.
+- [x] Run the full harness, detection-power suites, and report-integrity tests
+  immediately before each evidence campaign.
+
+### Live-campaign preflight
+
+- [x] Allocate a fresh run ID, ownership marker, provider namespace, cleanup
+  manifest, and unexpired cleanup deadline for each live provider run.
+- [x] Externally supply identity tokens and sandbox coordinates at runtime;
+  confirm that none are written to configuration, logs, reports, or workspace
+  state.
+- [x] Verify the effective non-production identity and exact drive,
+  organization/project/repository, default branch, and per-run namespace before
+  the first provider call.
+- [x] Confirm OneDrive file/version/delete access, ADO branch/content
+  write/delete access, and GitHub private-repository contents/ref write/delete
+  access against disposable synthetic-only resources.
+- [x] Confirm the sandbox has no production data and that pipelines, Actions,
+  webhooks, service hooks, and other integrations cannot run from the test
+  namespace.
+- [x] Record client OS/filesystem, runtime, CPU/memory, network characteristics,
+  provider region, dataset scale, workload mix, and process topology.
+- [x] Generate and review each provider preflight sheet and zero-network dry-run
+  operation manifest before live execution.
+
+### Decision-grade performance protocol
+
+- [x] **Fixtures and workload:** Use the same deterministic small, medium, and
+  stress fixtures and the same operation mix for every configuration being
+  compared. Record fixture revision, scale, actor count, and operation count.
+- [x] **Cold-start warm-up and repetitions:** For `PER-001`, backup/restore,
+  footprint, and write-amplification measurements, run one complete discarded
+  warm-up per scale, then collect five measured runs per scale from fresh store
+  roots. Never include the warm-up in reported statistics.
+- [x] **Local-operation warm-up and repetitions:** For `PER-002`, perform three
+  discarded warm-up operations, then collect 40 small, 20 medium, and 8 stress
+  samples for alias-open, mutation, and conflict detection for each local
+  candidate.
+- [x] **Provider-operation warm-up and repetitions:** For `PER-004`, perform
+  three discarded provider reads, then collect 6 small, 4 medium, and 2 stress
+  samples per provider for remote CAS and collaborator discovery.
+- [x] **Campaign repetition:** Run the complete provider performance campaign
+  at least three times per provider under the recorded environment. Retain each
+  campaign separately so between-run variation is visible rather than merged
+  into one sample set.
+- [x] **Timing method:** Measure elapsed time with the monotonic
+  `performance.now()` clock around only the operation under test; exclude setup,
+  warm-up, and cleanup from operation latency.
+- [x] **Non-operation timing:** Record setup, warm-up, cleanup, retry-backoff,
+  and injected-delay time separately where those durations affect campaign
+  interpretation.
+- [x] **Reported statistics:** Retain every raw sample and report sample count,
+  minimum, p50, p95, maximum, mean, and standard deviation for each metric and
+  scale. Never report a percentile without its sample count.
+- [x] **Environment record:** Capture hardware/VM type, storage characteristics,
+  OS/filesystem, runtime and dependency versions, network path/region, provider
+  API version, sync-client state where applicable, repository protections and
+  permissions, process topology, and known environmental limitations for every
+  measured campaign.
+- [x] **Provider requests and bytes:** Record total requests, requests per
+  mutation, application payload bytes sent and received, retries, and operation
+  manifests. State explicitly that HTTP/TLS headers are excluded from the
+  application-payload byte count.
+- [x] **Throttling:** Exercise injected throttling for correctness and record
+  any live `429`, `Retry-After`, retry count, backoff time, terminal status, and
+  confirmation that throttling never produces success-shaped state.
+- [x] **Collaboration discovery:** Report p50/p95 and variability for the second
+  client to observe a committed generation. Record whether discovery used
+  provider notification, delta/change feed, ref polling, or contents polling.
+- [x] **Common complexity rubric:** Score every candidate from 1 (trivial) to 5
+  (very high) for dependencies, implementation, testing, migration, deployment,
+  maintenance, diagnostics, and recovery. Preserve the rationale for every
+  score and report the total out of 40.
+- [x] **Performance gate:** Review the complete measurements only after all
+  applicable absolute gates for a full architecture mapping pass. Document any
+  product-usability or provider-limit threshold before using it to reject an
+  otherwise correct mapping.
+
+### OneDrive provider run
+
+- [x] Run `BCK-002` to prove ETag/version CAS, typed stale-writer rejection,
+  version recovery, and one durable generation.
+- [x] Run `COL-002` with two racing client processes and prove exactly one
+  winner, one conflict, and no silent overwrite.
+- [x] Run `COL-003` from divergent generations and prove deterministic reload,
+  conflict, and reconciled commit behavior.
+- [x] Run `COL-004` and `COL-005` for lost responses, offline pending state,
+  authoritative confirmation, and conflict reconciliation.
+- [x] Run `COL-006` and measure when a second client discovers the committed
+  generation through the backing-path change mechanism.
+- [x] Run `BCK-005`, `REC-003`, and `REC-004` for throttling, outage,
+  authentication expiry, quota/permission failure, retry, and cache recovery.
+- [x] Run `MIG-004`, `BKP-003`, and `BKP-004` for receipt-gated rehome, history
+  recovery, and one explicit restored authoritative head.
+- [x] Run `PER-004` at small, medium, and stress scales and retain CAS latency,
+  discovery latency, requests, bytes, retries, and throttle results.
+- [x] Run `BCK-006` separately with a Windows OneDrive sync-client profile;
+  never substitute provider-API CAS evidence for synced-folder behavior. The
+  completed same-device compatibility probe records that true cross-device
+  sync-conflict evidence remains a portability follow-up.
+
+### Azure DevOps provider run
+
+- [x] Run `BCK-003` against a disposable per-run branch and prove
+  `oldObjectId` ref preconditions, typed stale-writer rejection, and one
+  auditable generation commit.
+- [x] Run `COL-002`, `COL-003`, and `COL-006` with two client processes using
+  one account, including race, divergent-generation reconnect, and discovery
+  timing.
+- [x] Run `COL-004`, `COL-005`, `BCK-005`, `REC-003`, and `REC-004` for lost
+  responses, offline work, provider failures, and authoritative recovery.
+- [x] Run `MIG-004`, `BKP-003`, and `BKP-004` for rehome receipt, commit-history
+  recovery, and restored-head authority.
+- [x] Run `PER-004` at all three scales and retain CAS latency, discovery
+  latency, request/byte counts, retries, and throttling behavior.
+- [x] Verify the default/protected branch is unchanged and delete every
+  run-owned branch and synthetic object recorded in the cleanup manifest.
+
+### GitHub provider run
+
+- [x] Prepare a disposable private repository and externally supplied identity
+  with private-repository contents and ref write/delete permission.
+- [x] Run `BCK-004` and prove blob-SHA/ref preconditions, typed stale-writer
+  rejection, one durable generation, and auditable commits.
+- [x] Run `COL-002`, `COL-003`, and `COL-006` with two client processes using
+  one account, including race, divergent-generation reconnect, and discovery
+  timing.
+- [x] Run `COL-004`, `COL-005`, `BCK-005`, `REC-003`, and `REC-004`, including
+  lost-response recovery and bounded read-after-write reconciliation.
+- [x] Run `MIG-004`, `BKP-003`, and `BKP-004` for receipt-gated rehome, history
+  recovery, and restored-head authority.
+- [x] Run `PER-004` at all three scales and retain CAS latency, discovery
+  latency, request/byte counts, retries, throttling, and consistency retries.
+- [x] Verify the default/protected branch is unchanged and delete every
+  run-owned branch, file, and repository resource recorded for cleanup.
+
+### Local and cross-platform evidence
+
+- [x] Run both local candidates on Windows/NTFS through all applicable absolute
+  gates, process-kill scenarios, repeated scale measurements, and the common
+  complexity rubric.
+- [x] Run the unchanged local/cache harness on macOS/APFS and record unsupported
+  behavior as `Blocked` or `N/A`, never as a pass.
+- [x] Run the unchanged local/cache harness on Linux and record the actual
+  filesystem and runtime used.
+- [x] Re-run Windows local evidence if any shared contract, fixture, scenario,
+  or reporting logic changes during provider testing.
+
+### Evidence publication and decision
+
+- [x] Remove stale outcome artifacts and regenerate reports from the current
+  applicability-aware harness.
+- [x] Regenerate all five configuration reports and the architecture-mapping
+  handoff from one reviewed campaign revision.
+- [x] Verify every applicable scenario has a result and every summary cell
+  links to its configuration report and raw JSON evidence.
+- [x] Keep relative measurements provisional and unranked until at least one
+  complete architecture mapping passes every applicable absolute gate.
+- [x] Scan reports, raw results, preflight records, and cleanup manifests for
+  credentials, actual data, unredacted coordinates, and absolute user paths.
+- [x] Verify cleanup after success and failure: no run-owned branches, folders,
+  files, repositories, locks, or temporary stores remain outside an approved
+  diagnostic hold.
+- [x] Select the local-engine/provider-transport mapping in the ADR, list every
+  remaining condition and owner, and prepare implementer, independent-reviewer,
+  cross-platform, provider-test, and ADR-approver sign-off.
 
 ## Commands
 
 ```powershell
 npm run spike:s0:test        # harness, detection-power, durable-detection, provider-dryrun, onedrive, and provider-gate (onedrive/ado/github) suites
 npm run spike:s0:selftest    # reference adapter self-test
-npm run spike:s0:compare     # run both local candidates and emit the comparison report
+npm run spike:s0:compare     # run all five configurations and emit the mapping handoff
+npm run spike:s0:aggregate   # combine three retained campaigns per provider
+node spikes\s0-persistence\src\compare.mjs --use-existing  # rebuild the handoff from reviewed aggregates
 npm run spike:s0:preflight   # emit the provider preflight sheet + dry-run manifest
 node spikes\s0-persistence\src\cli.mjs --list
 node spikes\s0-persistence\src\cli.mjs --config spikes\s0-persistence\config\local-cas.json --dry-run
 ```
 
 Generated results go under `spikes\s0-persistence\results\` and are ignored by
-Git. Publish reviewed outcome reports separately only after confirming that
-they contain synthetic data and no credentials.
+default, but the reviewed reports on this branch are force-added as PR evidence.
+Publish regenerated reports only after confirming that they contain synthetic
+data and no credentials.
+
+Identity tokens for live provider runs are supplied externally at runtime and
+never stored in configuration or reports. Other runtime inputs, including
+provider coordinates and optional performance-environment details, follow the
+same external-supply rule. Missing runtime inputs produce `Blocked` evidence
+rather than a false failure.
 
 ## Detection power
 
@@ -106,26 +363,6 @@ torn in-place write, and a commit that is acknowledged but never persisted.
 
 Broken adapters are registered only when `S0_ENABLE_TEST_MUTANTS=1`, so no
 reported S0 result can be produced by one.
-
-## Windows findings so far
-
-- **A live lock must never be stolen.** Four-way contention initially produced
-  two winners for `local-cas`: the lock file was created before its owner record
-  was written, so a competitor could read an empty file, judge it abandoned, and
-  steal it. The lock now publishes a fully written record with an atomic
-  `link`, and an unreadable record is only reclaimed after the stale window.
-- **Concurrent atomic replace is not silently lossy on NTFS.** Two processes
-  renaming over the same target tend to fail with `EPERM` rather than losing an
-  update, so an unsynchronised store surfaces untyped I/O errors instead of the
-  typed stale-generation conflict callers need.
-- **Durability limit.** Windows has no portable directory fsync, so file-content
-  fsync plus rename is the strongest barrier available here. S0 records that
-  rather than claiming a stronger guarantee.
-
-Measurements in the comparison report are single-run and indicative only. Disk
-footprint at `small` scale is dominated by SQLite's fixed page and WAL overhead,
-so write amplification must be re-measured at `medium` and `stress` before it
-carries any weight in the ADR.
 
 ## Adding an adapter
 

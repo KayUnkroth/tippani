@@ -24,12 +24,14 @@ import {
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const API = "https://api.github.com";
 
 function b64encode(text) { return Buffer.from(text, "utf8").toString("base64"); }
 function b64decode(text) { return Buffer.from(text, "base64").toString("utf8"); }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const RETRYABLE_NETWORK_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
 
 export class GitHubRepoStore {
   constructor({
@@ -54,6 +56,7 @@ export class GitHubRepoStore {
     this.fetchImpl = fetchImpl || globalThis.fetch;
     this.operations = [];
     this.liveProviderCalls = 0;
+    this.telemetry = new ProviderTelemetry();
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this.shas = new Map();
     this._fault = null;
@@ -80,20 +83,38 @@ export class GitHubRepoStore {
     if (!this._getToken) throw new WorkspaceStoreError("No GitHub token supplied", "no_token");
     if (!this.owner || !this.repo) throw new WorkspaceStoreError("owner/repo required for a live run", "no_coordinates");
     this.liveProviderCalls++;
+    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
       this._fault = null;
-      if (fault.kind === "throttle") return { ok: false, status: 429, text: async () => "throttled", json: async () => ({}) };
-      if (fault.kind === "auth-expiry") return { ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) };
-      if (fault.kind === "outage") throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
+      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
+      if (fault.kind === "outage") {
+        this.telemetry.recordFailure("outage");
+        throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
         await this.fetchImpl(url, { method, headers: this.headers(token0, headers), body });
+        this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
     }
     const token = await this._getToken();
-    return this.fetchImpl(url, { method, headers: this.headers(token, headers), body });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return this.telemetry.wrapResponse(await this.fetchImpl(url, { method, headers: this.headers(token, headers), body }));
+      } catch (error) {
+        const retryable = method === "GET" && attempt < 2 &&
+          (error instanceof TypeError || RETRYABLE_NETWORK_CODES.has(error?.code) ||
+            RETRYABLE_NETWORK_CODES.has(error?.cause?.code));
+        if (!retryable) throw error;
+        const delayMs = 250 * (attempt + 1);
+        this.telemetry.recordRetry();
+        this.telemetry.recordBackoff(delayMs);
+        await sleep(delayMs);
+      }
+    }
   }
 
   headers(token, extra) {
@@ -179,6 +200,7 @@ export class GitHubRepoStore {
         if (!(error instanceof WorkspaceNotFoundError)) throw error;
         last = error;
       }
+      this.telemetry.recordRetry();
       await sleep(150);
     }
     if (last instanceof Error) throw last;
@@ -380,6 +402,10 @@ export class GitHubRepoStore {
 
   liveProviderCallCount() {
     return this.liveProviderCalls;
+  }
+
+  providerTelemetry() {
+    return this.telemetry.snapshot();
   }
 
   async close() {

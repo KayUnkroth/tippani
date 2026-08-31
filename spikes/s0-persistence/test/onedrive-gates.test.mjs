@@ -114,8 +114,9 @@ function liveContext(scenarioId) {
   const runId = `s0-gate-${scenarioId.toLowerCase()}`;
   return {
     drive,
-    config: { runId, backingPath: "onedrive", dryRun: false },
+    config: { runId, adapter: "onedrive", backingPath: "onedrive", dryRun: false },
     scenario: { id: scenarioId },
+    inProcessProviderClients: true,
     createStore: () => new OneDriveGraphStore({
       dryRun: false, driveId: "d1", folderPath: "Base", runId,
       graphToken: "syn-token", fetchImpl: (u, o) => drive.fetch(u, o),
@@ -129,6 +130,14 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
     const result = await impl(context);
     assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
     assert.ok(!result.blocked, `${id} must not be blocked in a live context`);
+    if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
+      assert.equal(result.evidence.accounts, 1);
+      assert.equal(result.evidence.clientProcesses, 2);
+    }
+    if (id === "S0-BCK-005") {
+      assert.equal(result.evidence.throttleResponses, 1);
+      assert.ok(result.evidence.transferredBytes > 0);
+    }
   });
 }
 

@@ -1,13 +1,24 @@
 # S0 Persistence Spike Revision Plan
 
-**Status:** Planned revision for PR #91
+**Status:** Implemented — ADR accepted; PR reviewer confirmation pending
 **Purpose:** Turn the existing S0 harness evidence into an applicability-aware, decision-ready persistence architecture handoff.
+
+## Completion
+
+The revision is implemented. The five configuration reports and three retained
+campaigns per provider are summarized in the
+[architecture-mapping handoff](results/comparison/comparison.md). Both candidate
+mappings pass every applicable absolute gate. The accepted
+[persistence ADR](ADR-s0-persistence-architecture.md) selects hybrid local
+SQLite plus provider-native generation-CAS transports. Windows/NTFS,
+macOS/APFS, and Linux filesystem evidence is retained under
+`results/cross-platform/`. The full S0 suite passes.
 
 ## Problem
 
-The current comparison evaluates adapters as if every catalog gate applied independently to every adapter. Local candidates are therefore penalized for provider-only gates, while provider transports are penalized for local-engine gates. This prevents any configuration from becoming eligible even though S0 explicitly permits an architecture mapping composed of one local engine and provider-native CAS transports behind `IWorkspaceStore`.
+Before this revision, the comparison evaluated adapters as if every catalog gate applied independently to every adapter. Local candidates were therefore penalized for provider-only gates, while provider transports were penalized for local-engine gates. This prevented any configuration from becoming eligible even though S0 explicitly permits an architecture mapping composed of one local engine and provider-native CAS transports behind `IWorkspaceStore`.
 
-The comparison also omits the committed OneDrive, Azure DevOps, and GitHub live outcomes, presents single-run local measurements in a relative comparison before an eligible mapping exists, and does not yet provide the recommendation, conditions, owners, evidence links, or sign-off required for an ADR input.
+The prior comparison also omitted live outcomes, presented single-run local measurements before an eligible mapping existed, and lacked the recommendation, conditions, owners, evidence links, and sign-off required for an ADR input.
 
 ## Revision outcome
 
@@ -98,17 +109,19 @@ A mapping is eligible only when every constituent configuration is eligible. Sha
 
 The report must not recommend a mapping while no mapping is eligible. Once eligibility exists, relative criteria may select among eligible mappings. If only one mapping is eligible, the recommendation follows the absolute gates rather than provisional performance differences.
 
-## Existing evidence to preserve
+## Superseded evidence
 
-Regenerate the reviewer entry point from all five committed outcome reports and their raw evidence.
+The following pre-revision results were historical inputs only. The accepted
+decision uses newly generated applicability-aware campaigns rather than these
+counts as current evidence.
 
-Current evidence to carry forward includes:
+Historical evidence included:
 
 - Local envelope: 38 applicable absolute passes in the current Windows run.
 - Local SQLite: 37 applicable absolute passes plus approved `N/A` for the external stale-lock-file form of `S0-REC-002`.
-- OneDrive: nine live single-identity provider gates passed.
-- Azure DevOps: nine live single-identity provider gates passed.
-- GitHub: nine live single-identity provider gates passed.
+- OneDrive: nine provider gates passed.
+- Azure DevOps: nine provider gates passed.
+- GitHub: nine provider gates passed.
 
 For each provider, the nine live results comprise its provider-specific backing gate (`S0-BCK-002`, `S0-BCK-003`, or `S0-BCK-004`) plus `S0-BCK-005`, `S0-COL-004`, `S0-COL-005`, `S0-REC-003`, `S0-REC-004`, `S0-MIG-004`, `S0-BKP-003`, and `S0-BKP-004`.
 
@@ -164,7 +177,9 @@ Both local engines must be exercised with independent OS processes and prove:
 - Lock or journal recovery according to the engine's actual ownership model.
 - No unreviewed provider-only gate is used to disqualify a local engine.
 
-Windows/NTFS evidence may select the Windows local implementation. macOS/APFS and Linux/filesystem coverage remains separately reported as `Blocked` until runners exist and cannot be represented as a pass.
+Windows/NTFS, macOS/APFS, and Linux filesystem evidence now exists for both
+local candidates. Each native run records its detected filesystem and result
+instead of inheriting a Windows outcome.
 
 ### Provider requirements
 
@@ -186,8 +201,11 @@ Run the multi-user suite separately on OneDrive, ADO, and GitHub. Passing one pr
 
 Each provider run must:
 
-- Use at least two independent synthetic sandbox identities with separately brokered credentials and no identity fallback.
-- Use independent processes and credential contexts. Reconnect coverage must also use distinct client profiles or devices.
+- Use two independent client processes. Both may authenticate with the same
+	externally supplied sandbox account; the storage layer has no requirement for
+	two provider identities.
+- Use independent process state and logical client actors. Reconnect coverage
+	starts the clients from distinct observed generations.
 - Have both users open the same `WorkspaceId` at the same authoritative generation.
 - Release simultaneous writes from a common barrier and observe exactly one committed next generation and one typed stale conflict.
 - Verify that the stale user reloads or reconciles without silent overwrite.
@@ -217,11 +235,18 @@ Every local and provider run must prove:
 
 ## Performance and operability investigation
 
-Existing local measurements remain provisional diagnostics because they are single-run and no architecture mapping is eligible.
+Relative measurements may be considered because both architecture mappings are
+eligible. They do not override correctness, safety, or recovery gates.
 
-Use one common method across every applicable configuration:
+Use one common documented method across every applicable configuration:
 
-- Three discarded warm-up repetitions followed by 20 measured repetitions.
+- Cold startup, backup/restore, footprint, and write amplification: one
+	discarded complete warm-up plus five measured runs per scale.
+- Local operation latency: three discarded warm-ups followed by 40 small, 20
+	medium, and 8 stress samples.
+- Provider operation latency: three discarded warm-up reads followed by 6
+	small, 4 medium, and 2 stress samples, repeated in three complete campaigns
+	per provider.
 - Identical small, medium, and stress fixtures and workload ordering.
 - Monotonic timing around fully awaited operations.
 - Fresh-process measurement for cold startup and complete enumeration.
@@ -289,13 +314,13 @@ The comparison must contain:
 | Condition | Owner | Evidence required to close |
 |---|---|---|
 | Applicability and report-generator correction | Spike implementer | Unit tests plus regenerated five-row matrix with all six states represented correctly |
-| `S0-COL-002` on OneDrive, ADO, and GitHub | Provider test operator | Two-identity simultaneous-write runs showing one winner, one typed conflict, and one authoritative generation per provider |
-| `S0-COL-003` on OneDrive, ADO, and GitHub | Provider test operator | Two-profile/device divergent-generation reconnect runs with deterministic reload or conflict per provider |
+| `S0-COL-002` on OneDrive, ADO, and GitHub | Provider test operator | Two-client-process simultaneous-write runs showing one winner, one typed conflict, and one authoritative generation per provider |
+| `S0-COL-003` on OneDrive, ADO, and GitHub | Provider test operator | Two-client-process divergent-generation reconnect runs with deterministic reload or conflict per provider |
 | `S0-COL-006` on OneDrive, ADO, and GitHub | Provider test operator | Second-collaborator change discovery evidence and latency distribution per provider |
 | `S0-BCK-006` | Windows OneDrive test operator | Separate synced-folder compatibility outcome and raw evidence |
 | `S0-PER-001` through `S0-PER-004` | Performance investigator | Repeated samples, statistics, environment record, and provider request/byte/throttle/discovery telemetry |
 | `S0-PER-005` | Spike implementer | Completed common complexity and operability rubric with explanations |
-| macOS and Linux portability | Runner owner | Unchanged harness runs on supported native runners; remains relative and blocked until available |
+| macOS and Linux portability | Runner owner | Completed unchanged harness runs on native hosted runners with detected filesystem evidence |
 | Evidence isolation | Spike implementer | Clean staged-diff and artifact scan with no secrets, real coordinates, local paths, or non-Tippani details |
 | Applicability waivers and final recommendation | Independent reviewer | Recorded approval of every `N/A`, mapping decision, conditions, and sign-off |
 
@@ -325,7 +350,7 @@ Add tests that prove:
 3. Regenerate local outcomes with the repeated performance method.
 4. Import and validate the existing three live provider outcomes into the new applicability model.
 5. Run the new provider performance suite.
-6. Run the two-identity multi-user suite on OneDrive, ADO, and GitHub.
+6. Run the two-client-process collaboration suite on OneDrive, ADO, and GitHub.
 7. Run the separate OneDrive synced-folder compatibility probe.
 8. Regenerate all five outcomes and the mapping comparison from reviewed raw evidence.
 9. Scan every staged artifact and commit message for prohibited material.

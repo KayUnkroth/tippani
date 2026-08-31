@@ -4,8 +4,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ReferenceMemoryWorkspaceStore } from "../src/adapters/reference-memory-store.mjs";
+import {
+  APPLICABILITY_PROFILES,
+  applicableScenarioIds,
+  validateApplicability,
+} from "../src/applicability.mjs";
 import { CleanupManifest } from "../src/cleanup-manifest.mjs";
 import { validatePreflight } from "../src/preflight.mjs";
+import { COMPLEXITY_RUBRIC, complexityAssessment } from "../src/complexity-rubric.mjs";
 import { runHarness } from "../src/runner.mjs";
 import { renderOutcomeReport } from "../src/result-writer.mjs";
 import { gateSummary } from "../src/eligibility.mjs";
@@ -41,7 +47,34 @@ async function check(name, action) {
 
 await check("scenario catalog is valid and unique", async () => {
   assert.equal(validateScenarioCatalog(), true);
+  assert.equal(validateApplicability(SCENARIOS), true);
   assert.equal(new Set(SCENARIOS.map((item) => item.id)).size, SCENARIOS.length);
+});
+
+await check("applicability profiles cover the catalog and separate provider-specific gates", () => {
+  assert(APPLICABILITY_PROFILES.local.includes("S0-BCK-001"));
+  assert(!APPLICABILITY_PROFILES.local.includes("S0-BCK-002"));
+  assert(APPLICABILITY_PROFILES.onedrive.includes("S0-BCK-002"));
+  assert(!APPLICABILITY_PROFILES.onedrive.includes("S0-BCK-003"));
+  assert(APPLICABILITY_PROFILES.ado.includes("S0-BCK-003"));
+  assert(APPLICABILITY_PROFILES.github.includes("S0-BCK-004"));
+  assert.deepEqual(applicableScenarioIds(config), config.scenarioIds);
+});
+
+await check("all five candidates use the same bounded complexity rubric", () => {
+  const candidates = [
+    { adapter: "local-sqlite", backingPath: "local" },
+    { adapter: "local-cas", backingPath: "local" },
+    { adapter: "onedrive", backingPath: "onedrive" },
+    { adapter: "ado", backingPath: "ado" },
+    { adapter: "github", backingPath: "github" },
+  ];
+  for (const candidate of candidates) {
+    const assessment = complexityAssessment(candidate);
+    assert.deepEqual(Object.keys(assessment.scores), [...COMPLEXITY_RUBRIC.dimensions]);
+    assert(Object.values(assessment.scores).every((score) => Number.isInteger(score) && score >= 1 && score <= 5));
+    assert.equal(Object.keys(assessment.evidence).length, COMPLEXITY_RUBRIC.dimensions.length);
+  }
 });
 
 await check("machine catalog matches every ID in the approved spec", async () => {
@@ -58,6 +91,18 @@ await check("synthetic fixtures are deterministic", async () => {
   const right = createSyntheticWorkspace({ seed: "deterministic", scale: "small" });
   assert.deepEqual(left, right);
   assert.equal(assertSyntheticOnly(left), true);
+});
+
+await check("scenario discriminator survives long run-id slug truncation", async () => {
+  const longConfig = structuredClone(config);
+  longConfig.runId = "s0-local-cross-platform-runner-with-a-long-identifier";
+  longConfig.sandbox.ownershipMarker = `tippani-s0:${longConfig.runId}`;
+  const { run } = await runHarness({
+    config: longConfig,
+    scenarioIds: ["S0-CON-003", "S0-COR-002", "S0-HYD-001"],
+    writeArtifacts: false,
+  });
+  assert(run.results.every((result) => result.status === "Pass"));
 });
 
 await check("synthetic guard rejects actual-looking account data", async () => {
@@ -230,9 +275,26 @@ await check("a reviewer-approved N/A gate is not-applicable, not unresolved, and
     ],
   };
   const gates = gateSummary(withNa);
-  assert.equal(gates.notApplicable.length, 1);
+  assert.equal(gates.na.length, 1);
+  assert.equal(gates.notApplicable.length, 0);
   assert.equal(gates.unresolved.length, 0);
   assert.equal(gates.eligible, "Yes");
+});
+
+await check("gates assigned to another configuration are Not applicable, not missing", () => {
+  const catalog = [
+    { id: "S0-ATM-001", criterionType: "absolute", title: "local" },
+    { id: "S0-COL-002", criterionType: "absolute", title: "provider" },
+  ];
+  const run = {
+    applicableScenarioIds: ["S0-ATM-001"],
+    catalog,
+    results: [{ scenarioId: "S0-ATM-001", criterionType: "absolute", status: "Pass" }],
+  };
+  const gates = gateSummary(run);
+  assert.equal(gates.eligible, "Yes");
+  assert.equal(gates.missing.length, 0);
+  assert.deepEqual(gates.notApplicable.map((item) => item.id), ["S0-COL-002"]);
 });
 
 console.log(`s0-persistence-harness: ${pass} passed, ${fail} failed`);

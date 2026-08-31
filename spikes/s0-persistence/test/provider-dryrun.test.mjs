@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProviderWorkspaceStore } from "../src/adapters/provider-store.mjs";
+import { applicableScenarioIds } from "../src/applicability.mjs";
 import {
   buildPreflightSheet,
   renderPreflightSheet,
@@ -106,6 +107,8 @@ await check("preflight sheet is non-secret and lists the dry-run manifest and pr
   assert.deepEqual(findEmbeddedSecrets(sheet), []);
   assert.ok(sheet.dryRunOperations.length >= 4);
   assert.ok(sheet.prerequisites.length > 0);
+  assert.ok(Date.parse(sheet.cleanup.expiresAt) > Date.now());
+  assert.equal(sheet.cleanup.retentionHours, 24);
   const markdown = renderPreflightSheet(sheet);
   assert.ok(markdown.includes("preflight sheet"));
   assert.ok(markdown.includes("Dry-run operation manifest"));
@@ -118,18 +121,28 @@ await check("preflight sheet build rejects a config that embeds a credential", a
   await assert.rejects(buildPreflightSheet(withSecret), /Credential material/);
 });
 
+await check("preflight rejects an expired cleanup deadline", async () => {
+  const expired = JSON.parse(JSON.stringify(providerConfig));
+  delete expired.sandbox.cleanup.retentionHours;
+  expired.sandbox.cleanup.expiresAt = "2000-01-02T00:00:00.000Z";
+  await assert.rejects(buildPreflightSheet(expired), /cleanup manifest and expiry/);
+});
+
 await check("provider gates are published as Blocked with precise reasons", async () => {
   const { run } = await runHarness({ config: providerConfig, writeArtifacts: false });
-  assert.equal(run.results.length, providerConfig.scenarioIds.length);
-  for (const result of run.results) {
+  assert.equal(run.results.length, applicableScenarioIds(providerConfig).length);
+  const providerResults = run.results.filter((result) => BLOCKED_REASONS[result.scenarioId]);
+  for (const result of providerResults) {
     assert.equal(result.status, "Blocked", `${result.scenarioId} was ${result.status}`);
-    assert.ok(result.reason && result.reason.length > 0, `${result.scenarioId} has no reason`);
     assert.equal(result.reason, BLOCKED_REASONS[result.scenarioId]);
   }
+  assert(run.results.filter((result) => result.scenarioId.startsWith("S0-SEC-")).every((result) => result.status === "Pass"));
+  assert.equal(run.results.find((result) => result.scenarioId === "S0-PER-005")?.status, "Pass");
 });
 
 await check("every selected provider gate has a blocked reason", async () => {
-  for (const id of providerConfig.scenarioIds) {
+  for (const id of applicableScenarioIds(providerConfig)) {
+    if (id.startsWith("S0-SEC-") || id === "S0-PER-005") continue;
     assert.ok(BLOCKED_REASONS[id], `${id} lacks a blocked reason`);
   }
 });

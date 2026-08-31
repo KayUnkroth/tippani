@@ -3,7 +3,7 @@
 // path would issue, produced by running the provider adapter in dry-run so the
 // manifest is real and zero provider calls are made.
 
-import { PreflightError, findEmbeddedSecrets, validatePreflight } from "./preflight.mjs";
+import { PreflightError, assertPreflight, findEmbeddedSecrets, validatePreflight } from "./preflight.mjs";
 import { PROVIDER_PREREQUISITES } from "./provider-gates.mjs";
 import { ProviderWorkspaceStore } from "./adapters/provider-store.mjs";
 import { OneDriveGraphStore } from "./adapters/onedrive-store.mjs";
@@ -72,6 +72,7 @@ export async function runProviderDryRun(config) {
 export async function buildPreflightSheet(config) {
   const errors = validatePreflight(config);
   if (errors.length) throw new PreflightError(errors);
+  const preflight = assertPreflight(config, new Date());
 
   const dryRun = await runProviderDryRun(config);
   if (dryRun.liveProviderCalls !== 0) {
@@ -93,8 +94,8 @@ export async function buildPreflightSheet(config) {
     namespace: config.sandbox.namespace,
     defaultBranchExcluded: config.sandbox.defaultBranchExcluded === true,
     ownershipMarker: config.sandbox.ownershipMarker,
-    budgets: config.budgets,
-    cleanup: config.sandbox.cleanup,
+    budgets: preflight.budgets,
+    cleanup: preflight.sandbox.cleanup,
     dryRunOperations: dryRun.operations,
     liveProviderCalls: dryRun.liveProviderCalls,
     prerequisites: PROVIDER_PREREQUISITES,

@@ -1,6 +1,6 @@
 {
   "configurationId": "CFG-ADO-LIVE",
-  "runId": "s0-ado-live-20260815235002",
+  "runId": "cfg-ado-live-aggregate",
   "adapter": "ado",
   "backingPath": "ado",
   "syntheticDataOnly": true,
@@ -9,10 +9,22 @@
     "kind": "provider-live",
     "identityLabel": "Live delegated identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "tippani-s0:s0-ado-live-20260815235002",
-    "namespace": "tippani-s0/s0-ado-live-20260815235002",
+    "ownershipMarker": "redacted-per-campaign",
+    "namespace": "redacted-per-campaign",
     "defaultBranchExcluded": true,
-    "corporateFallbackDisabled": true
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "connect",
+      "read-item",
+      "push",
+      "list-items",
+      "list-commits",
+      "delete-ref"
+    ],
+    "cleanup": {
+      "manifestId": "see-campaign-preflights",
+      "expiresAt": "see-campaign-preflights"
+    }
   },
   "budgets": {
     "maxOperations": 100,

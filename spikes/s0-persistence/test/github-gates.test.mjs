@@ -82,8 +82,9 @@ function liveContext(scenarioId) {
   const repo = fakeGitHubRepo();
   const runId = `s0-gh-gate-${scenarioId.toLowerCase()}`;
   return {
-    config: { runId, backingPath: "github", dryRun: false },
+    config: { runId, adapter: "github", backingPath: "github", dryRun: false },
     scenario: { id: scenarioId },
+    inProcessProviderClients: true,
     createStore: () => new GitHubRepoStore({
       dryRun: false, owner: "O", repo: "R", runId,
       githubToken: "syn-token", fetchImpl: (u, o) => repo.fetch(u, o),
@@ -96,6 +97,14 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
     const result = await impl(liveContext(id));
     assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
     assert.ok(!result.blocked, `${id} must not be blocked in a live GitHub context`);
+    if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
+      assert.equal(result.evidence.accounts, 1);
+      assert.equal(result.evidence.clientProcesses, 2);
+    }
+    if (id === "S0-BCK-005") {
+      assert.equal(result.evidence.throttleResponses, 1);
+      assert.ok(result.evidence.transferredBytes > 0);
+    }
   });
 }
 

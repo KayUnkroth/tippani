@@ -2,6 +2,7 @@
   "configurationId": "CFG-PROVIDER-ADO-DRYRUN",
   "adapter": "ado",
   "backingPath": "ado",
+  "applicabilityProfile": "ado",
   "platform": "windows-ntfs",
   "scale": "small",
   "runId": "s0-provider-ado-dryrun",
@@ -37,25 +38,7 @@
     ],
     "cleanup": {
       "manifestId": "syn-cleanup-s0-provider-ado-dryrun",
-      "expiresAt": "2000-01-02T00:00:00.000Z"
+      "retentionHours": 24
     }
-  },
-  "scenarioIds": [
-    "S0-COL-002",
-    "S0-COL-003",
-    "S0-COL-004",
-    "S0-COL-005",
-    "S0-COL-006",
-    "S0-BCK-002",
-    "S0-BCK-003",
-    "S0-BCK-004",
-    "S0-BCK-005",
-    "S0-BCK-006",
-    "S0-BKP-003",
-    "S0-BKP-004",
-    "S0-REC-003",
-    "S0-REC-004",
-    "S0-MIG-004",
-    "S0-PER-004"
-  ]
+  }
 }

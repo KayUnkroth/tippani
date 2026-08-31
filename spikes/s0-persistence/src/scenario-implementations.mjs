@@ -12,6 +12,9 @@ import {
 import { CleanupManifest } from "./cleanup-manifest.mjs";
 import { findEmbeddedSecrets, validatePreflight } from "./preflight.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "./onedrive-gates.mjs";
+import { telemetryDelta } from "./adapters/provider-telemetry.mjs";
+import { complexityAssessment } from "./complexity-rubric.mjs";
+import { BLOCKED_REASONS } from "./provider-gates.mjs";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -26,6 +29,9 @@ const PER_SCALES = ["small", "medium", "stress"];
 // run-duration budget; each scale still reports comparable p50/p95 statistics.
 const PER_LATENCY_ITERATIONS = { small: 40, medium: 20, stress: 8 };
 const PER_FOOTPRINT_COMMITS = { small: 25, medium: 10, stress: 4 };
+const PER_WARMUP_ITERATIONS = 3;
+const PER_RUN_REPETITIONS = 5;
+const PROVIDER_PER_ITERATIONS = { small: 6, medium: 4, stress: 2 };
 
 async function openStore(context, seed = context.config.runId, scale = context.config.scale || "small") {
   const store = context.createStore();
@@ -160,8 +166,8 @@ async function independentWorkspaces(context) {
   const store = context.createStore();
   await store.initialize();
   try {
-    const left = createSyntheticWorkspace({ seed: `${context.config.runId}-left` });
-    const right = createSyntheticWorkspace({ seed: `${context.config.runId}-right` });
+    const left = createSyntheticWorkspace({ seed: `left-${context.config.runId}` });
+    const right = createSyntheticWorkspace({ seed: `right-${context.config.runId}` });
     await store.createWorkspace(left);
     await store.createWorkspace(right);
     await Promise.all([
@@ -420,8 +426,8 @@ async function duplicateAliasRestoreRejected(context) {
   await source.initialize();
   await target.initialize();
   try {
-    const left = createSyntheticWorkspace({ seed: `${context.config.runId}-one` });
-    const right = createSyntheticWorkspace({ seed: `${context.config.runId}-two` });
+    const left = createSyntheticWorkspace({ seed: `one-${context.config.runId}` });
+    const right = createSyntheticWorkspace({ seed: `two-${context.config.runId}` });
     right.aliases = [left.aliases[0]];
     const snapshot = {
       schemaVersion: 1,
@@ -462,7 +468,7 @@ async function enumerateBeforeUse(context) {
   try {
     for (const suffix of ["a", "b", "c"]) {
       await store.createWorkspace(createSyntheticWorkspace({
-        seed: `${context.config.runId}-${suffix}`,
+        seed: `${suffix}-${context.config.runId}`,
       }));
     }
     const workspaces = await store.listWorkspaces();
@@ -549,31 +555,54 @@ async function syntheticOnly(context) {
 
 async function startupMeasurement(context) {
   const measurements = {};
+  const evidence = {
+    scales: PER_SCALES.join(","),
+    discardedWarmupRuns: 1,
+    repetitions: PER_RUN_REPETITIONS,
+    timingMethod: "performance.now monotonic elapsed time",
+    reportedStatistics: "min,p50,p95,max,mean,stddev",
+    rawSamples: {},
+  };
   for (const scale of PER_SCALES) {
-    const started = performance.now();
-    const store = context.createStore({ fresh: true });
-    await store.initialize();
-    const initializedMs = performance.now() - started;
-    try {
-      const workspace = createSyntheticWorkspace({
-        seed: `${context.config.runId}-${scale}`,
-        scale,
-      });
-      const createStarted = performance.now();
-      await store.createWorkspace(workspace);
-      const createMs = performance.now() - createStarted;
-      const enumerateStarted = performance.now();
-      const workspaces = await store.listWorkspaces();
-      const enumerateMs = performance.now() - enumerateStarted;
-      assert.equal(workspaces.length, 1);
-      measurements[`initializedMs_${scale}`] = initializedMs;
-      measurements[`createMs_${scale}`] = createMs;
-      measurements[`enumerateMs_${scale}`] = enumerateMs;
-    } finally {
-      await close(store);
+    const initializeSamples = [];
+    const createSamples = [];
+    const enumerateSamples = [];
+    for (let repetition = -1; repetition < PER_RUN_REPETITIONS; repetition++) {
+      const store = context.createStore({ fresh: true });
+      const started = performance.now();
+      await store.initialize();
+      const initializedMs = performance.now() - started;
+      try {
+        const workspace = createSyntheticWorkspace({
+          seed: `${context.config.runId}-${scale}-${repetition}`,
+          scale,
+        });
+        const createStarted = performance.now();
+        await store.createWorkspace(workspace);
+        const createMs = performance.now() - createStarted;
+        const enumerateStarted = performance.now();
+        const workspaces = await store.listWorkspaces();
+        const enumerateMs = performance.now() - enumerateStarted;
+        assert.equal(workspaces.length, 1);
+        if (repetition >= 0) {
+          initializeSamples.push(initializedMs);
+          createSamples.push(createMs);
+          enumerateSamples.push(enumerateMs);
+        }
+      } finally {
+        await close(store);
+      }
     }
+    recordDistribution(measurements, "initialized", scale, initializeSamples);
+    recordDistribution(measurements, "create", scale, createSamples);
+    recordDistribution(measurements, "enumerate", scale, enumerateSamples);
+    evidence.rawSamples[scale] = {
+      initializedMs: initializeSamples,
+      createMs: createSamples,
+      enumerateMs: enumerateSamples,
+    };
   }
-  return { evidence: { scales: PER_SCALES.join(",") }, measurements };
+  return { evidence, measurements };
 }
 
 // --- Durable-adapter scenarios ---------------------------------------------
@@ -808,6 +837,24 @@ function percentile(samples, fraction) {
   return sorted[Math.max(0, index)];
 }
 
+function mean(samples) {
+  return samples.reduce((sum, sample) => sum + sample, 0) / samples.length;
+}
+
+function standardDeviation(samples) {
+  const average = mean(samples);
+  return Math.sqrt(mean(samples.map((sample) => (sample - average) ** 2)));
+}
+
+function recordDistribution(measurements, name, scale, samples, unit = "Ms") {
+  measurements[`${name}Min${unit}_${scale}`] = Math.min(...samples);
+  measurements[`${name}P50${unit}_${scale}`] = percentile(samples, 0.5);
+  measurements[`${name}P95${unit}_${scale}`] = percentile(samples, 0.95);
+  measurements[`${name}Max${unit}_${scale}`] = Math.max(...samples);
+  measurements[`${name}Mean${unit}_${scale}`] = mean(samples);
+  measurements[`${name}StdDev${unit}_${scale}`] = standardDeviation(samples);
+}
+
 function directorySizeBytes(root) {
   let total = 0;
   const walk = (current) => {
@@ -827,6 +874,12 @@ function directorySizeBytes(root) {
 
 async function latencyProfile(context) {
   const measurements = {};
+  const evidence = {
+    scales: PER_SCALES.join(","),
+    warmupIterations: PER_WARMUP_ITERATIONS,
+    timingMethod: "performance.now monotonic elapsed time",
+    reportedStatistics: "min,p50,p95,max,mean,stddev",
+  };
   for (const scale of PER_SCALES) {
     const iterations = PER_LATENCY_ITERATIONS[scale];
     const store = context.createStore({ fresh: true });
@@ -841,6 +894,10 @@ async function latencyProfile(context) {
       const openSamples = [];
       const mutateSamples = [];
       const conflictSamples = [];
+
+      for (let warmup = 0; warmup < PER_WARMUP_ITERATIONS; warmup++) {
+        await store.resolveAlias(alias);
+      }
 
       for (let generation = 0; generation < iterations; generation++) {
         let started = performance.now();
@@ -869,68 +926,302 @@ async function latencyProfile(context) {
 
       const durable = await store.readWorkspace(workspace.workspaceId);
       assert.equal(durable.generation, iterations, "Every measured mutation must be durable");
-      measurements[`openByAliasP50Ms_${scale}`] = percentile(openSamples, 0.5);
-      measurements[`openByAliasP95Ms_${scale}`] = percentile(openSamples, 0.95);
-      measurements[`mutationP50Ms_${scale}`] = percentile(mutateSamples, 0.5);
-      measurements[`mutationP95Ms_${scale}`] = percentile(mutateSamples, 0.95);
-      measurements[`conflictP50Ms_${scale}`] = percentile(conflictSamples, 0.5);
-      measurements[`conflictP95Ms_${scale}`] = percentile(conflictSamples, 0.95);
-    } finally {
-      await close(store);
-    }
-  }
-  return { evidence: { scales: PER_SCALES.join(",") }, measurements };
-}
-
-async function footprintProfile(context) {
-  const measurements = {};
-  const evidence = { scales: PER_SCALES.join(",") };
-  for (const scale of PER_SCALES) {
-    const commits = PER_FOOTPRINT_COMMITS[scale];
-    const store = context.createStore({ fresh: true });
-    await store.initialize();
-    try {
-      const workspace = createSyntheticWorkspace({
-        seed: `${context.config.runId}-fp-${scale}`,
-        scale,
-      });
-      await store.createWorkspace(workspace);
-      for (let generation = 0; generation < commits; generation++) {
-        await store.compareAndSwap({
-          workspaceId: workspace.workspaceId,
-          expectedGeneration: generation,
-          operation: { auditEvent: { actor: "Synthetic Actor", action: `footprint-${generation}` } },
-        });
-      }
-
-      let started = performance.now();
-      const snapshot = await store.backup();
-      const backupMs = performance.now() - started;
-
-      const target = context.createStore({ fresh: true });
-      await target.initialize();
-      started = performance.now();
-      await target.restore(snapshot);
-      const restoreMs = performance.now() - started;
-      assert.equal(
-        (await target.readWorkspace(workspace.workspaceId)).generation,
-        commits,
-      );
-      await close(target);
-
-      const storeBytes = context.durable ? directorySizeBytes(store.root) : 0;
-      const payloadBytes = Buffer.byteLength(JSON.stringify(snapshot));
-      measurements[`backupMs_${scale}`] = backupMs;
-      measurements[`restoreMs_${scale}`] = restoreMs;
-      evidence[`storeBytes_${scale}`] = storeBytes;
-      evidence[`payloadBytes_${scale}`] = payloadBytes;
-      evidence[`writeAmplification_${scale}`] =
-        payloadBytes ? Number((storeBytes / payloadBytes).toFixed(2)) : null;
+      recordDistribution(measurements, "openByAlias", scale, openSamples);
+      recordDistribution(measurements, "mutation", scale, mutateSamples);
+      recordDistribution(measurements, "conflict", scale, conflictSamples);
+      evidence[`repetitions_${scale}`] = iterations;
     } finally {
       await close(store);
     }
   }
   return { evidence, measurements };
+}
+
+async function footprintProfile(context) {
+  const measurements = {};
+  const evidence = {
+    scales: PER_SCALES.join(","),
+    discardedWarmupRuns: 1,
+    repetitions: PER_RUN_REPETITIONS,
+    timingMethod: "performance.now monotonic elapsed time",
+    reportedStatistics: "min,p50,p95,max,mean,stddev",
+    rawSamples: {},
+  };
+  for (const scale of PER_SCALES) {
+    const commits = PER_FOOTPRINT_COMMITS[scale];
+    const backupSamples = [];
+    const restoreSamples = [];
+    const storeByteSamples = [];
+    const payloadByteSamples = [];
+    const amplificationSamples = [];
+    for (let repetition = -1; repetition < PER_RUN_REPETITIONS; repetition++) {
+      const store = context.createStore({ fresh: true });
+      await store.initialize();
+      try {
+        const workspace = createSyntheticWorkspace({
+          seed: `${context.config.runId}-fp-${scale}-${repetition}`,
+          scale,
+        });
+        await store.createWorkspace(workspace);
+        for (let generation = 0; generation < commits; generation++) {
+          await store.compareAndSwap({
+            workspaceId: workspace.workspaceId,
+            expectedGeneration: generation,
+            operation: { auditEvent: { actor: "Synthetic Actor", action: `footprint-${generation}` } },
+          });
+        }
+
+        let started = performance.now();
+        const snapshot = await store.backup();
+        const backupMs = performance.now() - started;
+
+        const target = context.createStore({ fresh: true });
+        await target.initialize();
+        started = performance.now();
+        await target.restore(snapshot);
+        const restoreMs = performance.now() - started;
+        assert.equal(
+          (await target.readWorkspace(workspace.workspaceId)).generation,
+          commits,
+        );
+        await close(target);
+
+        if (repetition >= 0) {
+          const storeBytes = context.durable ? directorySizeBytes(store.root) : 0;
+          const payloadBytes = Buffer.byteLength(JSON.stringify(snapshot));
+          backupSamples.push(backupMs);
+          restoreSamples.push(restoreMs);
+          storeByteSamples.push(storeBytes);
+          payloadByteSamples.push(payloadBytes);
+          amplificationSamples.push(payloadBytes ? storeBytes / payloadBytes : 0);
+        }
+      } finally {
+        await close(store);
+      }
+    }
+    recordDistribution(measurements, "backup", scale, backupSamples);
+    recordDistribution(measurements, "restore", scale, restoreSamples);
+    recordDistribution(measurements, "store", scale, storeByteSamples, "Bytes");
+    recordDistribution(measurements, "payload", scale, payloadByteSamples, "Bytes");
+    recordDistribution(measurements, "writeAmplification", scale, amplificationSamples, "Ratio");
+    evidence.rawSamples[scale] = {
+      backupMs: backupSamples,
+      restoreMs: restoreSamples,
+      storeBytes: storeByteSamples,
+      payloadBytes: payloadByteSamples,
+      writeAmplification: amplificationSamples,
+    };
+  }
+  return { evidence, measurements };
+}
+
+async function providerPerformance(context) {
+  if (!["onedrive", "ado", "github"].includes(context.config.backingPath) ||
+      context.config.dryRun !== false) {
+    return { blocked: BLOCKED_REASONS["S0-PER-004"] };
+  }
+  const measurements = {};
+  const evidence = {
+    scales: PER_SCALES.join(","),
+    warmupIterations: PER_WARMUP_ITERATIONS,
+    timingMethod: "performance.now monotonic elapsed time",
+    reportedStatistics: "min,p50,p95,max,mean,stddev",
+    byteMethod: "UTF-8 application payload bytes submitted or consumed",
+    rawSamples: {},
+  };
+
+  for (const scale of PER_SCALES) {
+    const iterations = PROVIDER_PER_ITERATIONS[scale];
+    const store = context.createStore({ fresh: true });
+    const setupStarted = performance.now();
+    await store.initialize();
+    const observer = context.createStore({ fresh: true });
+    await observer.initialize();
+    try {
+      const workspace = createSyntheticWorkspace({
+        seed: `provider-per-${scale}-${context.config.runId}`,
+        scale,
+      });
+      await store.createWorkspace(workspace);
+      let generation = 0;
+      const warmupStarted = performance.now();
+      for (let warmup = 0; warmup < PER_WARMUP_ITERATIONS; warmup++) {
+        await store.readWorkspace(workspace.workspaceId);
+      }
+      measurements[`setupMs_${scale}`] = performance.now() - setupStarted;
+      measurements[`warmupMs_${scale}`] = performance.now() - warmupStarted;
+
+      const samples = [];
+      const discoverySamples = [];
+      const deltas = [];
+      for (let iteration = 0; iteration < iterations; iteration++) {
+        const before = store.providerTelemetry();
+        const observerBefore = observer.providerTelemetry();
+        const started = performance.now();
+        await store.compareAndSwap({
+          workspaceId: workspace.workspaceId,
+          expectedGeneration: generation,
+          operation: {
+            auditEvent: { actor: "Synthetic Provider Perf", action: `mutation-${iteration}` },
+          },
+        });
+        samples.push(performance.now() - started);
+        generation++;
+        const discoveryStarted = performance.now();
+        const discoveryDeadline = discoveryStarted + 30_000;
+        let observed;
+        do {
+          observed = await observer.readWorkspace(workspace.workspaceId);
+          if (observed.generation < generation) {
+            assert.ok(performance.now() < discoveryDeadline, "Collaborator discovery exceeded 30 seconds");
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        } while (observed.generation < generation);
+        discoverySamples.push(performance.now() - discoveryStarted);
+        const writerDelta = telemetryDelta(before, store.providerTelemetry());
+        const observerDelta = telemetryDelta(observerBefore, observer.providerTelemetry());
+        deltas.push({
+          requests: writerDelta.requests + observerDelta.requests,
+          requestBytes: writerDelta.requestBytes + observerDelta.requestBytes,
+          responseBytes: writerDelta.responseBytes + observerDelta.responseBytes,
+          transferredBytes: writerDelta.transferredBytes + observerDelta.transferredBytes,
+          throttleResponses: writerDelta.throttleResponses + observerDelta.throttleResponses,
+          retries: writerDelta.retries + observerDelta.retries,
+        });
+      }
+
+      recordDistribution(measurements, "remoteCas", scale, samples);
+      recordDistribution(measurements, "collaboratorDiscovery", scale, discoverySamples);
+      evidence[`repetitions_${scale}`] = iterations;
+      evidence[`requestsPerMutation_${scale}`] = Number(
+        mean(deltas.map((item) => item.requests)).toFixed(3),
+      );
+      evidence[`bytesPerMutation_${scale}`] = Number(
+        mean(deltas.map((item) => item.transferredBytes)).toFixed(3),
+      );
+      evidence[`throttleResponses_${scale}`] = deltas.reduce(
+        (sum, item) => sum + item.throttleResponses,
+        0,
+      );
+      evidence[`retries_${scale}`] = deltas.reduce((sum, item) => sum + item.retries, 0);
+      evidence[`retryAfterSeconds_${scale}`] = deltas.flatMap((item) => item.retryAfterSeconds || []);
+      evidence[`backoffMs_${scale}`] = deltas.reduce((sum, item) => sum + (item.backoffMs || 0), 0);
+      evidence[`requestCount_${scale}`] = deltas.reduce((sum, item) => sum + item.requests, 0);
+      evidence[`requestBytes_${scale}`] = deltas.reduce((sum, item) => sum + item.requestBytes, 0);
+      evidence[`responseBytes_${scale}`] = deltas.reduce((sum, item) => sum + item.responseBytes, 0);
+      evidence.rawSamples[scale] = {
+        remoteCasMs: samples,
+        collaboratorDiscoveryMs: discoverySamples,
+        requestsPerMutation: deltas.map((item) => item.requests),
+        transferredBytesPerMutation: deltas.map((item) => item.transferredBytes),
+        requestBytesPerMutation: deltas.map((item) => item.requestBytes),
+        responseBytesPerMutation: deltas.map((item) => item.responseBytes),
+        retriesPerMutation: deltas.map((item) => item.retries),
+      };
+    } finally {
+      const cleanupStarted = performance.now();
+      await close(observer);
+      await close(store);
+      measurements[`cleanupMs_${scale}`] = performance.now() - cleanupStarted;
+    }
+  }
+
+  const throttle = context.createStore({ fresh: true });
+  await throttle.initialize();
+  try {
+    const workspace = createSyntheticWorkspace({
+      seed: `provider-throttle-${context.config.runId}`,
+      scale: "small",
+    });
+    await throttle.createWorkspace(workspace);
+    const before = throttle.providerTelemetry();
+    const started = performance.now();
+    throttle.injectFault("throttle");
+    await assert.rejects(
+      throttle.compareAndSwap({
+        workspaceId: workspace.workspaceId,
+        expectedGeneration: 0,
+        operation: { auditEvent: { actor: "Synthetic Provider Perf", action: "throttle" } },
+      }),
+      (error) => typeof error.code === "string" && error.code !== "generation_conflict",
+    );
+    measurements.throttleFailureLatencyMs = performance.now() - started;
+    const delta = telemetryDelta(before, throttle.providerTelemetry());
+    evidence.throttleResponses = delta.throttleResponses;
+    evidence.throttleRetries = delta.retries;
+    evidence.throttleRetryAfterSeconds = delta.retryAfterSeconds;
+    evidence.throttleBackoffMs = delta.backoffMs;
+    evidence.throttleBehavior = "typed failure; no success-shaped state";
+  } finally {
+    await close(throttle);
+  }
+
+  return { evidence, measurements };
+}
+
+async function syncedFolderCompatibility(context) {
+  if (process.platform !== "win32") {
+    return { blocked: "Blocked — requires a Windows OneDrive sync-client profile." };
+  }
+  const syncRoot = process.env.S0_ONEDRIVE_SYNC_ROOT;
+  if (!syncRoot || !fs.existsSync(syncRoot)) {
+    return { blocked: BLOCKED_REASONS["S0-BCK-006"] };
+  }
+  const root = path.join(syncRoot, `tippani-s0-sync-${context.config.runId}-${Date.now().toString(36)}`);
+  const file = path.join(root, "workspace.json");
+  fs.mkdirSync(root, { recursive: true });
+  const payload = JSON.stringify({ syntheticData: true, generation: 0 }) + "\n";
+  try {
+    const started = performance.now();
+    const first = fs.openSync(file, "wx");
+    fs.writeFileSync(first, payload, "utf8");
+    fs.fsyncSync(first);
+    fs.closeSync(first);
+    const createMs = performance.now() - started;
+
+    const left = fs.openSync(file, "r+");
+    const right = fs.openSync(file, "r+");
+    try {
+      fs.writeFileSync(left, JSON.stringify({ syntheticData: true, generation: 1, actor: "client-1" }) + "\n", "utf8");
+      fs.fsyncSync(left);
+      fs.writeFileSync(right, JSON.stringify({ syntheticData: true, generation: 1, actor: "client-2" }) + "\n", "utf8");
+      fs.fsyncSync(right);
+    } finally {
+      fs.closeSync(left);
+      fs.closeSync(right);
+    }
+    const observed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const siblingFiles = fs.readdirSync(root).filter((name) => name !== "workspace.json");
+    return {
+      evidence: {
+        syncClientState: process.env.S0_SYNC_CLIENT_STATE || "running",
+        probe: "same-device simultaneous file handles in a synced folder",
+        observedActor: observed.actor,
+        conflictFilesCreated: siblingFiles.length,
+        providerApiCasUsed: false,
+        limitation: "Compatibility probe only; a second synced device is required for true sync-conflict evidence.",
+      },
+      measurements: { syncedFolderCreateMs: createMs },
+    };
+  } finally {
+    try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+}
+
+async function complexityRubric(context) {
+  if (context.config.adapter === "reference-memory") {
+    return { na: "The reference-memory adapter validates the harness and is not an architecture candidate." };
+  }
+  const assessment = complexityAssessment(context.config);
+  return {
+    evidence: {
+      scale: assessment.rubric.scale,
+      ...assessment.scores,
+      rationale: assessment.evidence,
+      total: assessment.total,
+      mean: Number((assessment.total / assessment.rubric.dimensions.length).toFixed(3)),
+    },
+  };
 }
 
 // --- Milestone B additions -------------------------------------------------
@@ -1286,6 +1577,7 @@ export const SCENARIO_IMPLEMENTATIONS = Object.freeze({
   "S0-COL-001": (context) =>
     (context.durable ? crossProcessRace(context, 3) : oneWinner(context, 2)),
   "S0-BCK-001": atomicReplaceDurability,
+  "S0-BCK-006": syncedFolderCompatibility,
   "S0-COR-001": corruptStateDetected,
   "S0-COR-002": duplicateAliasRestoreRejected,
   "S0-COR-003": unsupportedSchemaRejected,
@@ -1312,6 +1604,8 @@ export const SCENARIO_IMPLEMENTATIONS = Object.freeze({
   "S0-PER-001": startupMeasurement,
   "S0-PER-002": latencyProfile,
   "S0-PER-003": footprintProfile,
+  "S0-PER-004": providerPerformance,
+  "S0-PER-005": complexityRubric,
 });
 
 // Scenarios that no implementation can honestly claim yet. They must report

@@ -2,6 +2,7 @@
   "configurationId": "CFG-PROVIDER-ONEDRIVE-DRYRUN",
   "adapter": "onedrive",
   "backingPath": "onedrive",
+  "applicabilityProfile": "onedrive",
   "platform": "windows-ntfs",
   "scale": "small",
   "runId": "s0-provider-onedrive-dryrun",
@@ -37,19 +38,7 @@
     ],
     "cleanup": {
       "manifestId": "syn-cleanup-s0-provider-onedrive-dryrun",
-      "expiresAt": "2000-01-02T00:00:00.000Z"
+      "retentionHours": 24
     }
-  },
-  "scenarioIds": [
-    "S0-BCK-002",
-    "S0-BCK-005",
-    "S0-COL-004",
-    "S0-COL-005",
-    "S0-REC-003",
-    "S0-REC-004",
-    "S0-MIG-004",
-    "S0-BKP-003",
-    "S0-BKP-004",
-    "S0-PER-004"
-  ]
+  }
 }

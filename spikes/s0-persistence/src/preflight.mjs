@@ -34,6 +34,16 @@ function positiveNumber(value) {
   return Number.isFinite(value) && value > 0;
 }
 
+export function normalizedCleanup(sandbox, now = new Date()) {
+  const cleanup = sandbox?.cleanup;
+  if (!cleanup) return null;
+  const retentionHours = Number(cleanup.retentionHours);
+  const expiresAt = positiveNumber(retentionHours)
+    ? new Date(now.getTime() + (retentionHours * 60 * 60 * 1000)).toISOString()
+    : cleanup.expiresAt;
+  return { ...cleanup, expiresAt };
+}
+
 function findEmbeddedSecrets(value, path = "$", errors = []) {
   if (!value || typeof value !== "object") return errors;
   for (const [key, item] of Object.entries(value)) {
@@ -88,7 +98,10 @@ export function validatePreflight(config) {
     if (!Array.isArray(sandbox.dryRunOperations) || sandbox.dryRunOperations.length === 0) {
       errors.push("Provider dry-run operation manifest is required");
     }
-    if (!sandbox.cleanup?.expiresAt || !sandbox.cleanup?.manifestId) {
+    const cleanup = normalizedCleanup(sandbox);
+    if (!cleanup?.manifestId || !cleanup?.expiresAt ||
+      !Number.isFinite(Date.parse(cleanup.expiresAt)) ||
+      (!positiveNumber(Number(sandbox.cleanup?.retentionHours)) && Date.parse(cleanup.expiresAt) <= Date.now())) {
       errors.push("Provider cleanup manifest and expiry are required");
     }
     if (!sandbox.coordinates || typeof sandbox.coordinates !== "object") {
@@ -99,7 +112,7 @@ export function validatePreflight(config) {
   return errors;
 }
 
-export function assertPreflight(config) {
+export function assertPreflight(config, now = new Date()) {
   const errors = validatePreflight(config);
   if (errors.length) throw new PreflightError(errors);
   return {
@@ -117,6 +130,8 @@ export function assertPreflight(config) {
       namespace: config.sandbox.namespace || null,
       defaultBranchExcluded: config.sandbox.defaultBranchExcluded === true,
       corporateFallbackDisabled: true,
+      dryRunOperations: [...(config.sandbox.dryRunOperations || [])],
+      cleanup: normalizedCleanup(config.sandbox, now),
     },
     budgets: { ...config.budgets },
   };

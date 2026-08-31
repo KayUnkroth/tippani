@@ -1,96 +1,111 @@
-# S0 candidate comparison
+# S0 architecture-mapping handoff
 
-**Generated:** 2026-08-19T13:38:29.212Z
+**Generated:** 2026-08-31T23:47:29.669Z
 **Host:** win32 x64 node 24.14.0
+**Final ADR status:** Accepted
+**ADR decision:** Approved by Kay Unkroth on 2026-08-31.
+**Recommended architecture shape:** Hybrid — one local engine plus provider-native CAS transports behind `IWorkspaceStore`.
+**Concrete mapping recommendation:** Hybrid SQLite + provider-native CAS; see [ADR](../../ADR-s0-persistence-architecture.md).
 
-Absolute gates decide eligibility. Relative metrics rank only the
-configurations that already pass every executed absolute gate, and an
-unexecuted gate counts as missing evidence rather than a pass.
+Eligibility is evaluated per engine/backing-path configuration and then rolled up into
+candidate mappings. Gates assigned to another configuration are **Not applicable**, not
+missing. `N/A` is reserved for a reviewer-approved contract-level exception inside an
+applicable configuration. `Blocked`, `Incomplete`, and `Not executed` remain distinct.
 
-## Absolute gates
+Relative metrics may compare eligible mappings; they do not override an absolute gate.
 
-| Configuration | Adapter | Passed | Failed | Unresolved | N/A | Not executed | Eligible |
-|---|---|---:|---:|---:|---:|---:|---|
-| CFG-LOCAL-CAS | local-cas | 38 | 0 | 0 | 0 | 14 | Incomplete |
-| CFG-LOCAL-SQLITE | local-sqlite | 37 | 0 | 0 | 1 | 14 | Incomplete |
+## Applicability-aware configuration matrix
 
-## Relative metrics
+| Configuration | Engine | Backing path | Applicable absolute | Pass | Fail | Blocked / incomplete | N/A | Not executed | Not applicable (absolute) | Eligibility | Evidence |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
+| Local SQLite | SQLite | Local filesystem | 38 | 37 | 0 | 0 | 1 | 0 | 14 | Yes | [report](../CFG-LOCAL-SQLITE/outcome.md) · [raw](../CFG-LOCAL-SQLITE/raw-results.json) |
+| Local generation-CAS envelope | Generation-CAS envelope | Local filesystem | 38 | 38 | 0 | 0 | 0 | 0 | 14 | Yes | [report](../CFG-LOCAL-CAS/outcome.md) · [raw](../CFG-LOCAL-CAS/raw-results.json) |
+| OneDrive generation-CAS envelope | Generation-CAS envelope | OneDrive | 18 | 18 | 0 | 0 | 0 | 0 | 34 | Yes | [report](../CFG-ONEDRIVE-LIVE/outcome.md) · [raw](../CFG-ONEDRIVE-LIVE/raw-results.json) |
+| ADO generation-CAS envelope | Generation-CAS envelope | Azure DevOps repository | 18 | 18 | 0 | 0 | 0 | 0 | 34 | Yes | [report](../CFG-ADO-LIVE/outcome.md) · [raw](../CFG-ADO-LIVE/raw-results.json) |
+| GitHub generation-CAS envelope | Generation-CAS envelope | GitHub repository | 18 | 18 | 0 | 0 | 0 | 0 | 34 | Yes | [report](../CFG-GITHUB-LIVE/outcome.md) · [raw](../CFG-GITHUB-LIVE/raw-results.json) |
 
-| Metric | CFG-LOCAL-CAS | CFG-LOCAL-SQLITE |
-|---|---:|---:|
-| **small scale** |  |  |
-| Cold initialize (ms) | 1.269 | 12.965 |
-| Create workspace (ms) | 2.289 | 0.883 |
-| Open by alias p50 (ms) | 2.434 | 0.042 |
-| Mutation p50 (ms) | 6.555 | 0.538 |
-| Mutation p95 (ms) | 9.069 | 0.994 |
-| Conflict detect p50 (ms) | 4.316 | 0.103 |
-| Backup (ms) | 2.425 | 0.111 |
-| Restore (ms) | 3.846 | 0.643 |
-| Store bytes | 3827 | 411816 |
-| Write amplification | 1.01 | 106.58 |
-| **medium scale** |  |  |
-| Cold initialize (ms) | 3.114 | 12.540 |
-| Create workspace (ms) | 2.906 | 0.903 |
-| Open by alias p50 (ms) | 2.734 | 0.084 |
-| Mutation p50 (ms) | 7.086 | 0.959 |
-| Mutation p95 (ms) | 11.721 | 1.617 |
-| Conflict detect p50 (ms) | 4.969 | 0.159 |
-| Backup (ms) | 1.918 | 0.173 |
-| Restore (ms) | 4.071 | 1.136 |
-| Store bytes | 25064 | 584856 |
-| Write amplification | 1 | 22.97 |
-| **stress scale** |  |  |
-| Cold initialize (ms) | 1.457 | 14.061 |
-| Create workspace (ms) | 11.773 | 10.261 |
-| Open by alias p50 (ms) | 13.997 | 1.477 |
-| Mutation p50 (ms) | 28.669 | 9.962 |
-| Mutation p95 (ms) | 31.770 | 11.687 |
-| Conflict detect p50 (ms) | 13.460 | 1.831 |
-| Backup (ms) | 6.167 | 1.700 |
-| Restore (ms) | 18.900 | 4.931 |
-| Store bytes | 471767 | 2599536 |
-| Write amplification | 1 | 5.42 |
+## Configuration evidence matrix
 
-## Absolute gates not passed
+| Configuration | Correctness | Collaboration | Recovery | Performance | Complexity | Recommendation | Conditions |
+|---|---|---|---|---|---|---|---|
+| [Local SQLite](../CFG-LOCAL-SQLITE/outcome.md) | [Pass](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [Pass](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [Pass](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [Pass](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [14/40](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [Component eligible](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) | [None](../CFG-LOCAL-SQLITE/outcome.md) ([raw](../CFG-LOCAL-SQLITE/raw-results.json)) |
+| [Local generation-CAS envelope](../CFG-LOCAL-CAS/outcome.md) | [Pass](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [Pass](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [Pass](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [Pass](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [19/40](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [Component eligible](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) | [None](../CFG-LOCAL-CAS/outcome.md) ([raw](../CFG-LOCAL-CAS/raw-results.json)) |
+| [OneDrive generation-CAS envelope](../CFG-ONEDRIVE-LIVE/outcome.md) | [Pass](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [Pass](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [Pass](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [Pass](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [24/40](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [Component eligible](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) | [None](../CFG-ONEDRIVE-LIVE/outcome.md) ([raw](../CFG-ONEDRIVE-LIVE/raw-results.json)) |
+| [ADO generation-CAS envelope](../CFG-ADO-LIVE/outcome.md) | [Pass](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [Pass](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [Pass](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [Pass](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [24/40](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [Component eligible](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) | [None](../CFG-ADO-LIVE/outcome.md) ([raw](../CFG-ADO-LIVE/raw-results.json)) |
+| [GitHub generation-CAS envelope](../CFG-GITHUB-LIVE/outcome.md) | [Pass](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [Pass](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [Pass](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [Pass](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [26/40](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [Component eligible](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) | [None](../CFG-GITHUB-LIVE/outcome.md) ([raw](../CFG-GITHUB-LIVE/raw-results.json)) |
 
-### CFG-LOCAL-CAS
+## Candidate architecture mappings
 
-- **Not executed** `S0-COL-002` — Two users on a shared backing path cannot silently overwrite each other
-- **Not executed** `S0-COL-003` — Two devices reconnecting from different generations receive deterministic conflict/reload behavior
-- **Not executed** `S0-COL-004` — Remote success with a lost response is reconciled without duplicate generation or false failure
-- **Not executed** `S0-COL-005` — Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite
-- **Not executed** `S0-COL-006` — Another collaborator discovers a committed generation through the backing path change mechanism
-- **Not executed** `S0-BCK-002` — OneDrive ETag/version preconditions reject stale updates and support version recovery
-- **Not executed** `S0-BCK-003` — ADO object/ref preconditions reject stale updates and preserve one auditable generation commit
-- **Not executed** `S0-BCK-004` — GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit
-- **Not executed** `S0-BCK-005` — Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state
-- **Not executed** `S0-MIG-004` — Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt
-- **Not executed** `S0-BKP-003` — Shared-backing history/export recovers a known generation without rewriting newer valid history
-- **Not executed** `S0-BKP-004` — Restored shared workspace establishes one explicit authoritative head
-- **Not executed** `S0-REC-003` — Provider outage/auth/throttle/lost-response recovery reconciles authoritative state
-- **Not executed** `S0-REC-004` — Local offline cache reconciles against newer authority without silent overwrite
+| Mapping | Components | Absolute status | Recommendation | Conditions |
+|---|---|---|---|---|
+| Hybrid SQLite + provider-native CAS | CFG-LOCAL-SQLITE + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Eligible | Candidate for ADR selection | None |
+| Generation-CAS envelope on every backing path | CFG-LOCAL-CAS + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Eligible | Candidate for ADR selection | None |
 
-### CFG-LOCAL-SQLITE
+## Exact open gates and evidence requirements
 
-- **N/A** `S0-REC-002` — SQLite owns locking internally and recovers a killed writer through its own journal on open, so the external stale-lock-file recovery scenario does not apply to its contract (reviewer-approved).
-- **Not executed** `S0-COL-002` — Two users on a shared backing path cannot silently overwrite each other
-- **Not executed** `S0-COL-003` — Two devices reconnecting from different generations receive deterministic conflict/reload behavior
-- **Not executed** `S0-COL-004` — Remote success with a lost response is reconciled without duplicate generation or false failure
-- **Not executed** `S0-COL-005` — Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite
-- **Not executed** `S0-COL-006` — Another collaborator discovers a committed generation through the backing path change mechanism
-- **Not executed** `S0-BCK-002` — OneDrive ETag/version preconditions reject stale updates and support version recovery
-- **Not executed** `S0-BCK-003` — ADO object/ref preconditions reject stale updates and preserve one auditable generation commit
-- **Not executed** `S0-BCK-004` — GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit
-- **Not executed** `S0-BCK-005` — Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state
-- **Not executed** `S0-MIG-004` — Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt
-- **Not executed** `S0-BKP-003` — Shared-backing history/export recovers a known generation without rewriting newer valid history
-- **Not executed** `S0-BKP-004` — Restored shared workspace establishes one explicit authoritative head
-- **Not executed** `S0-REC-003` — Provider outage/auth/throttle/lost-response recovery reconciles authoritative state
-- **Not executed** `S0-REC-004` — Local offline cache reconciles against newer authority without silent overwrite
+| Configuration | Gate | State | Owner | Evidence required | Component report |
+|---|---|---|---|---|---|
+| — | — | None | — | — | — |
 
-## Scope
+## Evidence ownership
 
-- Platform: Windows/NTFS only. macOS and Linux are `Blocked — no runner`.
-- Backing path: local filesystem only. OneDrive, ADO, and GitHub remain unexecuted.
-- These results cannot close the cross-platform or collaboration criteria.
+| Evidence | Owner |
+|---|---|
+| Local correctness, recovery, and performance | S0 implementation owner |
+| Provider correctness, collaboration, recovery, and performance | S0 provider test owner |
+| Synced-folder compatibility | Windows sync-client test owner |
+| macOS and Linux portability | Cross-platform test owner |
+| Architecture selection | S0 decision owner |
+
+## Relative measurements
+
+Only configurations inside eligible mappings are candidates for comparison.
+
+| Metric | Local SQLite | Local generation-CAS envelope | OneDrive generation-CAS envelope | ADO generation-CAS envelope | GitHub generation-CAS envelope |
+|---|---:|---:|---:|---:|---:|
+| Cold initialize p50, small (ms) | 16.891 | 2.890 | — | — | — |
+| Cold initialize variability, small (stddev ms) | 1.175 | 0.646 | — | — | — |
+| Open by alias p50, small (ms) | 0.099 | 4.669 | — | — | — |
+| Mutation p50, small (ms) | 1.103 | 17.134 | — | — | — |
+| Mutation p95, small (ms) | 2.017 | 22.198 | — | — | — |
+| Mutation variability, small (stddev ms) | 0.375 | 2.342 | — | — | — |
+| Backup p50, small (ms) | 0.298 | 2.541 | — | — | — |
+| Restore p50, small (ms) | 1.587 | 8.261 | — | — | — |
+| Store size p50, small (bytes) | 411816.000 | 3863.000 | — | — | — |
+| Write amplification p50, small | 106.578 | 1.005 | — | — | — |
+| Remote CAS p50, small (ms) | — | — | 1465.663 | 533.956 | 1046.468 |
+| Remote CAS p95, small (ms) | — | — | 1641.563 | 618.869 | 1207.750 |
+| Collaborator discovery p50, small (ms) | — | — | 919.082 | 100.197 | 451.888 |
+| Provider requests per mutation, small | — | — | 5 | 4 | 5 |
+| Provider bytes per mutation, small | — | — | 11546.167 | 9513.167 | 17269.333 |
+| Throttle behavior | — | — | typed failure; no success-shaped state | typed failure; no success-shaped state | typed failure; no success-shaped state |
+| Common complexity burden (of 40) | 14 | 19 | 24 | 24 | 26 |
+
+### Measurement method
+
+- Timer: `performance.now()` monotonic elapsed time.
+- Local cold-start, backup, restore, size, and amplification: one discarded warm-up run plus five measured runs per scale.
+- Local operation latency: three warm-up operations; 40 small, 20 medium, and 8 stress repetitions.
+- Provider operation latency: three warm-up reads; 6 small, 4 medium, and 2 stress repetitions.
+- Statistics: minimum, p50, p95, maximum, mean, standard deviation, with raw samples in each configuration JSON.
+- Provider bytes count UTF-8 application payload bytes submitted or consumed; HTTP/TLS header overhead is excluded.
+- Network characteristics and provider region are recorded from `S0_NETWORK_DESCRIPTION` and `S0_PROVIDER_REGION` when supplied.
+
+## Decision conditions and evidence
+
+| Condition | Owner | Evidence required |
+|---|---|---|
+| macOS/APFS local and cache execution | Cross-platform test owner | [Completed workflow evidence](../cross-platform/workflow-run.json) and two macOS reports |
+| Linux local and cache execution | Cross-platform test owner | [Completed workflow evidence](../cross-platform/workflow-run.json) and two Linux reports |
+| OneDrive synced-folder compatibility (`S0-BCK-006`) | Windows sync-client test owner | [Separate compatibility result](../CFG-ONEDRIVE-SYNC/outcome.md); true second-device sync remains a documented limitation |
+| Architecture decision | Kay Unkroth | [Approved ADR](../../ADR-s0-persistence-architecture.md) selecting the hybrid SQLite mapping |
+
+## Sign-off
+
+| Role | Person | Date | Decision / comments |
+|---|---|---|---|
+| S0 implementation owner | | | |
+| Provider test owner | | | |
+| Cross-platform test owner | | | |
+| Independent reviewer | | | |
+| ADR approver | Kay Unkroth | 2026-08-31 | Approved |

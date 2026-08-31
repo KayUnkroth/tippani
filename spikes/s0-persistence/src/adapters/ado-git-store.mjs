@@ -24,6 +24,9 @@ import {
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { ProviderTelemetry } from "./provider-telemetry.mjs";
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
 const API = "api-version=7.1";
@@ -53,6 +56,7 @@ export class AdoGitStore {
     this.fetchImpl = fetchImpl || globalThis.fetch;
     this.operations = [];
     this.liveProviderCalls = 0;
+    this.telemetry = new ProviderTelemetry();
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this._fault = null;
     this.offline = false;
@@ -81,20 +85,35 @@ export class AdoGitStore {
     if (!this._getToken) throw new WorkspaceStoreError("No ADO token supplied", "no_token");
     if (!this.org || !this.project || !this.repo) throw new WorkspaceStoreError("org/project/repo required for a live run", "no_coordinates");
     this.liveProviderCalls++;
+    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
       this._fault = null;
-      if (fault.kind === "throttle") return { ok: false, status: 429, text: async () => "throttled", json: async () => ({}) };
-      if (fault.kind === "auth-expiry") return { ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) };
-      if (fault.kind === "outage") throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
+      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
+      if (fault.kind === "outage") {
+        this.telemetry.recordFailure("outage");
+        throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
         await this.fetchImpl(url, { method, headers: { Authorization: `Bearer ${token0}`, ...headers }, body });
+        this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
     }
     const token = await this._getToken();
-    return this.fetchImpl(url, { method, headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers }, body });
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return this.telemetry.wrapResponse(await this.fetchImpl(url, { method, headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers }, body }));
+      } catch (error) {
+        if (method !== "GET" || attempt >= 2 || !(error instanceof TypeError)) throw error;
+        const delayMs = 250 * (attempt + 1);
+        this.telemetry.recordRetry();
+        this.telemetry.recordBackoff(delayMs);
+        await sleep(delayMs);
+      }
+    }
   }
 
   async getTip() {
@@ -335,6 +354,10 @@ export class AdoGitStore {
 
   liveProviderCallCount() {
     return this.liveProviderCalls;
+  }
+
+  providerTelemetry() {
+    return this.telemetry.snapshot();
   }
 
   async close() {

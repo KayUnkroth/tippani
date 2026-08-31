@@ -1,4 +1,4 @@
-// Live single-identity provider gate implementations (OneDrive, ADO, GitHub).
+// Live provider gate implementations (OneDrive, ADO, GitHub).
 // Each runs only against a live provider backing path; anywhere else (local,
 // dry-run) it reports Blocked with the gate's precise prerequisite, so the same
 // catalog id stays honest across configurations.
@@ -7,13 +7,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { createStore } from "./adapters/registry.mjs";
+import { raceWorkers, runWorker } from "./process-runner.mjs";
 import { createSyntheticWorkspace } from "./synthetic-fixtures.mjs";
 import { WorkspaceConflictError } from "./workspace-contract.mjs";
 import { BLOCKED_REASONS } from "./provider-gates.mjs";
 
 // A live provider = a real OneDrive/ADO/GitHub backing path, not a dry-run.
-function isLiveOneDrive(context) {
+function isLiveProvider(context) {
   return ["onedrive", "ado", "github"].includes(context.config.backingPath)
     && context.config.dryRun === false;
 }
@@ -29,8 +31,290 @@ async function seedWorkspace(store, seed) {
   return workspace;
 }
 
+function providerWorkerArgs(context, workspaceId, extra = []) {
+  return [
+    `--adapter=${context.adapter || context.config.adapter || context.config.backingPath}`,
+    "--provider-live=true",
+    `--run-id=${context.config.runId}`,
+    `--workspace=${workspaceId}`,
+    ...extra,
+  ];
+}
+
+async function inProcessClient(context, {
+  mode,
+  workspaceId,
+  expectedGeneration = 0,
+  targetGeneration = 1,
+  actor,
+}) {
+  const store = context.createStore();
+  await store.initialize();
+  try {
+    if (mode === "stale-reconcile") {
+      let conflict;
+      try {
+        await store.compareAndSwap({
+          workspaceId,
+          expectedGeneration,
+          operation: { auditEvent: { actor, action: "stale-write" } },
+        });
+        throw new Error("Expected the stale provider write to conflict");
+      } catch (error) {
+        if (error?.code !== "generation_conflict") throw error;
+        conflict = { expected: error.expectedGeneration, actual: error.actualGeneration };
+      }
+      const current = await store.readWorkspace(workspaceId);
+      const next = await store.compareAndSwap({
+        workspaceId,
+        expectedGeneration: current.generation,
+        operation: { auditEvent: { actor, action: "reconciled-write" } },
+      });
+      return {
+        code: 0,
+        report: {
+          status: "reconciled",
+          conflict,
+          reloadedGeneration: current.generation,
+          generation: next.generation,
+          actor,
+        },
+      };
+    }
+    if (mode === "observe") {
+      const started = performance.now();
+      const current = await store.readWorkspace(workspaceId);
+      assert.ok(current.generation >= targetGeneration);
+      return {
+        code: 0,
+        report: {
+          status: "observed",
+          generation: current.generation,
+          discoveryMs: performance.now() - started,
+          actor,
+        },
+      };
+    }
+    try {
+      const next = await store.compareAndSwap({
+        workspaceId,
+        expectedGeneration,
+        operation: { auditEvent: { actor, action: "concurrent-write" } },
+      });
+      return { code: 0, report: { status: "committed", generation: next.generation, actor } };
+    } catch (error) {
+      if (error?.code !== "generation_conflict") throw error;
+      return {
+        code: 0,
+        report: {
+          status: "conflict",
+          code: error.code,
+          expected: error.expectedGeneration,
+          actual: error.actualGeneration,
+          actor,
+        },
+      };
+    }
+  } finally {
+    await store.close().catch(() => {});
+  }
+}
+
+async function runProviderClient(context, options) {
+  if (context.inProcessProviderClients) return inProcessClient(context, options);
+  const args = providerWorkerArgs(context, options.workspaceId, [
+    `--mode=${options.mode}`,
+    `--expected=${options.expectedGeneration ?? 0}`,
+    `--target=${options.targetGeneration ?? 1}`,
+    `--actor=${options.actor}`,
+  ]);
+  return runWorker(args);
+}
+
+async function commitProviderClient(context, store, options) {
+  let last = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    last = await runProviderClient(context, { ...options, mode: "write-now" });
+    if (last.report?.status === "committed") return last;
+    const current = await store.readWorkspace(options.workspaceId);
+    if (current.generation === options.expectedGeneration + 1 &&
+        current.private.audit.some((entry) => entry.actor === options.actor)) {
+      return {
+        ...last,
+        report: {
+          status: "committed",
+          generation: current.generation,
+          actor: options.actor,
+          reconciledAfterClientFailure: true,
+        },
+      };
+    }
+    assert.equal(current.generation, options.expectedGeneration);
+  }
+  assert.fail(`Provider client did not commit after retries: ${last?.report?.status || "no report"}`);
+}
+
+async function reconcileProviderClient(context, store, options) {
+  let last = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    last = await runProviderClient(context, { ...options, mode: "stale-reconcile" });
+    if (last.report?.status === "reconciled") return last;
+    const current = await store.readWorkspace(options.workspaceId);
+    if (current.generation === options.expectedGeneration + 2 &&
+        current.private.audit.some((entry) => entry.actor === options.actor)) {
+      return {
+        ...last,
+        report: {
+          status: "reconciled",
+          conflict: { expected: options.expectedGeneration, actual: options.expectedGeneration + 1 },
+          reloadedGeneration: options.expectedGeneration + 1,
+          generation: current.generation,
+          actor: options.actor,
+          reconciledAfterClientFailure: true,
+        },
+      };
+    }
+    assert.equal(current.generation, options.expectedGeneration + 1);
+  }
+  assert.fail(`Provider client did not reconcile after retries: ${last?.report?.status || "no report"}`);
+}
+
+async function raceProviderClients(context, workspaceId, actors, expectedGeneration = 0) {
+  if (context.inProcessProviderClients) {
+    return Promise.all(actors.map((actor) => inProcessClient(context, {
+      mode: "write-now",
+      workspaceId,
+      expectedGeneration,
+      actor,
+    })));
+  }
+  return raceWorkers(actors.map((actor) => providerWorkerArgs(context, workspaceId, [
+    "--mode=write",
+    `--expected=${expectedGeneration}`,
+    `--actor=${actor}`,
+  ])));
+}
+
+async function twoClientNoSilentOverwrite(context) {
+  if (!isLiveProvider(context)) return blocked(context);
+  const store = context.createStore();
+  await store.initialize();
+  const workspace = await seedWorkspace(store, `col002-${context.config.runId}`);
+  try {
+    const actors = ["Synthetic Client 1", "Synthetic Client 2"];
+    const results = await raceProviderClients(context, workspace.workspaceId, actors);
+    const committed = results.filter((result) => result.report?.status === "committed");
+    const conflicts = results.filter((result) => result.report?.status === "conflict");
+    const unexpected = results.filter((result) =>
+      !["committed", "conflict"].includes(result.report?.status));
+    assert.deepEqual(unexpected, [], "A provider client failed for an unexpected reason");
+    assert.equal(committed.length, 1, "Exactly one client process must win the generation");
+    assert.equal(conflicts.length, 1, "The other client process must receive a typed conflict");
+    const durable = await store.readWorkspace(workspace.workspaceId);
+    assert.equal(durable.generation, 1);
+    assert.equal(durable.private.audit.length, 1);
+    return {
+      evidence: {
+        accounts: 1,
+        clientProcesses: 2,
+        logicalActors: actors.join(","),
+        winners: 1,
+        staleConflicts: 1,
+        noSilentOverwrite: true,
+      },
+    };
+  } finally {
+    await store.deleteWorkspace(workspace.workspaceId).catch(() => {});
+    await store.close().catch(() => {});
+  }
+}
+
+async function twoClientReconnect(context) {
+  if (!isLiveProvider(context)) return blocked(context);
+  const store = context.createStore();
+  await store.initialize();
+  const workspace = await seedWorkspace(store, `col003-${context.config.runId}`);
+  try {
+    const first = await commitProviderClient(context, store, {
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      actor: "Synthetic Client 1",
+    });
+    assert.equal(first.report?.status, "committed");
+    assert.equal(first.report?.generation, 1);
+
+    const second = await reconcileProviderClient(context, store, {
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      actor: "Synthetic Client 2",
+    });
+    assert.equal(second.report?.status, "reconciled");
+    assert.equal(second.report?.conflict?.expected, 0);
+    assert.equal(second.report?.reloadedGeneration, 1);
+    assert.equal(second.report?.generation, 2);
+    const durable = await store.readWorkspace(workspace.workspaceId);
+    assert.equal(durable.generation, 2);
+    assert.deepEqual(
+      durable.private.audit.map((entry) => entry.actor),
+      ["Synthetic Client 1", "Synthetic Client 2"],
+    );
+    return {
+      evidence: {
+        accounts: 1,
+        clientProcesses: 2,
+        staleGeneration: 0,
+        reloadedGeneration: 1,
+        reconciledGeneration: 2,
+        deterministicReconnect: true,
+      },
+    };
+  } finally {
+    await store.deleteWorkspace(workspace.workspaceId).catch(() => {});
+    await store.close().catch(() => {});
+  }
+}
+
+async function collaboratorDiscoversGeneration(context) {
+  if (!isLiveProvider(context)) return blocked(context);
+  const store = context.createStore();
+  await store.initialize();
+  const workspace = await seedWorkspace(store, `col006-${context.config.runId}`);
+  try {
+    const writer = await commitProviderClient(context, store, {
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      actor: "Synthetic Client 1",
+    });
+    assert.equal(writer.report?.status, "committed");
+    const observer = await runProviderClient(context, {
+      mode: "observe",
+      workspaceId: workspace.workspaceId,
+      targetGeneration: 1,
+      actor: "Synthetic Client 2",
+    });
+    assert.equal(observer.report?.status, "observed");
+    assert.ok(observer.report?.generation >= 1);
+    return {
+      evidence: {
+        accounts: 1,
+        clientProcesses: 2,
+        changeMechanism: context.config.backingPath === "onedrive"
+          ? "Graph drive-item polling"
+          : context.config.backingPath === "ado"
+            ? "ADO branch/ref and item polling"
+            : "GitHub ref and contents polling",
+        observedGeneration: observer.report.generation,
+      },
+      measurements: { collaboratorDiscoveryMs: observer.report.discoveryMs },
+    };
+  } finally {
+    await store.deleteWorkspace(workspace.workspaceId).catch(() => {});
+    await store.close().catch(() => {});
+  }
+}
+
 async function etagCasStaleWriter(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `bck002-${context.config.runId}`);
@@ -61,7 +345,7 @@ async function etagCasStaleWriter(context) {
 }
 
 async function noSuccessShapedOnFailure(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `bck005-${context.config.runId}`);
@@ -79,14 +363,23 @@ async function noSuccessShapedOnFailure(context) {
       const now = await store.readWorkspace(workspace.workspaceId);
       assert.equal(now.generation, 0, `${kind} must not produce success-shaped state`);
     }
-    return { evidence: { faultsRejected: 3, generationUnchanged: true } };
+    const telemetry = store.providerTelemetry?.() || {};
+    return {
+      evidence: {
+        faultsRejected: 3,
+        generationUnchanged: true,
+        throttleResponses: telemetry.throttleResponses,
+        retries: telemetry.retries,
+        transferredBytes: telemetry.transferredBytes,
+      },
+    };
   } finally {
     await store.deleteWorkspace(workspace.workspaceId).catch(() => {});
   }
 }
 
 async function lostResponseReconcile(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `col004-${context.config.runId}`);
@@ -119,7 +412,7 @@ async function lostResponseReconcile(context) {
 }
 
 async function offlinePendingUntilCas(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const a = context.createStore();
   await a.initialize();
   const workspace = await seedWorkspace(a, `col005-${context.config.runId}`);
@@ -157,7 +450,7 @@ async function offlinePendingUntilCas(context) {
 }
 
 async function offlineCacheReconcile(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const a = context.createStore();
   await a.initialize();
   const workspace = await seedWorkspace(a, `rec004-${context.config.runId}`);
@@ -193,7 +486,7 @@ async function offlineCacheReconcile(context) {
 }
 
 async function recoverAfterFault(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `rec003-${context.config.runId}`);
@@ -223,7 +516,7 @@ async function recoverAfterFault(context) {
 }
 
 async function localToOneDriveRehome(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "s0-rehome-"));
   const local = createStore("local-cas", { storeRoot: root, configurationId: "CFG-REHOME-SRC" });
   await local.initialize();
@@ -253,7 +546,7 @@ async function localToOneDriveRehome(context) {
 }
 
 async function versionHistoryRecover(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `bkp003-${context.config.runId}`);
@@ -269,7 +562,7 @@ async function versionHistoryRecover(context) {
 }
 
 async function restoredOneHead(context) {
-  if (!isLiveOneDrive(context)) return blocked(context);
+  if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `bkp004-${context.config.runId}`);
@@ -292,8 +585,11 @@ export const ONEDRIVE_GATE_IMPLEMENTATIONS = Object.freeze({
   "S0-BCK-003": etagCasStaleWriter,
   "S0-BCK-004": etagCasStaleWriter,
   "S0-BCK-005": noSuccessShapedOnFailure,
+  "S0-COL-002": twoClientNoSilentOverwrite,
+  "S0-COL-003": twoClientReconnect,
   "S0-COL-004": lostResponseReconcile,
   "S0-COL-005": offlinePendingUntilCas,
+  "S0-COL-006": collaboratorDiscoversGeneration,
   "S0-REC-003": recoverAfterFault,
   "S0-REC-004": offlineCacheReconcile,
   "S0-MIG-004": localToOneDriveRehome,

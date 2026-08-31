@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { applicableScenarioIds, applicabilityProfile } from "./applicability.mjs";
 import { createStore as createAdapterStore, isDurable } from "./adapters/registry.mjs";
 import { assertPreflight } from "./preflight.mjs";
 import { SCENARIO_IMPLEMENTATIONS, PENDING_REASONS } from "./scenario-implementations.mjs";
@@ -19,6 +20,56 @@ function errorSummary(error) {
     name: error?.name || "Error",
     code: error?.code || "scenario_failed",
     message: String(error?.message || error),
+  };
+}
+
+const LIVE_PROVIDER_ENV = Object.freeze({
+  onedrive: ["S0_ONEDRIVE_TOKEN", "S0_ONEDRIVE_DRIVE_ID", "S0_ONEDRIVE_FOLDER"],
+  ado: ["S0_ADO_TOKEN", "S0_ADO_ORG", "S0_ADO_PROJECT", "S0_ADO_REPO"],
+  github: ["S0_GITHUB_TOKEN", "S0_GITHUB_OWNER", "S0_GITHUB_REPO"],
+});
+
+function missingProviderEnvironment(config) {
+  if (config.dryRun !== false) return [];
+  return (LIVE_PROVIDER_ENV[config.backingPath] || [])
+    .filter((name) => !process.env[name]);
+}
+
+function requiresLiveProvider(scenarioId) {
+  return !scenarioId.startsWith("S0-SEC-") &&
+    !["S0-PER-005", "S0-BCK-006"].includes(scenarioId);
+}
+
+function environmentDetails(config, runRoot) {
+  const cpu = os.cpus()[0];
+  const providerApiVersion = {
+    onedrive: "Microsoft Graph v1.0",
+    ado: "Azure DevOps Git REST 7.1",
+    github: "GitHub REST 2022-11-28",
+    local: "N/A",
+  }[config.backingPath] || "Not recorded";
+  return {
+    os: `${os.platform()} ${os.release()}`,
+    architecture: os.arch(),
+    cpuModel: cpu?.model || "unknown",
+    logicalCpuCount: os.cpus().length,
+    totalMemoryBytes: os.totalmem(),
+    nodeVersion: process.versions.node,
+    providerApiVersion,
+    configuredPlatform: process.env.S0_PLATFORM_DESCRIPTION || config.platform,
+    filesystem: process.env.S0_FILESYSTEM_DESCRIPTION || "Not recorded",
+    temporaryStoreRoot: path.basename(runRoot),
+    networkCharacteristics: process.env.S0_NETWORK_DESCRIPTION || "Not recorded",
+    providerRegion: process.env.S0_PROVIDER_REGION || "Not recorded",
+    storageCharacteristics: process.env.S0_STORAGE_DESCRIPTION || "Not recorded",
+    syncClientState: process.env.S0_SYNC_CLIENT_STATE || "Not applicable",
+    repositoryProtections: process.env.S0_REPOSITORY_PROTECTIONS || "Not recorded",
+    dependencyVersions: `node=${process.versions.node}; sqlite=${process.versions.sqlite || "built-in"}`,
+    workloadMix: "scenario-defined deterministic small/medium/stress fixtures",
+    knownLimitations: process.env.S0_ENVIRONMENT_LIMITATIONS || "None recorded",
+    processTopology: config.backingPath === "local"
+      ? "Independent OS child processes for concurrency and kill tests"
+      : "Independent OS child processes sharing one provider account for collaboration gates",
   };
 }
 
@@ -75,14 +126,17 @@ export async function runHarness({
   scenarioIds = config.scenarioIds,
   adapterFactory = null,
   writeArtifacts = true,
-  harnessRevision = "s0-harness-v2",
+  harnessRevision = "s0-harness-v3",
 } = {}) {
   validateScenarioCatalog();
-  const preflight = assertPreflight(config);
+  const preflightTime = new Date();
+  const preflight = assertPreflight(config, preflightTime);
+  const applicableIds = applicableScenarioIds(config);
+  const missingProviderEnv = adapterFactory ? [] : missingProviderEnvironment(config);
   const factory = adapterFactory ||
     ((options) => createAdapterStore(config.adapter, options));
 
-  const selected = scenarioIds || Object.keys(SCENARIO_IMPLEMENTATIONS);
+  const selected = scenarioIds || config.scenarioIds || applicableIds;
   const unknown = selected.filter((id) => !scenarioById(id));
   if (unknown.length) throw new Error(`Unknown scenario IDs: ${unknown.join(", ")}`);
   if (selected.length > config.budgets.maxOperations) {
@@ -90,7 +144,7 @@ export async function runHarness({
   }
 
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), `tippani-s0-${config.runId}-`));
-  const startedAt = new Date().toISOString();
+  const startedAt = preflightTime.toISOString();
   const deadline = performance.now() + config.budgets.maxDurationMs;
   const results = [];
 
@@ -122,6 +176,15 @@ export async function runHarness({
           reason: blockedReason ||
             PENDING_REASONS[scenarioId] ||
             "Scenario implementation is not available for this harness stage",
+        });
+        continue;
+      }
+      if (missingProviderEnv.length && requiresLiveProvider(scenarioId)) {
+        results.push({
+          ...base,
+          status: "Blocked",
+          durationMs: 0,
+          reason: `Live provider runtime variables not supplied: ${missingProviderEnv.join(", ")}`,
         });
         continue;
       }
@@ -209,8 +272,11 @@ export async function runHarness({
       runId: config.runId,
       durable: isDurable(config.adapter),
       host: `${process.platform} ${process.arch} node ${process.versions.node}`,
+      applicabilityProfile: applicabilityProfile(config),
     },
     preflight,
+    environment: environmentDetails(config, runRoot),
+    applicableScenarioIds: applicableIds,
     catalogSize: SCENARIOS.length,
     catalog: SCENARIOS.map((scenario) => ({
       id: scenario.id,

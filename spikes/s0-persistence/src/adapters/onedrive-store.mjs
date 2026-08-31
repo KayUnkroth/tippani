@@ -25,8 +25,10 @@ import {
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function encodePath(p) {
   return p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
@@ -55,6 +57,7 @@ export class OneDriveGraphStore {
     this.fetchImpl = fetchImpl || globalThis.fetch;
     this.operations = [];
     this.liveProviderCalls = 0;
+    this.telemetry = new ProviderTelemetry();
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this.etags = new Map();
     this._fault = null;
@@ -84,25 +87,44 @@ export class OneDriveGraphStore {
     if (!this._getToken) throw new WorkspaceStoreError("No Graph token supplied", "no_token");
     if (!this.driveId || !this.baseFolder) throw new WorkspaceStoreError("driveId and folder are required for a live run", "no_coordinates");
     this.liveProviderCalls++;
+    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
       this._fault = null;
-      if (fault.kind === "throttle") return { ok: false, status: 429, json: async () => ({}), text: async () => "throttled" };
-      if (fault.kind === "auth-expiry") return { ok: false, status: 401, json: async () => ({}), text: async () => "unauthorized" };
-      if (fault.kind === "outage") throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), json: async () => ({}), text: async () => "throttled" });
+      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, json: async () => ({}), text: async () => "unauthorized" });
+      if (fault.kind === "outage") {
+        this.telemetry.recordFailure("outage");
+        throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
+      }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
         await this.fetchImpl(`${GRAPH}${path}`, { method, headers: { Authorization: `Bearer ${token0}`, ...headers }, body });
+        this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
     }
     const token = await this._getToken();
-    const resp = await this.fetchImpl(`${GRAPH}${path}`, {
-      method,
-      headers: { Authorization: `Bearer ${token}`, ...headers },
-      body,
-    });
-    return resp;
+    const resolvedPath = path.replace(
+      `/drives/${this.driveId}/`,
+      this.driveId === "me" ? "/me/drive/" : `/drives/${this.driveId}/`,
+    );
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const resp = await this.fetchImpl(`${GRAPH}${resolvedPath}`, {
+          method,
+          headers: { Authorization: `Bearer ${token}`, ...headers },
+          body,
+        });
+        return this.telemetry.wrapResponse(resp);
+      } catch (error) {
+        if (method !== "GET" || attempt >= 2 || !(error instanceof TypeError)) throw error;
+        const delayMs = 250 * (attempt + 1);
+        this.telemetry.recordRetry();
+        this.telemetry.recordBackoff(delayMs);
+        await sleep(delayMs);
+      }
+    }
   }
 
   async ensureSubfolder() {
@@ -318,7 +340,12 @@ export class OneDriveGraphStore {
     if (!versResp.ok) throw new CorruptWorkspaceStoreError(`versions failed: ${versResp.status}`);
     const versions = (await versResp.json()).value || [];
     for (const v of versions) {
-      const contentResp = await this.graph("GET", `/drives/${this.driveId}/items/${itemId}/versions/${v.id}/content`);
+      let contentResp;
+      try {
+        contentResp = await this.graph("GET", `/drives/${this.driveId}/items/${itemId}/versions/${v.id}/content`);
+      } catch {
+        continue;
+      }
       if (!contentResp.ok) continue;
       let ws;
       try { ws = JSON.parse(await contentResp.text()); } catch { continue; }
@@ -364,6 +391,10 @@ export class OneDriveGraphStore {
 
   liveProviderCallCount() {
     return this.liveProviderCalls;
+  }
+
+  providerTelemetry() {
+    return this.telemetry.snapshot();
   }
 
   async close() {

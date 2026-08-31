@@ -1,6 +1,6 @@
 {
   "configurationId": "CFG-GITHUB-LIVE",
-  "runId": "s0-github-live-20260816003913",
+  "runId": "cfg-github-live-aggregate",
   "adapter": "github",
   "backingPath": "github",
   "syntheticDataOnly": true,
@@ -9,10 +9,22 @@
     "kind": "provider-live",
     "identityLabel": "Live delegated identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "tippani-s0:s0-github-live-20260816003913",
-    "namespace": "tippani-s0/s0-github-live-20260816003913",
+    "ownershipMarker": "redacted-per-campaign",
+    "namespace": "redacted-per-campaign",
     "defaultBranchExcluded": true,
-    "corporateFallbackDisabled": true
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "connect",
+      "get-contents",
+      "put-contents",
+      "list-contents",
+      "list-commits",
+      "delete-ref"
+    ],
+    "cleanup": {
+      "manifestId": "see-campaign-preflights",
+      "expiresAt": "see-campaign-preflights"
+    }
   },
   "budgets": {
     "maxOperations": 100,

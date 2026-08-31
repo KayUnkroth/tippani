@@ -1,34 +1,47 @@
 {
   "schemaVersion": 1,
   "syntheticData": true,
-  "harnessRevision": "s0-harness-v2",
-  "startedAt": "2026-08-16T04:13:11.180Z",
-  "completedAt": "2026-08-16T04:13:11.182Z",
+  "harnessRevision": "s0-harness-v3",
+  "startedAt": "2026-08-31T22:24:49.056Z",
+  "completedAt": "2026-08-31T22:24:49.114Z",
   "configuration": {
-    "configurationId": "CFG-PROVIDER-ADO-DRYRUN",
-    "adapter": "ado",
-    "backingPath": "ado",
+    "configurationId": "CFG-ONEDRIVE-LIVE",
+    "adapter": "onedrive",
+    "backingPath": "onedrive",
     "platform": "windows-ntfs",
     "scale": "small",
-    "runId": "s0-provider-ado-dryrun",
+    "runId": "s0-onedrive-live",
     "durable": false,
-    "host": "win32 x64 node 24.14.0"
+    "host": "win32 x64 node 24.14.0",
+    "applicabilityProfile": "onedrive"
   },
   "preflight": {
-    "configurationId": "CFG-PROVIDER-ADO-DRYRUN",
-    "runId": "s0-provider-ado-dryrun",
-    "adapter": "ado",
-    "backingPath": "ado",
+    "configurationId": "CFG-ONEDRIVE-LIVE",
+    "runId": "s0-onedrive-live",
+    "adapter": "onedrive",
+    "backingPath": "onedrive",
     "syntheticDataOnly": true,
     "sandbox": {
       "approved": true,
-      "kind": "provider-template",
-      "identityLabel": "Synthetic Sandbox Identity (template - replace before live run)",
+      "kind": "provider-live",
+      "identityLabel": "Live delegated identity (supplied at runtime)",
       "identityVerified": true,
-      "ownershipMarker": "tippani-s0:s0-provider-ado-dryrun",
-      "namespace": "tippani-s0/s0-provider-ado-dryrun",
+      "ownershipMarker": "tippani-s0:s0-onedrive-live",
+      "namespace": "tippani-s0/s0-onedrive-live",
       "defaultBranchExcluded": true,
-      "corporateFallbackDisabled": true
+      "corporateFallbackDisabled": true,
+      "dryRunOperations": [
+        "ensure-folder",
+        "put-content",
+        "get-content",
+        "list-children",
+        "delete-folder"
+      ],
+      "cleanup": {
+        "manifestId": "syn-cleanup-s0-onedrive-live",
+        "retentionHours": 24,
+        "expiresAt": "2026-09-01T22:24:49.056Z"
+      }
     },
     "budgets": {
       "maxOperations": 100,
@@ -37,6 +50,49 @@
       "maxBytes": 104857600
     }
   },
+  "environment": {
+    "os": "win32 10.0.26200",
+    "architecture": "x64",
+    "cpuModel": "Intel(R) Core(TM) Ultra 7 165H",
+    "logicalCpuCount": 22,
+    "totalMemoryBytes": 33983225856,
+    "nodeVersion": "24.14.0",
+    "providerApiVersion": "Microsoft Graph v1.0",
+    "configuredPlatform": "windows-ntfs",
+    "temporaryStoreRoot": "tippani-s0-s0-onedrive-live-aKQL1B",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "Not recorded",
+    "syncClientState": "Personal OneDrive sync client running; same-device compatibility probe",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=24.14.0; sqlite=3.51.2",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "None recorded",
+    "processTopology": "Independent OS child processes sharing one provider account for collaboration gates"
+  },
+  "applicableScenarioIds": [
+    "S0-COL-002",
+    "S0-COL-003",
+    "S0-COL-004",
+    "S0-COL-005",
+    "S0-COL-006",
+    "S0-BCK-005",
+    "S0-MIG-004",
+    "S0-BKP-003",
+    "S0-BKP-004",
+    "S0-REC-003",
+    "S0-REC-004",
+    "S0-SEC-001",
+    "S0-SEC-002",
+    "S0-SEC-003",
+    "S0-SEC-004",
+    "S0-SEC-005",
+    "S0-SEC-006",
+    "S0-PER-004",
+    "S0-PER-005",
+    "S0-BCK-002",
+    "S0-BCK-006"
+  ],
   "catalogSize": 58,
   "catalog": [
     {
@@ -332,132 +388,22 @@
   ],
   "results": [
     {
-      "scenarioId": "S0-COL-002",
-      "title": "Two users on a shared backing path cannot silently overwrite each other",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox with two test identities on one shared backing path."
-    },
-    {
-      "scenarioId": "S0-COL-003",
-      "title": "Two devices reconnecting from different generations receive deterministic conflict/reload behavior",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox exercised from two devices/generations with reconnect."
-    },
-    {
-      "scenarioId": "S0-COL-004",
-      "title": "Remote success with a lost response is reconciled without duplicate generation or false failure",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox with lost-response fault injection against a real commit."
-    },
-    {
-      "scenarioId": "S0-COL-005",
-      "title": "Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox with offline write then authoritative CAS confirmation."
-    },
-    {
-      "scenarioId": "S0-COL-006",
-      "title": "Another collaborator discovers a committed generation through the backing path change mechanism",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox change-discovery feed observed by a second collaborator."
-    },
-    {
-      "scenarioId": "S0-BCK-002",
-      "title": "OneDrive ETag/version preconditions reject stale updates and support version recovery",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved non-production OneDrive/SharePoint sandbox with ≥2 test identities for ETag/version precondition and version-restore tests."
-    },
-    {
-      "scenarioId": "S0-BCK-003",
-      "title": "ADO object/ref preconditions reject stale updates and preserve one auditable generation commit",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved disposable Azure DevOps sandbox repository and least-privilege identity for object/ref precondition and auditable-commit tests."
-    },
-    {
-      "scenarioId": "S0-BCK-004",
-      "title": "GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved disposable GitHub sandbox repository and repository-scoped identity for object/ref precondition and auditable-commit tests."
-    },
-    {
-      "scenarioId": "S0-BCK-005",
-      "title": "Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox with outage/throttle/auth-expiry/quota fault injection."
-    },
-    {
       "scenarioId": "S0-BCK-006",
       "title": "Synced-folder conflict behavior is measured separately from provider-API CAS",
       "criterionType": "relative",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires a Windows OneDrive sync-client profile to measure synced-folder conflicts."
-    },
-    {
-      "scenarioId": "S0-BKP-003",
-      "title": "Shared-backing history/export recovers a known generation without rewriting newer valid history",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox version history/export to recover a known generation."
-    },
-    {
-      "scenarioId": "S0-BKP-004",
-      "title": "Restored shared workspace establishes one explicit authoritative head",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox to prove a restored shared workspace has one authoritative head."
-    },
-    {
-      "scenarioId": "S0-REC-003",
-      "title": "Provider outage/auth/throttle/lost-response recovery reconciles authoritative state",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox with outage/auth/throttle/lost-response recovery."
-    },
-    {
-      "scenarioId": "S0-REC-004",
-      "title": "Local offline cache reconciles against newer authority without silent overwrite",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox plus a local offline cache to reconcile against newer authority."
-    },
-    {
-      "scenarioId": "S0-MIG-004",
-      "title": "Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt",
-      "criterionType": "absolute",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires a live an approved live OneDrive/ADO/GitHub sandbox destination for local-to-shared rehome."
-    },
-    {
-      "scenarioId": "S0-PER-004",
-      "title": "Provider requests, bytes, throttling, CAS latency, and collaborator discovery are measured comparably",
-      "criterionType": "relative",
-      "status": "Blocked",
-      "durationMs": 0,
-      "reason": "Blocked — requires an approved live OneDrive/ADO/GitHub sandbox to measure request count, bytes, throttling, and CAS latency."
+      "status": "Pass",
+      "durationMs": 42.90689999999995,
+      "evidence": {
+        "syncClientState": "Personal OneDrive sync client running; same-device compatibility probe",
+        "probe": "same-device simultaneous file handles in a synced folder",
+        "observedActor": "client-2",
+        "conflictFilesCreated": 0,
+        "providerApiCasUsed": false,
+        "limitation": "Compatibility probe only; a second synced device is required for true sync-conflict evidence."
+      },
+      "measurements": {
+        "syncedFolderCreateMs": 12.617099999999937
+      }
     }
   ]
 }

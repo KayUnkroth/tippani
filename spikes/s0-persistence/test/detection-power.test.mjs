@@ -305,12 +305,10 @@ await check("a failing absolute gate blocks the recommendation", async () => {
   assert(report.includes("S0-CON-001"));
 });
 
-await check("unimplemented scenarios are reported, never silently skipped", async () => {
-  // S0-PER-005 (complexity rubric) is neither implemented nor provider-blocked,
-  // so it must surface as Incomplete rather than being silently skipped.
+await check("reference-only complexity is N/A, never fabricated", async () => {
   const run = await runWith(ReferenceMemoryWorkspaceStore, ["S0-PER-005"]);
-  assert.equal(run.results[0].status, "Incomplete");
-  assert(renderOutcomeReport(run).includes("Incomplete"));
+  assert.equal(run.results[0].status, "N/A");
+  assert(renderOutcomeReport(run).includes("Not applicable"));
 });
 
 await check("results are deterministic across repeated runs", async () => {

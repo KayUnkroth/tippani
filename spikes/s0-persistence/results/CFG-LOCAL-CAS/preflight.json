@@ -12,7 +12,9 @@
     "ownershipMarker": "tippani-s0:s0-local-cas-windows",
     "namespace": null,
     "defaultBranchExcluded": false,
-    "corporateFallbackDisabled": true
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [],
+    "cleanup": null
   },
   "budgets": {
     "maxOperations": 100,
