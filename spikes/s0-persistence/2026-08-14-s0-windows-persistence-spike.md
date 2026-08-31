@@ -210,11 +210,11 @@ Any missing preflight item is `Blocked`. Convenience, existing access, or a succ
 
 | Platform | Minimum coverage | Status |
 |---|---|---|
-| Windows | Supported Windows release on NTFS; local private workspace, shared-workspace cache, and OneDrive synced-folder compatibility probe | **Executable now** |
-| macOS | Supported macOS release on APFS; local private workspace and shared-workspace cache | **Deferred — no runner available** |
-| Linux | Supported Linux distribution on ext4 or the CI/runtime default filesystem; local private workspace and shared-workspace cache | **Deferred — no runner available** |
+| Windows | Supported Windows release on NTFS; local private workspace, shared-workspace cache, and OneDrive synced-folder compatibility probe | **Complete — NTFS** |
+| macOS | Supported macOS release on APFS; local private workspace and shared-workspace cache | **Complete — APFS** |
+| Linux | Supported Linux distribution on ext4 or the CI/runtime default filesystem; local private workspace and shared-workspace cache | **Complete — runner-reported ext-family filesystem** |
 
-macOS and Linux runners do not exist in the current environment, so S0 executes on Windows/NTFS first. This is a deferral, not a reduction in scope: the store contract and scenario catalog stay platform-neutral, the harness must run unchanged once runners exist, and the ADR records macOS and Linux as `Blocked — no runner` rather than as passes. A Windows-only result may select the local implementation for Windows delivery, but it cannot close the cross-platform portability criterion.
+The unchanged local harness ran on Windows/NTFS, macOS/APFS, and the Linux runner's detected ext-family filesystem. Each platform result is retained separately; no Windows result is reused as cross-platform evidence.
 
 WSL is not a separate product target for S0. If tested, it is recorded as a Linux compatibility result rather than evidence for native Windows behavior.
 
@@ -758,4 +758,4 @@ The ADR must link every summary cell to a completed configuration report and raw
 
 S0 is complete only when the viable local SQLite, local envelope, OneDrive envelope, ADO envelope, and GitHub envelope configurations run the applicable automated correctness and collaboration harnesses; cross-platform local/cache results are recorded; measured results and failures are published; and an approved ADR selects the persistence architecture and implementation mapping behind one workspace-store contract. The ADR must also record authoritative-head, offline, rehome, and support policies. R1 design must not begin before that approval.
 
-Windows/NTFS is the first executable platform. macOS and Linux are deferred until runners exist and are recorded as `Blocked — no runner`. R1 may begin on an approved Windows-scoped ADR provided the ADR states that the cross-platform portability criterion remains open, no macOS or Linux result is represented as a pass, and the harness is rerun unchanged on those platforms before the store is declared cross-platform.
+The exit condition is met: all five configurations have applicable evidence, the unchanged local harness passed on Windows/NTFS, macOS/APFS, and the Linux runner's detected ext-family filesystem, and the accepted ADR selects the hybrid SQLite plus provider-native generation-CAS mapping.

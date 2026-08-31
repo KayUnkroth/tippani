@@ -72,7 +72,7 @@ candidates only after all applicable absolute gates pass.
   amplification discard one warm-up run and retain five measured runs per
   scale. Local operation latency uses three warm-ups and 40/20/8 measured
   iterations at small/medium/stress scale. Provider latency uses three warm-ups
-  and 10/6/3 measured iterations. Reports include minimum, p50, p95, maximum,
+  and 6/4/2 measured iterations. Reports include minimum, p50, p95, maximum,
   mean, standard deviation, environment details, provider request/application-
   payload byte counts, throttling behavior, collaborator-discovery latency, and
   the same eight-dimension complexity/operability rubric for every candidate.
