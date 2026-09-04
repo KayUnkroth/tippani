@@ -31,6 +31,8 @@ import {
   withResolvedProviderIdentity,
 } from "../src/preflight.mjs";
 import { BLOCKED_REASONS } from "../src/provider-gates.mjs";
+import { providerWorkerArgs } from "../src/onedrive-gates.mjs";
+import { runWorker } from "../src/process-runner.mjs";
 import { runHarness } from "../src/runner.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
 import { OperationBudget } from "../src/operation-budget.mjs";
@@ -626,6 +628,121 @@ await check("runner persists and meters cleanup under the shared approved deadli
     }
     globalThis.fetch = previousFetch;
     fs.rmSync(outputDir, { recursive: true, force: true });
+  }
+});
+
+await check("provider child reuses the persisted marker nonce under enforcePreflight", async () => {
+  const runId = "s0-provider-child-marker-context";
+  const root = path.join(spikeRoot, ".test-state", runId);
+  const manifestPath = path.join(root, "cleanup-manifest.json");
+  const targetHash = providerTargetHash({
+    provider: "onedrive",
+    identity: "onedrive:probe-identity",
+    coordinates: { driveId: "drive-a", folder: "Synthetic" },
+    namespace: `tippani-s0/${runId}`,
+  });
+  const config = {
+    adapter: "onedrive",
+    backingPath: "onedrive",
+    runId,
+    budgets: {
+      maxOperations: 20,
+      maxObjects: 20,
+      maxBytes: 100000,
+      maxDurationMs: 5000,
+    },
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      namespace: `tippani-s0/${runId}`,
+      effectiveTargetHash: targetHash,
+      coordinates: { driveId: "drive-a", folder: "Synthetic" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  };
+  const descriptor = new OneDriveGraphStore({
+    dryRun: true,
+    driveId: "drive-a",
+    folderPath: "Synthetic",
+    runId,
+    ownershipMarker: config.sandbox.ownershipMarker,
+    cleanupManifestId: config.sandbox.cleanup.manifestId,
+    effectiveTargetHash: targetHash,
+  });
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  const previousEnv = {
+    S0_PREFLIGHT_APPROVER: process.env.S0_PREFLIGHT_APPROVER,
+    S0_PREFLIGHT_APPROVED_AT: process.env.S0_PREFLIGHT_APPROVED_AT,
+    S0_PREFLIGHT_APPROVAL_REFERENCE: process.env.S0_PREFLIGHT_APPROVAL_REFERENCE,
+    S0_PREFLIGHT_TARGET_HASH: process.env.S0_PREFLIGHT_TARGET_HASH,
+  };
+  try {
+    const authorization = createCleanupAuthorization(config, descriptor, {
+      filePath: manifestPath,
+    });
+    const markerContext = {
+      manifestNonce: authorization.manifest.manifestNonce,
+      manifestId: authorization.manifest.manifestId,
+      effectiveTargetHash: authorization.manifest.effectiveTargetHash,
+      ownershipMarker: authorization.manifest.ownershipMarker,
+      namespace: config.sandbox.namespace,
+    };
+    Object.assign(process.env, {
+      S0_PREFLIGHT_APPROVER: "Synthetic Reviewer",
+      S0_PREFLIGHT_APPROVED_AT: "2026-09-04T17:00:00.000Z",
+      S0_PREFLIGHT_APPROVAL_REFERENCE: "syn-provider-child-marker",
+      S0_PREFLIGHT_TARGET_HASH: targetHash,
+    });
+    const context = {
+      adapter: "onedrive",
+      config,
+      primaryRoot: root,
+      providerMarkerContext: markerContext,
+    };
+    const budget = new OperationBudget({ limits: config.budgets });
+    const args = providerWorkerArgs(context, "syn-ws-provider-child", [
+      "--mode=provider-marker-probe",
+      "--probe-drive-id=drive-a",
+      "--probe-folder=Synthetic",
+      "--probe-identity=onedrive:probe-identity",
+    ]);
+    const before = budget.snapshot();
+    const success = await runWorker(args, { budget, timeoutMs: 5000 });
+    const after = budget.snapshot();
+    assert.equal(success.code, 0, success.stderr);
+    assert.equal(success.report?.status, "provider-marker-probed");
+    assert.equal(success.report?.enforcePreflight, true);
+    assert.equal(success.report?.manifestNonce, markerContext.manifestNonce);
+    assert.equal(success.report?.marker.markerCreated, true);
+    assert.equal(
+      success.report?.marker.markerRequestNonce,
+      markerContext.manifestNonce,
+    );
+    assert.equal(success.report?.marker.meteredOperation, true);
+    assert.equal(after.operations, before.operations + 4);
+    assert.equal(after.objects, before.objects + 3);
+
+    const mismatch = await runWorker(providerWorkerArgs(context, "syn-ws-provider-child", [
+      "--mode=provider-marker-probe",
+      "--probe-existing-marker=true",
+      "--probe-remote-marker-nonce=foreign-nonce",
+      "--probe-drive-id=drive-a",
+      "--probe-folder=Synthetic",
+      "--probe-identity=onedrive:probe-identity",
+    ]), {
+      budget: new OperationBudget({ limits: config.budgets }),
+      timeoutMs: 5000,
+    });
+    assert.equal(mismatch.code, 1);
+    assert.equal(mismatch.report?.code, "cleanup_ownership_mismatch");
+    assert.equal(mismatch.report?.manifestNonce, markerContext.manifestNonce);
+    assert.equal(mismatch.report?.marker.markerCreated, false);
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 

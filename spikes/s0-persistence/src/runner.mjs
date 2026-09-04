@@ -102,6 +102,7 @@ function createScenarioContext({
   signal,
   deadlineAt,
   safetyBudget,
+  providerMarkerContext,
 }) {
   const roots = [];
   const openStores = [];
@@ -130,6 +131,7 @@ function createScenarioContext({
     signal,
     deadlineAt,
     safetyBudget,
+    providerMarkerContext,
     primaryRoot,
     createStore,
     // Kept so negative-control tests can inject their own factory.
@@ -284,6 +286,13 @@ export async function runHarness({
         signal: abortController.signal,
         deadlineAt,
         safetyBudget,
+        providerMarkerContext: cleanupAuthorization ? {
+          manifestNonce: cleanupAuthorization.manifest.manifestNonce,
+          manifestId: cleanupAuthorization.manifest.manifestId,
+          effectiveTargetHash: cleanupAuthorization.manifest.effectiveTargetHash,
+          ownershipMarker: cleanupAuthorization.manifest.ownershipMarker,
+          namespace: config.sandbox?.namespace,
+        } : null,
       });
       const scenarioStarted = performance.now();
       try {

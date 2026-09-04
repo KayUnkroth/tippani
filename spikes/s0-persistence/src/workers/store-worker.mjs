@@ -39,6 +39,11 @@ const op = argOf("op", "audit");
 const alias = argOf("alias", `syn-alias-crash-${process.pid}`);
 const deadlineMs = Number(argOf("deadline-ms", "30000"));
 const deferInitialize = argOf("defer-initialize", "false") === "true";
+const cleanupManifestNonce = argOf("cleanup-manifest-nonce");
+const cleanupManifestId = argOf("cleanup-manifest-id");
+const effectiveTargetHash = argOf("effective-target-hash");
+const ownershipMarker = argOf("ownership-marker", `tippani-s0:${runId}`);
+const namespace = argOf("namespace", `tippani-s0/${runId}`);
 const abortController = new AbortController();
 const deadlineTimer = providerLive
   ? setTimeout(() => abortController.abort(), deadlineMs)
@@ -168,18 +173,135 @@ if (mode === "lock-reclaim-crash") {
   }
 }
 
+let providerProbe = null;
 let store;
-try {
+const providerOptions = providerLive ? {
+  dryRun: false,
+  enforcePreflight: true,
+  safetyBudget,
+  signal: abortController.signal,
+  sandbox: {
+    namespace,
+    ownershipMarker,
+    coordinates: {},
+    cleanup: {
+      manifestId: cleanupManifestId,
+      manifestNonce: cleanupManifestNonce,
+    },
+    approval: {
+      approver: process.env.S0_PREFLIGHT_APPROVER,
+      approvedAt: process.env.S0_PREFLIGHT_APPROVED_AT,
+      reference: process.env.S0_PREFLIGHT_APPROVAL_REFERENCE,
+      targetHash: effectiveTargetHash || process.env.S0_PREFLIGHT_TARGET_HASH,
+    },
+  },
+} : {};
+
+if (mode === "provider-marker-probe") {
+  if (adapter !== "onedrive") throw new Error("Provider marker probe requires OneDrive");
+  const existingMarker = argOf("probe-existing-marker", "false") === "true";
+  const remoteMarkerNonce = argOf("probe-remote-marker-nonce", cleanupManifestNonce);
+  let folderCreates = 0;
+  let markerCreated = false;
+  let markerRequestNonce = null;
+  let markerVerified = false;
+  let meteredOperation = false;
+  const fetchImpl = async (url, options) => {
+    if (options.method === "POST") {
+      folderCreates++;
+      return existingMarker
+        ? { ok: false, status: 409, json: async () => ({}) }
+        : { ok: true, status: 201, json: async () => ({}) };
+    }
+    if (options.method === "PUT") {
+      markerCreated = true;
+      markerRequestNonce = JSON.parse(options.body).manifestNonce;
+      return { ok: true, status: 201, json: async () => ({}) };
+    }
+    if (options.method === "GET" && url.includes("/items/probe-marker/content")) {
+      markerVerified = true;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ...store.runMarker(),
+          manifestNonce: remoteMarkerNonce,
+        }),
+      };
+    }
+    if (options.method === "GET" && url.includes(".tippani-s0-run")) {
+      markerVerified = true;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ id: "probe-marker", eTag: "probe-marker-etag" }),
+      };
+    }
+    if (options.method === "GET" && url.includes(":/children")) {
+      meteredOperation = true;
+      return { ok: true, status: 200, json: async () => ({ value: [] }) };
+    }
+    throw new Error(`Unexpected provider marker probe request: ${options.method} ${url}`);
+  };
+  providerProbe = {
+    state: () => ({
+      folderCreates,
+      markerCreated,
+      markerRequestNonce,
+      markerVerified,
+      meteredOperation,
+    }),
+  };
   store = createStore(adapter, {
     storeRoot,
     runId,
-    ...(providerLive ? {
-      dryRun: false,
-      enforcePreflight: true,
-      safetyBudget,
-      signal: abortController.signal,
-    } : {}),
+    ...providerOptions,
+    driveId: argOf("probe-drive-id", "probe-drive"),
+    folderPath: argOf("probe-folder", "Probe"),
+    getToken: async () => "probe-token",
+    identityResolver: async () => ({
+      subject: argOf("probe-identity", "onedrive:probe-identity"),
+    }),
+    fetchImpl,
   });
+} else {
+  store = createStore(adapter, {
+    storeRoot,
+    runId,
+    ...providerOptions,
+  });
+}
+
+if (mode === "provider-marker-probe") {
+  try {
+    await store.initialize();
+    await store.listWorkspaces();
+    report({
+      status: "provider-marker-probed",
+      enforcePreflight: store.enforcePreflight,
+      manifestNonce: store.cleanupManifestNonce,
+      marker: providerProbe.state(),
+      telemetry: store.providerTelemetry?.(),
+      budget: safetyBudget.snapshot?.(),
+    });
+    await store.close();
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    process.exit(0);
+  } catch (error) {
+    report({
+      status: "error",
+      code: error?.code,
+      message: error?.message,
+      manifestNonce: store?.cleanupManifestNonce,
+      marker: providerProbe?.state(),
+    });
+    try { await store?.close(); } catch { /* best effort */ }
+    if (deadlineTimer) clearTimeout(deadlineTimer);
+    process.exit(1);
+  }
+}
+
+try {
   if (mode === "checksum-backfill-crash") {
     await store.initialize({ faultInjector: crashInjector() });
     report({ status: "backfilled-unexpectedly" });

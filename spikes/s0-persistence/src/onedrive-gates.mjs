@@ -68,10 +68,20 @@ async function seedWorkspace(store, seed) {
   return workspace;
 }
 
-function providerWorkerArgs(context, workspaceId, extra = []) {
+export function providerWorkerArgs(context, workspaceId, extra = []) {
   const remainingMs = Number.isFinite(context.deadlineAt)
     ? Math.max(1, Math.floor(context.deadlineAt - performance.now()))
     : context.config.budgets?.maxDurationMs || 30_000;
+  const marker = context.providerMarkerContext || {
+    manifestNonce: context.config.sandbox?.cleanup?.manifestNonce,
+    manifestId: context.config.sandbox?.cleanup?.manifestId,
+    effectiveTargetHash: context.config.sandbox?.effectiveTargetHash,
+    ownershipMarker: context.config.sandbox?.ownershipMarker,
+    namespace: context.config.sandbox?.namespace,
+  };
+  if (!marker.manifestNonce) {
+    throw new Error("Provider child process requires the persisted cleanup manifest nonce");
+  }
   return [
     `--adapter=${context.adapter || context.config.adapter || context.config.backingPath}`,
     "--provider-live=true",
@@ -82,6 +92,11 @@ function providerWorkerArgs(context, workspaceId, extra = []) {
     `--max-objects=${context.config.budgets?.maxObjects || 10000}`,
     `--max-bytes=${context.config.budgets?.maxBytes || 104857600}`,
     `--deadline-ms=${remainingMs}`,
+    `--cleanup-manifest-nonce=${marker.manifestNonce}`,
+    `--cleanup-manifest-id=${marker.manifestId || ""}`,
+    `--effective-target-hash=${marker.effectiveTargetHash || ""}`,
+    `--ownership-marker=${marker.ownershipMarker || `tippani-s0:${context.config.runId}`}`,
+    `--namespace=${marker.namespace || `tippani-s0/${context.config.runId}`}`,
     ...extra,
   ];
 }
