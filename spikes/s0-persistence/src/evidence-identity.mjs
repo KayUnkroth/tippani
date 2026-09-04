@@ -70,6 +70,19 @@ export function applicabilityRevision() {
   }))}`;
 }
 
+export function normalizedSyncProfile(profile) {
+  if (!profile || typeof profile !== "object") return null;
+  return {
+    syncRootEnv: profile.syncRootEnv ?? null,
+    clientIdentityEnv: profile.clientIdentityEnv ?? null,
+    clientStateEnv: profile.clientStateEnv ?? null,
+    requiredClientState: profile.requiredClientState ?? null,
+    requireIndependentClients: profile.requireIndependentClients === true,
+    retainedEvidenceEnv: profile.retainedEvidenceEnv ?? null,
+    independentClientsEnv: profile.independentClientsEnv ?? null,
+  };
+}
+
 export function decisionConfigRevision(config) {
   const sandbox = config?.sandbox || {};
   return `sha256:${sha256(stableJson({
@@ -91,6 +104,7 @@ export function decisionConfigRevision(config) {
       corporateFallbackDisabled: sandbox.corporateFallbackDisabled,
       defaultBranchExcluded: sandbox.defaultBranchExcluded,
       dryRunOperations: sandbox.dryRunOperations,
+      syncProfile: normalizedSyncProfile(sandbox.syncProfile),
     },
   }))}`;
 }

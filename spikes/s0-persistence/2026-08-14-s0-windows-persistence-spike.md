@@ -449,7 +449,7 @@ For a OneDrive backing path, test:
 - Simultaneous updates from different users.
 - Delta/change discovery, delayed notification, and client reconnect.
 - Throttling, quota, permission changes, offline writes, lost responses, and version restore.
-- The synced-folder path separately, including sync conflict artifacts; do not treat it as equivalent to provider-API CAS.
+- The synced-folder path separately, including sync conflict artifacts; do not treat it as equivalent to provider-API CAS. `S0-BCK-006` closes only on a signed cross-client evidence artifact (two independent sync clients on separate devices, distinct immutable client IDs, observed timestamps/operations, conflict/recovery outcome, and an approval digest bound to the approved sync-target hash and config revision); a same-device handle probe or a self-reported client count stays `Incomplete`.
 
 For ADO and GitHub backing paths, test:
 

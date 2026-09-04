@@ -258,6 +258,15 @@ function pooledEvidence(representative, results, rawSamples) {
   return evidence;
 }
 
+export function combineStatuses(statuses) {
+  return statuses.includes("Fail") ? "Fail"
+    : statuses.includes("Blocked") ? "Blocked"
+      : statuses.includes("Incomplete") ? "Incomplete"
+        : statuses.length && statuses.every((item) => item === "N/A") ? "N/A"
+          : statuses.length && statuses.every((item) => item === "Pass") ? "Pass"
+            : "Incomplete";
+}
+
 export function combineResults(campaigns, expectedIds) {
   return expectedIds.map((scenarioId) => {
     const positioned = campaigns.map((campaign) => ({
@@ -268,12 +277,7 @@ export function combineResults(campaigns, expectedIds) {
     }));
     const results = positioned.map(({ result }) => result);
     const statuses = results.map((result) => result.status);
-    const status = statuses.includes("Fail") ? "Fail"
-      : statuses.includes("Blocked") ? "Blocked"
-        : statuses.includes("Incomplete") ? "Incomplete"
-          : statuses.every((item) => item === "N/A") ? "N/A"
-            : statuses.every((item) => item === "Pass") ? "Pass"
-              : "Incomplete";
+    const status = combineStatuses(statuses);
     const representative = results.find((result) => result.status === status) || results[0];
     const rawSamples = pooledRawSamples(results);
     return {

@@ -30,8 +30,7 @@
       "clientStateEnv": "S0_SYNC_CLIENT_STATE",
       "requiredClientState": "verified-signed-in",
       "requireIndependentClients": true,
-      "retainedEvidenceEnv": "S0_SYNC_CONFLICT_EVIDENCE",
-      "independentClientsEnv": "S0_SYNC_INDEPENDENT_CLIENTS"
+      "retainedEvidenceEnv": "S0_SYNC_CONFLICT_EVIDENCE"
     },
     "coordinates": {
       "driveId": "supplied at runtime via S0_ONEDRIVE_DRIVE_ID",

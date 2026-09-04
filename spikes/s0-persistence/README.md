@@ -260,10 +260,14 @@ mapping eligible.
   recovery, and one explicit restored authoritative head.
 - [x] Run `PER-004` at small, medium, and stress scales and retain CAS latency,
   discovery latency, requests, bytes, retries, and throttle results.
-- [x] Run `BCK-006` separately with a Windows OneDrive sync-client profile;
-  never substitute provider-API CAS evidence for synced-folder behavior. The
-  completed same-device compatibility probe records that true cross-device
-  sync-conflict evidence remains a portability follow-up.
+- [ ] Run `BCK-006` separately with a Windows OneDrive sync-client profile;
+  never substitute provider-API CAS evidence for synced-folder behavior. A
+  same-device handle probe only measures local compatibility and cannot pass:
+  `S0-BCK-006` stays `Incomplete` until two independent OneDrive sync clients on
+  separate devices produce a signed cross-client evidence artifact (bound to the
+  approved `syncTargetHash` and config revision) with distinct immutable client
+  IDs, observed timestamps/operations, a conflict/recovery outcome, and an
+  approval digest.
 
 ### Azure DevOps provider run
 
@@ -382,7 +386,7 @@ The live environment is:
 |---|---|
 | Every provider | `S0_PREFLIGHT_APPROVER`, `S0_PREFLIGHT_APPROVED_AT`, `S0_PREFLIGHT_APPROVAL_REFERENCE`, `S0_PREFLIGHT_TARGET_HASH` |
 | OneDrive | `S0_ONEDRIVE_TOKEN`, `S0_ONEDRIVE_DRIVE_ID`, `S0_ONEDRIVE_FOLDER` |
-| OneDrive synced-folder sync run (`S0-BCK-006`, separate) | `S0_ONEDRIVE_SYNC_ROOT` (path to the running Windows OneDrive sync-client folder), the four `S0_PREFLIGHT_*` approval variables, and `S0_RUN_ID`; optionally `S0_SYNC_CLIENT_STATE` to record sync-client status |
+| OneDrive synced-folder sync run (`S0-BCK-006`, separate) | `S0_ONEDRIVE_SYNC_ROOT` (path to the approved running Windows OneDrive sync-client folder), `S0_SYNC_CLIENT_IDENTITY`, `S0_SYNC_CLIENT_STATE` (must equal the approved `verified-signed-in` state), `S0_SYNC_CONFLICT_EVIDENCE` (path to a signed cross-client evidence artifact), the four `S0_PREFLIGHT_*` approval variables, and `S0_RUN_ID` |
 | Azure DevOps | `S0_ADO_TOKEN`, `S0_ADO_ORG`, `S0_ADO_PROJECT`, `S0_ADO_REPO` |
 | GitHub | `S0_GITHUB_TOKEN`, `S0_GITHUB_OWNER`, `S0_GITHUB_REPO` |
 
@@ -399,6 +403,17 @@ drive, or folder coordinates and never substitutes provider-API CAS evidence
 for synced-folder behavior. Its `S0_ONEDRIVE_SYNC_ROOT` folder, retained raw and
 report artifacts, and evidence identity are stored on the OneDrive aggregate and
 independently re-verified during comparison.
+
+A synced-folder **Pass cannot come from an environment client count or an
+arbitrary JSON self-report.** The only credible closure is a signed, retained
+cross-client evidence artifact bound to the approved `syncTargetHash` and config
+revision, listing at least two distinct immutable client IDs with observed
+timestamps/operations, a recorded conflict or recovery outcome, and approval
+metadata whose digest matches the artifact body. Absent a valid artifact the
+result is `Incomplete`/`Blocked`, never `Pass`. Until credible automatic proof
+exists, the **required future probe** is two independent OneDrive sync clients on
+separate devices that produce and sign such an artifact; a same-device handle
+probe only measures local compatibility and cannot close the gate.
 
 ## Detection power
 

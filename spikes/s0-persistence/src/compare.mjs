@@ -21,6 +21,7 @@ import {
   naApprovalErrors,
 } from "./eligibility.mjs";
 import { runHarness } from "./runner.mjs";
+import { combineStatuses } from "./aggregate-campaigns.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -52,6 +53,92 @@ function verifyLinkedArtifact(baseDirectory, relativePath, expectedDigest, confi
   return actual === expectedDigest ? null : `artifact digest mismatch: ${relativePath}`;
 }
 
+function readLinkedRun(baseDirectory, relativePath, confineRoot) {
+  if (typeof relativePath !== "string" || !relativePath) return { error: "linked raw path is missing" };
+  const resolved = path.resolve(baseDirectory, relativePath);
+  const relative = path.relative(confineRoot, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return { error: "linked raw path escapes the results directory" };
+  }
+  if (!fs.existsSync(resolved)) return { error: `linked raw is missing: ${relativePath}` };
+  try {
+    return { run: JSON.parse(fs.readFileSync(resolved, "utf8")) };
+  } catch (error) {
+    return { error: `linked raw is unreadable: ${error.message}` };
+  }
+}
+
+function validateLinkedRunIdentity(linked, config, label) {
+  const errors = [];
+  if (linked?.schemaVersion !== 2) {
+    errors.push(`${label} linked raw has an unsupported or missing result schemaVersion`);
+  }
+  if (stableJson(linked?.evidenceIdentity) !== stableJson(buildEvidenceIdentity(config))) {
+    errors.push(`${label} linked raw source/catalog/applicability/config identity does not match the current configuration`);
+  }
+  if (linked?.configuration?.configurationId !== config.configurationId) {
+    errors.push(`${label} linked raw belongs to a different configuration`);
+  }
+  const linkedResults = Array.isArray(linked?.results) ? linked.results : [];
+  const ids = linkedResults.map((result) => result.scenarioId);
+  if (new Set(ids).size !== ids.length) errors.push(`${label} linked raw has duplicate scenario results`);
+  for (const result of linkedResults) {
+    if (!RESULT_STATUSES.has(result.status)) {
+      errors.push(`${label} linked raw has an invalid status for ${result.scenarioId}`);
+    }
+  }
+  return { errors, linkedResults };
+}
+
+// A byte-hash proves the linked file is unmodified; it does not prove the file
+// belongs to this aggregate. This parses every linked campaign raw, validates
+// its evidence identity and result schema, and recomputes the aggregate status
+// and per-campaign positions so a Pass cannot be claimed against an unrelated or
+// stale run.
+export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {}) {
+  const errors = [];
+  if (!artifactPath) return errors;
+  const baseDirectory = path.dirname(artifactPath);
+  const resultsRoot = path.dirname(baseDirectory);
+  const campaigns = Array.isArray(run?.campaigns) ? run.campaigns : [];
+  const statusByScenario = new Map();
+  for (const campaign of campaigns) {
+    const label = campaign?.name || "campaign";
+    const { run: linked, error } = readLinkedRun(baseDirectory, campaign?.raw, resultsRoot);
+    if (error) { errors.push(`${label} ${error}`); continue; }
+    const { errors: identityErrors, linkedResults } = validateLinkedRunIdentity(linked, config, label);
+    errors.push(...identityErrors);
+    if (linked?.configuration?.runId !== campaign?.runId) {
+      errors.push(`${label} linked raw runId does not match the aggregate campaign entry`);
+    }
+    for (const result of linkedResults) {
+      const positions = statusByScenario.get(result.scenarioId) || [];
+      positions.push({ name: campaign?.name, status: effectiveResult(result).status });
+      statusByScenario.set(result.scenarioId, positions);
+    }
+  }
+  for (const result of Array.isArray(run?.results) ? run.results : []) {
+    if (result.scenarioId === "S0-BCK-006") continue;
+    const positions = statusByScenario.get(result.scenarioId);
+    if (!campaigns.length || !positions || positions.length !== campaigns.length) {
+      errors.push(`${result.scenarioId} is not backed by every linked campaign raw`);
+      continue;
+    }
+    const recomputed = combineStatuses(positions.map((position) => position.status));
+    if (recomputed !== result.status) {
+      errors.push(`${result.scenarioId} aggregate status ${result.status} does not match the recomputed ${recomputed} from linked campaign raws`);
+    }
+    const claimed = result.evidence?.campaigns || {};
+    for (const position of positions) {
+      if (position.name && claimed[position.name] &&
+          claimed[position.name].status !== position.status) {
+        errors.push(`${result.scenarioId} campaign ${position.name} claims ${claimed[position.name].status} but the linked raw recorded ${position.status}`);
+      }
+    }
+  }
+  return errors;
+}
+
 export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
   const errors = [];
   const sync = run?.separateSync;
@@ -62,7 +149,8 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
   if (stableJson(sync.evidenceIdentity) !== stableJson(buildEvidenceIdentity(config))) {
     errors.push("separate synced-folder evidence is stale or bound to a mismatched configuration");
   }
-  if (!run.results?.some((result) => result.scenarioId === "S0-BCK-006")) {
+  const aggregateResult = run.results?.find((result) => result.scenarioId === "S0-BCK-006");
+  if (!aggregateResult) {
     errors.push("aggregate is missing the resolved S0-BCK-006 synced-folder result");
   }
   if (artifactPath) {
@@ -73,6 +161,23 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
       verifyLinkedArtifact(baseDirectory, sync.report, sync.reportSha256, resultsRoot),
     ].filter(Boolean)) {
       errors.push(`separate synced-folder ${issue}`);
+    }
+    const { run: linked, error } = readLinkedRun(baseDirectory, sync.raw, resultsRoot);
+    if (error) {
+      errors.push(`separate synced-folder ${error}`);
+    } else {
+      const { errors: identityErrors, linkedResults } =
+        validateLinkedRunIdentity(linked, config, "separate synced-folder");
+      errors.push(...identityErrors);
+      const linkedBck = linkedResults.find((result) => result.scenarioId === "S0-BCK-006");
+      if (!linkedBck) {
+        errors.push("separate synced-folder linked raw has no S0-BCK-006 result");
+      } else if (aggregateResult &&
+        effectiveResult(linkedBck).status !== effectiveResult(aggregateResult).status) {
+        errors.push(
+          `aggregate S0-BCK-006 status ${effectiveResult(aggregateResult).status} does not match the linked sync run status ${effectiveResult(linkedBck).status}`,
+        );
+      }
     }
   }
   return errors;
@@ -157,6 +262,7 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
         errors.push(`${result.scenarioId} does not contain all three campaign positions`);
       }
     }
+    errors.push(...verifyLinkedCampaigns(run, config, { artifactPath }));
     if (config.backingPath === "onedrive") {
       errors.push(...verifySeparateSync(run, config, { artifactPath }));
     }

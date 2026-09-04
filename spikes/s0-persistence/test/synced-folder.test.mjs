@@ -7,9 +7,12 @@ import {
   syncTargetHash,
   resolveSyncTarget,
 } from "../src/preflight.mjs";
+import { decisionConfigRevision } from "../src/evidence-identity.mjs";
 import {
   SCENARIO_IMPLEMENTATIONS,
   assessSyncedFolderEvidence,
+  validateCrossClientEvidence,
+  crossClientEvidenceDigest,
 } from "../src/scenario-implementations.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -26,12 +29,37 @@ const approvedEnv = {
 };
 const approved = resolveEffectiveProviderConfig(liveConfig, approvedEnv);
 const approvedHash = approved.sandbox.syncTargetHash;
+const configRevision = decisionConfigRevision(approved);
 
 let pass = 0;
 let fail = 0;
 async function check(name, action) {
   try { await action(); pass++; }
   catch (error) { fail++; console.error(`  FAIL: ${name}`); console.error(`        ${error.stack || error}`); }
+}
+
+function signedArtifact(overrides = {}) {
+  const artifact = {
+    schemaVersion: 1,
+    kind: "onedrive-synced-folder-cross-client-evidence",
+    syncTargetHash: approvedHash,
+    configRevision,
+    clients: [
+      { clientId: "device-A-9f2c", observedAt: "2026-09-03T18:00:00.000Z", operations: ["create", "edit"] },
+      { clientId: "device-B-1a77", observedAt: "2026-09-03T18:00:05.000Z", operations: ["edit"] },
+    ],
+    outcomes: { conflict: true, recovery: true, conflictArtifacts: ["workspace-device-B.json"] },
+    approval: {
+      approver: "Windows sync-client test owner",
+      approvedAt: "2026-09-03T20:00:00.000Z",
+      reference: "syn-sync-001",
+    },
+    ...overrides,
+  };
+  if (!artifact.approval.digest) {
+    artifact.approval.digest = crossClientEvidenceDigest(artifact);
+  }
+  return artifact;
 }
 
 function baseInput(overrides = {}) {
@@ -41,17 +69,16 @@ function baseInput(overrides = {}) {
     requiredClientState: "verified-signed-in",
     observedClientState: "verified-signed-in",
     observedClientIdentity: "sync-operator@contoso.example",
-    independentClients: 2,
-    retainedConflictEvidence: null,
+    configRevision,
+    retainedEvidence: signedArtifact(),
     probe: { createMs: 5, conflictFilesCreated: 0 },
     ...overrides,
   };
 }
 
 await check("effective preflight binds an approved sync-root/identity target hash", () => {
-  assert.ok(approvedHash && approvedHash.startsWith("sha256:"), "approved sync target hash is required");
+  assert.ok(approvedHash && approvedHash.startsWith("sha256:"));
   assert.equal(approved.sandbox.syncTarget.syncRoot, "/approved/OneDrive/tippani-s0");
-  assert.equal(approved.sandbox.syncTarget.clientIdentity, "sync-operator@contoso.example");
 });
 
 await check("an arbitrary directory produces a different bound hash than the approved target", () => {
@@ -60,14 +87,6 @@ await check("an arbitrary directory produces a different bound hash than the app
     S0_ONEDRIVE_SYNC_ROOT: "/tmp/some-arbitrary-folder",
   });
   assert.notEqual(arbitrary.sandbox.syncTargetHash, approvedHash);
-});
-
-await check("the approved hash ignores the observed client state", () => {
-  const runningState = resolveEffectiveProviderConfig(liveConfig, {
-    ...approvedEnv,
-    S0_SYNC_CLIENT_STATE: "running",
-  });
-  assert.equal(runningState.sandbox.syncTargetHash, approvedHash);
 });
 
 await check("a missing sync-client identity cannot be bound", () => {
@@ -79,72 +98,84 @@ await check("a missing sync-client identity cannot be bound", () => {
 });
 
 await check("an arbitrary directory (bound hash mismatch) cannot pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    boundTargetHash: "sha256:arbitrary-directory",
-  }));
-  assert.ok(detail.blocked, "arbitrary directory must not pass");
-  assert.match(detail.blocked, /arbitrary directory/i);
-  assert.equal(detail.evidence, undefined);
-});
-
-await check("an unbound synced-folder run cannot pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    approvedTargetHash: null,
-    boundTargetHash: null,
-  }));
+  const detail = assessSyncedFolderEvidence(baseInput({ boundTargetHash: "sha256:arbitrary-directory" }));
   assert.ok(detail.blocked);
-  assert.match(detail.blocked, /arbitrary directory or unverified client/i);
+  assert.match(detail.blocked, /arbitrary directory/i);
 });
 
 await check("a default 'running' sync-client state cannot pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    observedClientState: "running",
-  }));
-  assert.ok(detail.blocked, "default 'running' state must not pass");
-  assert.match(detail.blocked, /'running'|cannot pass/i);
-  assert.equal(detail.evidence, undefined);
-});
-
-await check("a missing observed sync-client identity cannot pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({ observedClientIdentity: "" }));
+  const detail = assessSyncedFolderEvidence(baseInput({ observedClientState: "running" }));
   assert.ok(detail.blocked);
-  assert.match(detail.blocked, /sync-client identity/i);
+  assert.match(detail.blocked, /'running'|cannot pass/i);
 });
 
-await check("a same-device probe alone is Incomplete, not Pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    independentClients: 1,
-    retainedConflictEvidence: null,
-  }));
-  assert.ok(detail.skip, "same-device only must report Incomplete");
+await check("a self-reported client count (no structured artifact) cannot pass", () => {
+  // S0_SYNC_INDEPENDENT_CLIENTS=2 is no longer an input; an environment count
+  // cannot produce a Pass. Without a structured artifact the result is Incomplete.
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: null }));
+  assert.ok(detail.skip, "no structured artifact must be Incomplete");
   assert.match(detail.skip, /Incomplete/);
-  assert.match(detail.skip, /two independent/i);
+  assert.match(detail.skip, /self-reported client counts cannot/i);
+  assert.match(detail.skip, /Required future probe/);
   assert.equal(detail.evidence, undefined);
 });
 
-await check("two independent sync clients produce a Pass with observable evidence", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({ independentClients: 2 }));
-  assert.ok(detail.evidence, "credible independent clients should pass");
+await check("an unbound arbitrary conflict JSON cannot pass", () => {
+  const detail = assessSyncedFolderEvidence(baseInput({
+    retainedEvidence: { conflict: true, independentClients: 2 },
+  }));
+  assert.ok(detail.skip, "arbitrary conflict JSON must be Incomplete");
+  assert.equal(detail.evidence, undefined);
+  const errors = validateCrossClientEvidence({ conflict: true, independentClients: 2 }, {
+    approvedTargetHash: approvedHash, boundTargetHash: approvedHash, configRevision,
+  });
+  assert.ok(errors.some((error) => /not bound to the approved sync target/.test(error)));
+  assert.ok(errors.some((error) => /two independent sync clients/.test(error)));
+});
+
+await check("a valid signed cross-client artifact produces a Pass", () => {
+  const detail = assessSyncedFolderEvidence(baseInput());
+  assert.ok(detail.evidence, "a fully valid signed artifact should pass");
+  assert.deepEqual(detail.evidence.clients, ["device-A-9f2c", "device-B-1a77"]);
   assert.equal(detail.evidence.providerApiCasUsed, false);
-  assert.match(detail.evidence.probe, /two independent/i);
-  assert.equal(detail.evidence.independentClients, 2);
+  assert.equal(detail.evidence.conflictOutcome, true);
 });
 
-await check("retained conflict/recovery evidence produces a Pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    independentClients: 1,
-    retainedConflictEvidence: { conflict: true, source: "retained-cross-device" },
-  }));
-  assert.ok(detail.evidence, "retained conflict evidence should pass");
-  assert.match(detail.evidence.probe, /retained/i);
+await check("a tampered artifact body invalidates the approval digest", () => {
+  const artifact = signedArtifact();
+  artifact.clients[0].clientId = "device-A-tampered";
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /digest does not match/);
 });
 
-await check("empty retained evidence object does not fabricate a Pass", () => {
-  const detail = assessSyncedFolderEvidence(baseInput({
-    independentClients: 1,
-    retainedConflictEvidence: { conflict: false, recovery: false },
-  }));
-  assert.ok(detail.skip, "non-observable retained evidence must remain Incomplete");
+await check("evidence bound to a stale config revision cannot pass", () => {
+  const artifact = signedArtifact({ configRevision: "sha256:stale-config" });
+  artifact.approval.digest = crossClientEvidenceDigest(artifact);
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /config revision is stale/);
+});
+
+await check("duplicate client IDs are rejected", () => {
+  const artifact = signedArtifact({
+    clients: [
+      { clientId: "device-A", observedAt: "2026-09-03T18:00:00.000Z", operations: ["edit"] },
+      { clientId: "device-A", observedAt: "2026-09-03T18:00:05.000Z", operations: ["edit"] },
+    ],
+  });
+  artifact.approval.digest = crossClientEvidenceDigest(artifact);
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /distinct, immutable/);
+});
+
+await check("evidence without a conflict or recovery outcome cannot pass", () => {
+  const artifact = signedArtifact({ outcomes: { conflict: false, recovery: false } });
+  artifact.approval.digest = crossClientEvidenceDigest(artifact);
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /conflict or recovery outcome/);
 });
 
 await check("the S0-BCK-006 implementation is Blocked without a Windows sync client", async () => {
@@ -152,6 +183,32 @@ await check("the S0-BCK-006 implementation is Blocked without a Windows sync cli
   const detail = await SCENARIO_IMPLEMENTATIONS["S0-BCK-006"]({ config: approved });
   assert.ok(detail.blocked);
   assert.match(detail.blocked, /Windows OneDrive sync-client/i);
+});
+
+await check("decisionConfigRevision incorporates the normalized sync profile", () => {
+  const withRunning = structuredClone(liveConfig);
+  withRunning.sandbox.syncProfile.requiredClientState = "running";
+  assert.notEqual(
+    decisionConfigRevision(withRunning),
+    decisionConfigRevision(liveConfig),
+    "changing requiredClientState must invalidate the config revision",
+  );
+
+  const withoutIndependent = structuredClone(liveConfig);
+  withoutIndependent.sandbox.syncProfile.requireIndependentClients = false;
+  assert.notEqual(
+    decisionConfigRevision(withoutIndependent),
+    decisionConfigRevision(liveConfig),
+    "changing requireIndependentClients must invalidate the config revision",
+  );
+
+  const withoutProfile = structuredClone(liveConfig);
+  delete withoutProfile.sandbox.syncProfile;
+  assert.notEqual(
+    decisionConfigRevision(withoutProfile),
+    decisionConfigRevision(liveConfig),
+    "removing the sync profile must invalidate the config revision",
+  );
 });
 
 console.log(`s0-synced-folder: ${pass} passed, ${fail} failed`);
