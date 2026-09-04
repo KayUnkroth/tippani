@@ -119,7 +119,7 @@ generated applicability-aware campaigns.
 Historical evidence included:
 
 - Local envelope: 38 reported absolute passes in the superseded Windows run.
-- Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`.
+- Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`. One of those reported passes, `S0-CON-003`, is now a known **structural failure**: `BEGIN IMMEDIATE` serializes writers database-wide even across independent workspaces, so it cannot satisfy the current no-global-serialization criterion. A rerun alone cannot close it; closure requires revising the absolute `S0-CON-003` criterion or an independently approved, scenario-specific rationale-backed `N/A`.
 - OneDrive: nine provider gates passed.
 - Azure DevOps: nine provider gates passed.
 - GitHub: nine provider gates passed.

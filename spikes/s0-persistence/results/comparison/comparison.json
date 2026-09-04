@@ -1,6 +1,6 @@
 {
   "schemaVersion": 3,
-  "generatedAt": "2026-09-04T15:19:27.375Z",
+  "generatedAt": "2026-09-04T15:35:54.472Z",
   "decision": {
     "status": "Incomplete",
     "mapping": null,
@@ -70,7 +70,8 @@
         "campaign-2 artifact path/digest is missing",
         "campaign-3 artifact path/digest is missing",
         "campaign-3 artifact path/digest is missing",
-        "provider campaigns lack structured approvals for their effective target hashes"
+        "provider campaigns lack structured approvals for their effective target hashes",
+        "missing separate OneDrive synced-folder (S0-BCK-006) evidence record"
       ]
     },
     {
@@ -116,13 +117,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:89625884dca6886b358efb2d7bb84afd0f691f87a52e6e0c66dfc5b8f8c41425",
+        "sourceRevision": "sha256:f39d28e96a057fad5812854a9eff0f01b6f9fde1d8d9ed233a3385f9f81d0645",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:49f1db4c9fee35da85463469124a8577ca1d7ed4b400dfe2c9af6dabf8aa2e6b"
       },
-      "startedAt": "2026-09-04T15:19:27.358Z",
-      "completedAt": "2026-09-04T15:19:27.359Z",
+      "startedAt": "2026-09-04T15:35:54.472Z",
+      "completedAt": "2026-09-04T15:35:54.472Z",
       "configuration": {
         "configurationId": "CFG-LOCAL-SQLITE",
         "adapter": "local-sqlite",
@@ -552,13 +553,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:89625884dca6886b358efb2d7bb84afd0f691f87a52e6e0c66dfc5b8f8c41425",
+        "sourceRevision": "sha256:f39d28e96a057fad5812854a9eff0f01b6f9fde1d8d9ed233a3385f9f81d0645",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:1a926a46e92058536f95f1513c6bfac735f908f368aa890e7eb1b9d3c1a81fc1"
       },
-      "startedAt": "2026-09-04T15:19:27.363Z",
-      "completedAt": "2026-09-04T15:19:27.363Z",
+      "startedAt": "2026-09-04T15:35:54.472Z",
+      "completedAt": "2026-09-04T15:35:54.472Z",
       "configuration": {
         "configurationId": "CFG-LOCAL-CAS",
         "adapter": "local-cas",
@@ -987,13 +988,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:89625884dca6886b358efb2d7bb84afd0f691f87a52e6e0c66dfc5b8f8c41425",
+        "sourceRevision": "sha256:f39d28e96a057fad5812854a9eff0f01b6f9fde1d8d9ed233a3385f9f81d0645",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:5779a7c10fab3762470ba7b7c3e5b838b0ca9128ce302ae1e340223cb011c6be"
       },
-      "startedAt": "2026-09-04T15:19:27.367Z",
-      "completedAt": "2026-09-04T15:19:27.367Z",
+      "startedAt": "2026-09-04T15:35:54.472Z",
+      "completedAt": "2026-09-04T15:35:54.472Z",
       "configuration": {
         "configurationId": "CFG-ONEDRIVE-LIVE",
         "adapter": "onedrive",
@@ -1400,7 +1401,8 @@
         "campaign-2 artifact path/digest is missing",
         "campaign-3 artifact path/digest is missing",
         "campaign-3 artifact path/digest is missing",
-        "provider campaigns lack structured approvals for their effective target hashes"
+        "provider campaigns lack structured approvals for their effective target hashes",
+        "missing separate OneDrive synced-folder (S0-BCK-006) evidence record"
       ]
     },
     {
@@ -1408,13 +1410,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:89625884dca6886b358efb2d7bb84afd0f691f87a52e6e0c66dfc5b8f8c41425",
+        "sourceRevision": "sha256:f39d28e96a057fad5812854a9eff0f01b6f9fde1d8d9ed233a3385f9f81d0645",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:f08f0c3b11970832b344436433d5b478c45e2978cc495b6d1ecc90a1c71765f2"
       },
-      "startedAt": "2026-09-04T15:19:27.371Z",
-      "completedAt": "2026-09-04T15:19:27.371Z",
+      "startedAt": "2026-09-04T15:35:54.472Z",
+      "completedAt": "2026-09-04T15:35:54.472Z",
       "configuration": {
         "configurationId": "CFG-ADO-LIVE",
         "adapter": "ado",
@@ -1828,13 +1830,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:89625884dca6886b358efb2d7bb84afd0f691f87a52e6e0c66dfc5b8f8c41425",
+        "sourceRevision": "sha256:f39d28e96a057fad5812854a9eff0f01b6f9fde1d8d9ed233a3385f9f81d0645",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:5a654a477884667b94717110955c1e6bd4942bf12cd73f0c5d36c96a432b21b5"
       },
-      "startedAt": "2026-09-04T15:19:27.375Z",
-      "completedAt": "2026-09-04T15:19:27.375Z",
+      "startedAt": "2026-09-04T15:35:54.472Z",
+      "completedAt": "2026-09-04T15:35:54.472Z",
       "configuration": {
         "configurationId": "CFG-GITHUB-LIVE",
         "adapter": "github",

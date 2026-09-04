@@ -35,19 +35,47 @@ function currentCatalog() {
   }));
 }
 
-function verifyLinkedArtifact(baseDirectory, relativePath, expectedDigest) {
+function verifyLinkedArtifact(baseDirectory, relativePath, expectedDigest, confineRoot = baseDirectory) {
   if (typeof relativePath !== "string" || !relativePath ||
       typeof expectedDigest !== "string" || !expectedDigest.startsWith("sha256:")) {
     return "artifact path/digest is missing";
   }
   const resolved = path.resolve(baseDirectory, relativePath);
-  const relative = path.relative(baseDirectory, resolved);
+  const relative = path.relative(confineRoot, resolved);
   if (relative.startsWith("..") || path.isAbsolute(relative)) {
-    return "artifact path escapes the configuration result directory";
+    return confineRoot === baseDirectory
+      ? "artifact path escapes the configuration result directory"
+      : "artifact path escapes the results directory";
   }
   if (!fs.existsSync(resolved)) return `artifact is missing: ${relativePath}`;
   const actual = `sha256:${sha256(fs.readFileSync(resolved))}`;
   return actual === expectedDigest ? null : `artifact digest mismatch: ${relativePath}`;
+}
+
+export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
+  const errors = [];
+  const sync = run?.separateSync;
+  if (!sync || typeof sync !== "object") {
+    errors.push("missing separate OneDrive synced-folder (S0-BCK-006) evidence record");
+    return errors;
+  }
+  if (stableJson(sync.evidenceIdentity) !== stableJson(buildEvidenceIdentity(config))) {
+    errors.push("separate synced-folder evidence is stale or bound to a mismatched configuration");
+  }
+  if (!run.results?.some((result) => result.scenarioId === "S0-BCK-006")) {
+    errors.push("aggregate is missing the resolved S0-BCK-006 synced-folder result");
+  }
+  if (artifactPath) {
+    const baseDirectory = path.dirname(artifactPath);
+    const resultsRoot = path.dirname(baseDirectory);
+    for (const issue of [
+      verifyLinkedArtifact(baseDirectory, sync.raw, sync.rawSha256, resultsRoot),
+      verifyLinkedArtifact(baseDirectory, sync.report, sync.reportSha256, resultsRoot),
+    ].filter(Boolean)) {
+      errors.push(`separate synced-folder ${issue}`);
+    }
+  }
+  return errors;
 }
 
 export function validateExistingRun(run, config, { artifactPath = null } = {}) {
@@ -129,19 +157,22 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
         errors.push(`${result.scenarioId} does not contain all three campaign positions`);
       }
     }
+    if (config.backingPath === "onedrive") {
+      errors.push(...verifySeparateSync(run, config, { artifactPath }));
+    }
   }
   return errors;
 }
 
-function invalidRun(config, errors) {
+function invalidRun(config, errors, generatedAt) {
   const applicable = applicableScenarioIds(config);
   return {
     schemaVersion: 2,
     syntheticData: true,
     harnessRevision: "invalid-existing-evidence",
     evidenceIdentity: buildEvidenceIdentity(config),
-    startedAt: new Date().toISOString(),
-    completedAt: new Date().toISOString(),
+    startedAt: generatedAt,
+    completedAt: generatedAt,
     configuration: {
       configurationId: config.configurationId,
       adapter: config.adapter,
@@ -445,6 +476,7 @@ export async function buildComparison({
   selectedMappingId = null,
 } = {}) {
   validateApplicability(SCENARIOS);
+  const generatedAt = new Date().toISOString();
   const runs = [];
   const validationFailures = [];
   for (const configPath of selectedConfigs) {
@@ -465,7 +497,7 @@ export async function buildComparison({
       }
       if (validationErrors.length) {
         validationFailures.push({ configurationId: config.configurationId, errors: validationErrors });
-        run = invalidRun(config, validationErrors);
+        run = invalidRun(config, validationErrors, generatedAt);
       }
     } else {
       ({ run } = await runHarness({
@@ -475,7 +507,7 @@ export async function buildComparison({
       validationErrors = validateExistingRun(run, config, { artifactPath: existingPath });
       if (validationErrors.length) {
         validationFailures.push({ configurationId: config.configurationId, errors: validationErrors });
-        run = invalidRun(config, validationErrors);
+        run = invalidRun(config, validationErrors, generatedAt);
       }
     }
     const gates = gateSummary(run);
@@ -496,7 +528,6 @@ export async function buildComparison({
     throw new Error(`Unknown architecture mapping: ${selectedMappingId}`);
   }
   const decision = deriveDecision(mappings, selectedMappingId);
-  const generatedAt = new Date().toISOString();
   return {
     runs,
     mappings,

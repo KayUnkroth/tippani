@@ -338,7 +338,9 @@ mapping eligible.
   explicitly rejected and no mapping is selected.
 - [ ] Regenerate local CAS and SQLite results from the current source. SQLite is
   not eligible under the current absolute `S0-CON-003` criterion because
-  `BEGIN IMMEDIATE` serializes writers database-wide.
+  `BEGIN IMMEDIATE` serializes writers database-wide. This is a known structural
+  failure: a rerun alone cannot close it. Closure requires revising the criterion
+  or an independently approved, scenario-specific rationale-backed `N/A`.
 - [ ] Run three new live campaigns for OneDrive, ADO, and GitHub with effective
   identity and coordinates bound to a dated approved target hash.
 - [ ] Rerun native cross-platform evidence because the shared contract,
@@ -380,14 +382,23 @@ The live environment is:
 |---|---|
 | Every provider | `S0_PREFLIGHT_APPROVER`, `S0_PREFLIGHT_APPROVED_AT`, `S0_PREFLIGHT_APPROVAL_REFERENCE`, `S0_PREFLIGHT_TARGET_HASH` |
 | OneDrive | `S0_ONEDRIVE_TOKEN`, `S0_ONEDRIVE_DRIVE_ID`, `S0_ONEDRIVE_FOLDER` |
+| OneDrive synced-folder sync run (`S0-BCK-006`, separate) | `S0_ONEDRIVE_SYNC_ROOT` (path to the running Windows OneDrive sync-client folder), the four `S0_PREFLIGHT_*` approval variables, and `S0_RUN_ID`; optionally `S0_SYNC_CLIENT_STATE` to record sync-client status |
 | Azure DevOps | `S0_ADO_TOKEN`, `S0_ADO_ORG`, `S0_ADO_PROJECT`, `S0_ADO_REPO` |
 | GitHub | `S0_GITHUB_TOKEN`, `S0_GITHUB_OWNER`, `S0_GITHUB_REPO` |
 
 The provider identity is resolved from the supplied credential; there is no
-caller-provided identity variable. Generate the target hash from the live
-preflight sheet, then supply the four shared approval variables. Changing the
-credential identity, any coordinate, run ID, or namespace requires a new
-approval. `onedrive-live-smoke.mjs` additionally requires `S0_RUN_ID`.
+caller-provided identity variable, including for the separate OneDrive
+synced-folder run. Generate the target hash from the live preflight sheet, then
+supply the four shared approval variables. Changing the credential identity, any
+coordinate, run ID, or namespace requires a new approval. `onedrive-live-smoke.mjs`
+additionally requires `S0_RUN_ID`.
+
+The synced-folder `S0-BCK-006` case runs separately on a Windows host with a
+running OneDrive sync client; it does not use the provider-API CAS token,
+drive, or folder coordinates and never substitutes provider-API CAS evidence
+for synced-folder behavior. Its `S0_ONEDRIVE_SYNC_ROOT` folder, retained raw and
+report artifacts, and evidence identity are stored on the OneDrive aggregate and
+independently re-verified during comparison.
 
 ## Detection power
 

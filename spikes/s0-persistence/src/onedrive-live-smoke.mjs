@@ -6,7 +6,9 @@
 //   S0_ONEDRIVE_TOKEN    - Graph bearer token (delegated Files.ReadWrite)
 //   S0_ONEDRIVE_DRIVE_ID  - target drive id
 //   S0_ONEDRIVE_FOLDER    - base folder (server-relative path within the drive)
-//   S0_PREFLIGHT_*         - approved effective-target receipt
+//   S0_PREFLIGHT_*         - approved effective-target receipt (identity is
+//                            derived from the supplied credential, not a caller
+//                            variable)
 //   S0_RUN_ID              - pre-approved unique run id (`s0-...`)
 //
 // The token is read from the environment and never printed.

@@ -388,30 +388,64 @@ export function aggregateCampaigns(configurationId, campaigns) {
     campaignVariability: campaignVariability(campaigns),
   };
   if (configurationId === "CFG-ONEDRIVE-LIVE") {
-    const syncRawPath = path.join(root, "results", "CFG-ONEDRIVE-SYNC", "raw-results.json");
-    if (fs.existsSync(syncRawPath)) {
-      const syncRun = JSON.parse(fs.readFileSync(syncRawPath, "utf8"));
-      const syncCurrent = syncRun.schemaVersion === 2 &&
-        syncRun.evidenceIdentity?.sourceRevision === currentSourceRevision() &&
-        syncRun.evidenceIdentity?.catalogRevision === catalogRevision(SCENARIOS) &&
-        syncRun.evidenceIdentity?.applicabilityRevision === applicabilityRevision();
-      const syncResult = syncCurrent
-        ? syncRun.results.find((result) => result.scenarioId === "S0-BCK-006")
-        : null;
-      const index = aggregate.results.findIndex((result) => result.scenarioId === "S0-BCK-006");
-      if (syncResult && index >= 0) {
-        aggregate.results[index] = {
-          ...syncResult,
-          evidence: {
-            ...(syncResult.evidence || {}),
-            separateCompatibilityReport: "../CFG-ONEDRIVE-SYNC/outcome.md",
-            providerCampaigns: "Not part of provider-API CAS campaigns",
-          },
-        };
-      }
+    const separateSync = buildSeparateSync(configurationId);
+    aggregate.separateSync = separateSync.record;
+    const index = aggregate.results.findIndex((result) => result.scenarioId === "S0-BCK-006");
+    if (index >= 0) {
+      aggregate.results[index] = {
+        ...separateSync.result,
+        evidence: {
+          ...(separateSync.result.evidence || {}),
+          separateCompatibilityReport: separateSync.record.report,
+          providerCampaigns: "Not part of provider-API CAS campaigns",
+        },
+      };
     }
   }
   return aggregate;
+}
+
+export function authoritativeSyncConfig(configurationId) {
+  const configFile = CONFIG_FILE_BY_ID[configurationId];
+  if (!configFile) throw new Error(`No authoritative config registered for ${configurationId}`);
+  return JSON.parse(fs.readFileSync(path.join(root, "config", configFile), "utf8"));
+}
+
+export function buildSeparateSync(configurationId, {
+  syncConfigurationId = "CFG-ONEDRIVE-SYNC",
+} = {}) {
+  const syncDir = path.join(root, "results", syncConfigurationId);
+  const syncRawPath = path.join(syncDir, "raw-results.json");
+  const syncReportPath = path.join(syncDir, "outcome.md");
+  if (!fs.existsSync(syncRawPath) || !fs.existsSync(syncReportPath)) {
+    throw new Error(
+      `${syncConfigurationId} is missing raw-results.json/outcome.md for the separate S0-BCK-006 sync evidence`,
+    );
+  }
+  const syncRawBytes = fs.readFileSync(syncRawPath);
+  const syncReportBytes = fs.readFileSync(syncReportPath);
+  const syncRun = JSON.parse(syncRawBytes.toString("utf8"));
+  const syncIdentity = buildEvidenceIdentity(authoritativeSyncConfig(configurationId));
+  if (syncRun.schemaVersion !== 2 ||
+      stableJson(syncRun.evidenceIdentity) !== stableJson(syncIdentity)) {
+    throw new Error(
+      `${syncConfigurationId} synced-folder evidence is stale for the current source/catalog/applicability/config revision`,
+    );
+  }
+  const syncResult = syncRun.results.find((result) => result.scenarioId === "S0-BCK-006");
+  if (!syncResult) throw new Error(`${syncConfigurationId} is missing the S0-BCK-006 result`);
+  return {
+    result: syncResult,
+    record: {
+      configurationId: syncConfigurationId,
+      scenarioId: "S0-BCK-006",
+      raw: `../${syncConfigurationId}/raw-results.json`,
+      rawSha256: `sha256:${sha256(syncRawBytes)}`,
+      report: `../${syncConfigurationId}/outcome.md`,
+      reportSha256: `sha256:${sha256(syncReportBytes)}`,
+      evidenceIdentity: syncIdentity,
+    },
+  };
 }
 
 async function main() {

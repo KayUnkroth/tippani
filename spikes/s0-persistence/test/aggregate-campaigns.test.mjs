@@ -4,6 +4,7 @@ import {
 } from "../src/applicability.mjs";
 import {
   combineResults,
+  buildSeparateSync,
   validateCampaigns,
 } from "../src/aggregate-campaigns.mjs";
 import { buildEvidenceIdentity } from "../src/evidence-identity.mjs";
@@ -166,6 +167,10 @@ await check("recomputes pooled percentiles and variability from raw samples", ()
   assert.equal(result.evidence.retries_small, 6);
   assert.deepEqual(result.evidence.throttleRetryAfterSeconds, [1, 2, 3]);
   assert.equal(result.evidence.throttleBackoffMs, 60);
+});
+
+await check("rejects stale separate synced-folder (S0-BCK-006) evidence during aggregation", () => {
+  assert.throws(() => buildSeparateSync("CFG-ONEDRIVE-LIVE"), /synced-folder evidence is stale/);
 });
 
 console.log(`s0-aggregate-campaigns: ${pass} passed, ${fail} failed`);

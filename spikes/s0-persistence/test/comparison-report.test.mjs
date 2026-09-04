@@ -11,6 +11,7 @@ import {
   buildComparison,
   deriveDecision,
   validateExistingRun,
+  verifySeparateSync,
 } from "../src/compare.mjs";
 import { buildEvidenceIdentity, sha256 } from "../src/evidence-identity.mjs";
 import { SCENARIOS } from "../src/scenario-catalog.mjs";
@@ -209,6 +210,73 @@ await check("comparison and ADR identify SQLite serialization as structural", ()
   assert(comparison.includes("A rerun alone cannot close"));
   assert(adr.includes("structural failure"));
   assert(adr.includes("rerun alone cannot close"));
+});
+
+await check("comparison resolves and verifies the separate synced-folder (S0-BCK-006) evidence", () => {
+  const config = JSON.parse(fs.readFileSync(
+    path.join(root, "config", "provider-onedrive-live.json"),
+    "utf8",
+  ));
+  const stateRoot = path.join(root, ".test-state", "sync-verify");
+  const resultsRoot = path.join(stateRoot, "results");
+  const aggregateDir = path.join(resultsRoot, "CFG-ONEDRIVE-LIVE");
+  const syncDir = path.join(resultsRoot, "CFG-ONEDRIVE-SYNC");
+  fs.rmSync(stateRoot, { recursive: true, force: true });
+  fs.mkdirSync(aggregateDir, { recursive: true });
+  fs.mkdirSync(syncDir, { recursive: true });
+  const syncRawBytes = Buffer.from(JSON.stringify({ scenarioId: "S0-BCK-006", generation: 1 }));
+  const syncReportBytes = Buffer.from("# CFG-ONEDRIVE-SYNC\n");
+  const writeSyncArtifacts = () => {
+    fs.writeFileSync(path.join(syncDir, "raw-results.json"), syncRawBytes);
+    fs.writeFileSync(path.join(syncDir, "outcome.md"), syncReportBytes);
+  };
+  writeSyncArtifacts();
+  const aggregatePath = path.join(aggregateDir, "raw-results.json");
+  const run = {
+    results: [{ scenarioId: "S0-BCK-006", status: "Pass" }],
+    separateSync: {
+      configurationId: "CFG-ONEDRIVE-SYNC",
+      scenarioId: "S0-BCK-006",
+      raw: "../CFG-ONEDRIVE-SYNC/raw-results.json",
+      rawSha256: `sha256:${sha256(syncRawBytes)}`,
+      report: "../CFG-ONEDRIVE-SYNC/outcome.md",
+      reportSha256: `sha256:${sha256(syncReportBytes)}`,
+      evidenceIdentity: buildEvidenceIdentity(config),
+    },
+  };
+  assert.deepEqual(verifySeparateSync(run, config, { artifactPath: aggregatePath }), []);
+
+  fs.appendFileSync(path.join(syncDir, "raw-results.json"), "\n");
+  assert(
+    verifySeparateSync(run, config, { artifactPath: aggregatePath })
+      .some((error) => /digest mismatch/.test(error)),
+    "a changed synced-folder artifact must be rejected",
+  );
+  writeSyncArtifacts();
+
+  fs.rmSync(path.join(syncDir, "outcome.md"));
+  assert(
+    verifySeparateSync(run, config, { artifactPath: aggregatePath })
+      .some((error) => /artifact is missing/.test(error)),
+    "a deleted synced-folder artifact must be rejected",
+  );
+  writeSyncArtifacts();
+
+  const mismatched = structuredClone(run);
+  mismatched.separateSync.evidenceIdentity.configRevision = "sha256:mismatch";
+  assert(
+    verifySeparateSync(mismatched, config, { artifactPath: aggregatePath })
+      .some((error) => /mismatched configuration/.test(error)),
+    "a mismatched sync configuration must be rejected",
+  );
+
+  assert(
+    verifySeparateSync({ results: run.results }, config, { artifactPath: aggregatePath })
+      .some((error) => /missing separate OneDrive/.test(error)),
+    "a missing separate-sync record must be rejected",
+  );
+
+  fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
 });
 
 console.log(`s0-comparison-report: ${pass} passed, ${fail} failed`);
