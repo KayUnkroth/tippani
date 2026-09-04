@@ -29,6 +29,7 @@ if (mode === "append") {
 }
 
 const output = `${JSON.stringify({
+  pid: process.pid,
   count: await queue.count(),
   entries: await queue.list(),
 })}\n`;

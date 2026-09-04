@@ -4,15 +4,21 @@
 // catalog id stays honest across configurations.
 
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { fileURLToPath } from "node:url";
 import { createStore } from "./adapters/registry.mjs";
 import { raceWorkers, runWorker } from "./process-runner.mjs";
 import { createSyntheticWorkspace } from "./synthetic-fixtures.mjs";
 import { WorkspaceConflictError } from "./workspace-contract.mjs";
 import { BLOCKED_REASONS } from "./provider-gates.mjs";
+
+const PENDING_QUEUE_WORKER = fileURLToPath(
+  new URL("./workers/pending-queue-worker.mjs", import.meta.url),
+);
 
 // A live provider = a real OneDrive/ADO/GitHub backing path, not a dry-run.
 function isLiveProvider(context) {
@@ -23,6 +29,37 @@ function isLiveProvider(context) {
 function blocked(context) {
   const id = context.scenario?.id;
   return { blocked: BLOCKED_REASONS[id] || "Blocked \u2014 requires a live provider sandbox." };
+}
+
+async function runPendingQueueProcess(context, request = null) {
+  if (!context.primaryRoot) {
+    throw new Error("Provider queue restart evidence requires a stable queue root");
+  }
+  const args = [
+    `--mode=${request ? "append" : "list"}`,
+    `--root=${context.primaryRoot}`,
+    `--provider=${context.config.backingPath}`,
+    `--run-id=${context.config.runId}`,
+  ];
+  if (request) {
+    args.push(`--request=${Buffer.from(JSON.stringify(request), "utf8").toString("base64url")}`);
+  }
+  const child = fork(PENDING_QUEUE_WORKER, args, {
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  return await new Promise((resolve, reject) => {
+    child.on("exit", (code) => {
+      if (code !== 0) {
+        reject(new Error(stderr || `pending queue worker exited ${code}`));
+        return;
+      }
+      resolve(JSON.parse(stdout.trim()));
+    });
+  });
 }
 
 async function seedWorkspace(store, seed) {
@@ -403,7 +440,9 @@ async function lostResponseReconcile(context) {
         expectedGeneration: 0,
         operation: { auditEvent: { actor: "Synthetic A", action: "edit" } },
       }),
-      (e) => e.code === "provider_response_lost",
+      (e) =>
+        e.code === "indeterminate_write" &&
+        e.requiresReconciliation === true,
     );
     // Reconcile: the write actually landed, so the generation advanced.
     const after = await store.readWorkspace(workspace.workspaceId);
@@ -434,20 +473,21 @@ async function offlinePendingUntilCas(context) {
       expectedGeneration: 0,
       operation: { auditEvent: { actor: "Synthetic A", action: "base" } },
     });
-    // A goes offline and stages a write from generation 1.
-    a.goOffline();
-    await a.stageOffline({
+    // A separate offline client process stages writes into the durable queue.
+    const firstWriter = await runPendingQueueProcess(context, {
       workspaceId: workspace.workspaceId,
       expectedGeneration: 1,
       operation: { auditEvent: { actor: "Synthetic A", action: "offline-edit" } },
     });
-    await a.stageOffline({
+    const secondWriter = await runPendingQueueProcess(context, {
       workspaceId: workspace.workspaceId,
       expectedGeneration: 2,
       operation: { auditEvent: { actor: "Synthetic A", action: "later-offline-edit" } },
     });
     assert.equal(await a.pendingCount(), 2);
     await a.close();
+    const restartInspection = await runPendingQueueProcess(context);
+    assert.equal(restartInspection.count, 2);
     const resumed = context.createStore();
     await resumed.initialize();
     assert.equal(await resumed.pendingCount(), 2, "Pending work must survive a client process restart");
@@ -474,7 +514,12 @@ async function offlinePendingUntilCas(context) {
     return {
       evidence: {
         offlinePendingConflicted: true,
-        processRestartRecoveredQueue: true,
+        processRestartRecoveredQueue:
+          firstWriter.pid !== process.pid &&
+          secondWriter.pid !== process.pid &&
+          restartInspection.pid !== process.pid,
+        queueWriterProcessIds: [firstWriter.pid, secondWriter.pid],
+        queueRestartInspectorProcessId: restartInspection.pid,
         fifoStoppedAtFirstConflict: true,
         staleEntryRetained: true,
         noSilentOverwrite: true,
@@ -497,8 +542,7 @@ async function offlineCacheReconcile(context) {
       expectedGeneration: 0,
       operation: { auditEvent: { actor: "Synthetic A", action: "base" } },
     });
-    a.goOffline();
-    await a.stageOffline({
+    const queueWriter = await runPendingQueueProcess(context, {
       workspaceId: workspace.workspaceId,
       expectedGeneration: 1,
       operation: { auditEvent: { actor: "Synthetic A", action: "cached-edit" } },
@@ -511,6 +555,8 @@ async function offlineCacheReconcile(context) {
     assert.equal(retained.retained.length, 1, "A transient provider failure must retain pending work");
     assert.equal(retained.pendingCount, 1);
     await transient.close();
+    const restartInspection = await runPendingQueueProcess(context);
+    assert.equal(restartInspection.count, 1, "An independent process must recover retained work");
 
     const b = context.createStore();
     await b.initialize();
@@ -533,7 +579,11 @@ async function offlineCacheReconcile(context) {
       evidence: {
         discoveredNewerAuthority: true,
         transientFailureRetained: true,
-        processRestartRecoveredQueue: true,
+        processRestartRecoveredQueue:
+          queueWriter.pid !== process.pid &&
+          restartInspection.pid !== process.pid,
+        queueWriterProcessId: queueWriter.pid,
+        queueRestartInspectorProcessId: restartInspection.pid,
         noSilentOverwrite: true,
       },
     };
@@ -580,7 +630,9 @@ async function recoverAfterFault(context) {
         expectedGeneration: 0,
         operation: { auditEvent: { actor: "Synthetic A", action: "lost-response" } },
       }),
-      (error) => error.code === "provider_response_lost",
+      (error) =>
+        error.code === "indeterminate_write" &&
+        error.requiresReconciliation === true,
     );
     const reconciled = await store.readWorkspace(lost.workspaceId);
     assert.equal(reconciled.generation, 1, "lost response recovery must find the committed generation");

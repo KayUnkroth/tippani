@@ -14,6 +14,23 @@ function checksum(payload) {
   return crypto.createHash("sha256").update(JSON.stringify(payload)).digest("hex");
 }
 
+function normalizeEntry(entry) {
+  if (!entry || typeof entry !== "object" ||
+      typeof entry.id !== "string" || !entry.id ||
+      !entry.request || typeof entry.request !== "object") {
+    throw new CorruptWorkspaceStoreError("Pending queue entry is invalid");
+  }
+  const generation = entry.generation ?? 0;
+  if (!Number.isInteger(generation) || generation < 0) {
+    throw new CorruptWorkspaceStoreError("Pending queue entry generation is invalid");
+  }
+  return {
+    id: entry.id,
+    generation,
+    request: deepClone(entry.request),
+  };
+}
+
 export class PersistentPendingQueue {
   constructor({ storeRoot, provider, runId, lockTimeoutMs = 10_000 }) {
     this.provider = provider;
@@ -52,7 +69,7 @@ export class PersistentPendingQueue {
         !Array.isArray(payload?.entries)) {
       throw new CorruptWorkspaceStoreError("Pending queue failed integrity validation");
     }
-    return payload.entries.map((entry) => deepClone(entry));
+    return payload.entries.map(normalizeEntry);
   }
 
   writeUnlocked(entries) {
@@ -83,6 +100,7 @@ export class PersistentPendingQueue {
     return this.withLock(async (entries) => {
       const entry = {
         id: `syn-pending-${crypto.randomUUID()}`,
+        generation: 0,
         request: deepClone(request),
       };
       entries.push(entry);
@@ -97,6 +115,60 @@ export class PersistentPendingQueue {
 
   async count() {
     return this.withLock((entries) => entries.length);
+  }
+
+  async inspectHead() {
+    return this.withLock((entries) => ({
+      empty: entries.length === 0,
+      head: entries.length ? deepClone(entries[0]) : null,
+      pendingCount: entries.length,
+    }));
+  }
+
+  async resolveHead({
+    headId,
+    headGeneration,
+    action,
+    replacement = null,
+  } = {}) {
+    if (!["discard", "replace"].includes(action)) {
+      throw new WorkspaceStoreError(
+        "Pending queue resolution must be discard or replace",
+        "pending_queue_resolution_invalid",
+      );
+    }
+    if (action === "replace" && (!replacement || typeof replacement !== "object")) {
+      throw new WorkspaceStoreError(
+        "Replacing a pending queue head requires a request",
+        "pending_queue_resolution_invalid",
+      );
+    }
+    return this.withLock((entries) => {
+      const head = entries[0];
+      if (!head || head.id !== headId || head.generation !== headGeneration) {
+        throw new WorkspaceStoreError(
+          "Pending queue head changed before resolution",
+          "pending_queue_head_changed",
+        );
+      }
+      const resolved = deepClone(head);
+      if (action === "discard") {
+        entries.shift();
+      } else {
+        entries[0] = {
+          id: head.id,
+          generation: head.generation + 1,
+          request: deepClone(replacement),
+        };
+      }
+      this.writeUnlocked(entries);
+      return {
+        action,
+        resolved,
+        head: entries.length ? deepClone(entries[0]) : null,
+        pendingCount: entries.length,
+      };
+    });
   }
 
   async processHead(handler) {

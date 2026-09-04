@@ -25,7 +25,7 @@ import {
 } from "../workspace-contract.mjs";
 import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
 import { providerTargetHash } from "../preflight.mjs";
-import { resolveProviderIdentity } from "../provider-identity.mjs";
+import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
@@ -79,6 +79,18 @@ export class GitHubRepoStore {
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
+    this.credentialBinding = new ProviderCredentialBinding({
+      provider: "github",
+      getToken: this._getToken,
+      fetchImpl: this.fetchImpl,
+      signal: this.signal,
+      identityResolver: this.identityResolver,
+      beforeAttempt: async () => {
+        await this.telemetry.recordRequest();
+        this.liveProviderCalls++;
+      },
+      wrapResponse: (response, context) => this.telemetry.wrapResponse(response, context),
+    });
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this.shas = new Map();
     this._fault = null;
@@ -98,19 +110,15 @@ export class GitHubRepoStore {
 
   async resolveCredentialIdentity() {
     if (this.resolvedIdentity) return this.resolvedIdentity;
-    this.resolvedIdentity = await resolveProviderIdentity({
-      provider: "github",
-      getToken: this._getToken,
-      fetchImpl: this.fetchImpl,
-      signal: this.signal,
-      identityResolver: this.identityResolver,
-      beforeAttempt: async () => {
-        await this.telemetry.recordRequest();
-        this.liveProviderCalls++;
-      },
-      wrapResponse: (response) => this.telemetry.wrapResponse(response),
-    });
+    this.resolvedIdentity = await this.credentialBinding.resolveIdentity();
     return this.resolvedIdentity;
+  }
+
+  async credentialToken() {
+    if (!this.enforcePreflight) {
+      return (await this.credentialBinding.issuePinned()).token;
+    }
+    return (await this.credentialBinding.issueApproved()).token;
   }
 
   async assertEffectiveTargetApproved() {
@@ -134,6 +142,7 @@ export class GitHubRepoStore {
         "preflight_required",
       );
     }
+    this.credentialBinding.approveIdentity(identity);
   }
 
   record(op, detail = {}) {
@@ -153,38 +162,50 @@ export class GitHubRepoStore {
       await this.telemetry.recordRequest(body);
       this.liveProviderCalls++;
       this._fault = null;
-      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
-      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
-      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) });
-      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) });
+      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "outage") {
         this.telemetry.recordFailure("outage");
         throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
       }
       if (fault.kind === "lost-response") {
-        const token0 = await this._getToken();
-        await this.fetchImpl(url, {
-          method,
-          headers: this.headers(token0, headers),
-          body,
-          signal: this.signal,
-        });
-        this.telemetry.recordFailure("lost-response");
-        throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
+        const token0 = await this.credentialToken();
+        try {
+          await this.fetchImpl(url, {
+            method,
+            headers: this.headers(token0, headers),
+            body,
+            signal: this.signal,
+          });
+        } catch (error) {
+          throw this.telemetry.indeterminateWrite(error, "transport_failure");
+        }
+        throw this.telemetry.indeterminateWrite(
+          new Error("response lost (injected)"),
+          "response_lost",
+        );
       }
     }
-    const token = await this._getToken();
+    const token = await this.credentialToken();
     for (let attempt = 0; ; attempt++) {
+      let transportStarted = false;
       try {
         await this.telemetry.recordRequest(body);
         this.liveProviderCalls++;
-        return this.telemetry.wrapResponse(await this.fetchImpl(url, {
+        transportStarted = true;
+        return await this.telemetry.wrapResponse(await this.fetchImpl(url, {
           method,
           headers: this.headers(token, headers),
           body,
           signal: this.signal,
-        }));
+        }), { method });
       } catch (error) {
+        if (error?.code === "indeterminate_write") throw error;
+        if (method !== "GET" && transportStarted) {
+          throw this.telemetry.indeterminateWrite(error, "transport_failure");
+        }
         const retryable = method === "GET" && attempt < 2 &&
           (error instanceof TypeError || RETRYABLE_NETWORK_CODES.has(error?.code) ||
             RETRYABLE_NETWORK_CODES.has(error?.cause?.code));
@@ -223,7 +244,7 @@ export class GitHubRepoStore {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: baseSha }),
     });
-    if (!createResp.ok && createResp.status !== 422) {
+    if (!createResp.ok) {
       throw new WorkspaceStoreError(`branch create failed: ${createResp.status}`, "provider_error");
     }
     this.initialized = true;
@@ -358,7 +379,7 @@ export class GitHubRepoStore {
     } catch (error) {
       // A lost response means the write may have landed; record its durability
       // so a follow-up read waits for the advanced generation.
-      if (error && error.code === "provider_response_lost") this._noteGen(workspaceId, next.generation);
+      if (error && error.code === "indeterminate_write") this._noteGen(workspaceId, next.generation);
       throw error;
     }
     if (!resp.ok) {
@@ -459,6 +480,8 @@ export class GitHubRepoStore {
               remove: false,
               kind: "conflict",
               value: {
+                headId: entry.id,
+                headGeneration: entry.generation,
                 workspaceId: request.workspaceId,
                 expected: error.expectedGeneration,
                 actual: error.actualGeneration,
@@ -483,6 +506,14 @@ export class GitHubRepoStore {
 
   async pendingCount() {
     return this.pendingQueue.count();
+  }
+
+  async inspectHead() {
+    return this.pendingQueue.inspectHead();
+  }
+
+  async resolveHead(resolution) {
+    return this.pendingQueue.resolveHead(resolution);
   }
 
   async deleteWorkspace(workspaceId) {
@@ -540,34 +571,14 @@ export class GitHubRepoStore {
     if (!resource.condition) {
       throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
     }
-    if (this.dryRun) {
-      this.record("delete-ref", {
-        ref: `refs/heads/${this.branch}`,
-        precondition: "expected-sha=<ref-sha>",
-      });
-      manifest.markCleaned(resource);
-      return { deleted: this.branch, dryRun: true };
-    }
-    if (resource.condition.absent === true) {
-      manifest.markCleaned(resource);
-      return { deleted: this.branch, absent: true };
-    }
-    const lookup = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
-    if (lookup.status === 404) throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
-    if (!lookup.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${lookup.status}`, "provider_error");
-    const currentSha = (await lookup.json())?.object?.sha;
-    if (currentSha !== resource.condition.expectedSha) {
-      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
-    }
-    const resp = await this.gh("DELETE", `${this.repoBase()}/git/refs/heads/${this.branch}`);
-    if (!resp.ok) {
-      if (resp.status === 404 || resp.status === 409 || resp.status === 422) {
-        throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
-      }
-      throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
-    }
-    manifest.markCleaned(resource);
-    return { deleted: this.branch };
+    this.record("cleanup-unsupported", {
+      ref: `refs/heads/${this.branch}`,
+      reason: "GitHub REST ref deletion has no expected-SHA precondition",
+    });
+    throw new WorkspaceStoreError(
+      "GitHub REST cleanup is unsupported without an atomic expected-SHA ref delete",
+      "cleanup_unsupported",
+    );
   }
 
   providerOperationManifest() {

@@ -82,7 +82,11 @@ export async function runProviderDryRun(config) {
   if (typeof store.cleanup === "function") {
     const authorization = createCleanupAuthorization(config, store);
     if (typeof store.prepareCleanup === "function") await store.prepareCleanup(authorization);
-    await store.cleanup(authorization);
+    try {
+      await store.cleanup(authorization);
+    } catch (error) {
+      if (error?.code !== "cleanup_unsupported") throw error;
+    }
   }
   await store.close();
   return {

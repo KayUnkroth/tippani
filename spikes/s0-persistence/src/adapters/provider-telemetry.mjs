@@ -1,7 +1,22 @@
+import { WorkspaceStoreError } from "../workspace-contract.mjs";
+
 function bytes(value) {
   if (value === undefined || value === null) return 0;
   if (typeof value === "string" || Buffer.isBuffer(value)) return Buffer.byteLength(value);
+  if (value instanceof ArrayBuffer) return value.byteLength;
+  if (ArrayBuffer.isView(value)) return value.byteLength;
   return Buffer.byteLength(JSON.stringify(value));
+}
+
+function declaredContentLength(response) {
+  const value = response?.headers?.get?.("content-length");
+  if (value === null || value === undefined || !/^\d+$/.test(String(value).trim())) return null;
+  const length = Number(value);
+  return Number.isSafeInteger(length) ? length : null;
+}
+
+function isMutation(method) {
+  return !["GET", "HEAD", "OPTIONS"].includes(String(method || "GET").toUpperCase());
 }
 
 export class ProviderTelemetry {
@@ -41,28 +56,84 @@ export class ProviderTelemetry {
     this.failures[kind] = (this.failures[kind] || 0) + 1;
   }
 
-  wrapResponse(response) {
+  indeterminateWrite(cause, reason = "transport_failure") {
+    this.recordFailure("indeterminate_write");
+    const error = new WorkspaceStoreError(
+      `Provider mutation may have committed; reconciliation is required (${reason})`,
+      "indeterminate_write",
+    );
+    error.requiresReconciliation = true;
+    error.reason = reason;
+    error.cause = cause;
+    return error;
+  }
+
+  async wrapResponse(response, { method = "GET", sent = true } = {}) {
     if (!response || typeof response !== "object") return response;
     if (response.status === 429) {
       this.throttleResponses++;
       this.recordRetryAfter(response.headers?.get?.("retry-after"));
     }
-    let bodyCounted = false;
-    const countBody = async (value) => {
-      if (!bodyCounted) {
-        await this.safetyBudget?.recordResponse(value);
-        this.responseBytes += bytes(value);
-        bodyCounted = true;
+    const indeterminateMutation = sent && isMutation(method);
+    const contentLength = declaredContentLength(response);
+    if (contentLength !== null && this.safetyBudget?.assertCanConsume) {
+      try {
+        await this.safetyBudget.assertCanConsume({ bytes: contentLength });
+      } catch (error) {
+        if (indeterminateMutation) {
+          throw this.indeterminateWrite(error, "response_content_length_overrun");
+        }
+        throw error;
       }
-      return value;
+    }
+    let bodyCounted = false;
+    const countBodyBytes = async (count) => {
+      if (!bodyCounted) {
+        bodyCounted = true;
+        this.responseBytes += count;
+        try {
+          if (this.safetyBudget?.recordResponseBytes) {
+            await this.safetyBudget.recordResponseBytes(count);
+          }
+        } catch (error) {
+          if (indeterminateMutation) {
+            throw this.indeterminateWrite(error, "response_body_overrun");
+          }
+          throw error;
+        }
+      }
+    };
+    const consumeBody = async (target, property, args) => {
+      let bodyReadStarted = false;
+      try {
+        if (typeof target.arrayBuffer === "function" &&
+            ["json", "text", "arrayBuffer"].includes(property)) {
+          bodyReadStarted = true;
+          const raw = Buffer.from(await target.arrayBuffer());
+          await countBodyBytes(raw.byteLength);
+          if (property === "arrayBuffer") {
+            return raw.buffer.slice(raw.byteOffset, raw.byteOffset + raw.byteLength);
+          }
+          const text = raw.toString("utf8");
+          return property === "json" ? JSON.parse(text) : text;
+        }
+        bodyReadStarted = true;
+        const value = await Reflect.apply(target[property], target, args);
+        await countBodyBytes(bytes(value));
+        return value;
+      } catch (error) {
+        if (error?.code === "indeterminate_write") throw error;
+        if (indeterminateMutation && bodyReadStarted) {
+          throw this.indeterminateWrite(error, "response_body_failure");
+        }
+        throw error;
+      }
     };
     return new Proxy(response, {
       get: (target, property) => {
-        if (property === "json" && typeof target.json === "function") {
-          return async (...args) => await countBody(await target.json(...args));
-        }
-        if (property === "text" && typeof target.text === "function") {
-          return async (...args) => await countBody(await target.text(...args));
+        if (["json", "text", "arrayBuffer"].includes(property) &&
+            typeof target[property] === "function") {
+          return async (...args) => consumeBody(target, property, args);
         }
         return Reflect.get(target, property, target);
       },

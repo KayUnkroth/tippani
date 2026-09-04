@@ -40,7 +40,13 @@ export class OperationBudget {
     }
   }
 
-  consume({ operations = 0, objects = 0, bytes = 0 } = {}) {
+  consume({
+    operations = 0,
+    objects = 0,
+    bytes = 0,
+    checkOnly = false,
+    observed = false,
+  } = {}) {
     this.assertActive();
     const next = {
       operations: this.operations + operations,
@@ -52,14 +58,26 @@ export class OperationBudget {
       ["objects", "maxObjects"],
       ["bytes", "maxBytes"],
     ];
+    let exceeded = null;
     for (const [counter, limitName] of checks) {
       const limit = this.limits[limitName];
       if (Number.isFinite(limit) && next[counter] > limit) {
-        throw new SafetyBudgetError(counter, limit, next[counter]);
+        exceeded = new SafetyBudgetError(counter, limit, next[counter]);
+        break;
       }
     }
+    if (checkOnly) {
+      if (exceeded) throw exceeded;
+      return this.snapshot();
+    }
+    if (exceeded && !observed) throw exceeded;
     Object.assign(this, next);
+    if (exceeded) throw exceeded;
     return this.snapshot();
+  }
+
+  assertCanConsume(delta = {}) {
+    return this.consume({ ...delta, checkOnly: true });
   }
 
   recordRequest(body) {
@@ -67,7 +85,11 @@ export class OperationBudget {
   }
 
   recordResponse(body) {
-    return this.consume({ bytes: valueBytes(body) });
+    return this.recordResponseBytes(valueBytes(body));
+  }
+
+  recordResponseBytes(bytes) {
+    return this.consume({ bytes, observed: true });
   }
 
   recordObjects(count = 1) {
@@ -128,12 +150,20 @@ export class IpcOperationBudget {
     return this.consume({});
   }
 
+  assertCanConsume(delta = {}) {
+    return this.consume({ ...delta, checkOnly: true });
+  }
+
   recordRequest(body) {
     return this.consume({ operations: 1, bytes: valueBytes(body) });
   }
 
   recordResponse(body) {
-    return this.consume({ bytes: valueBytes(body) });
+    return this.recordResponseBytes(valueBytes(body));
+  }
+
+  recordResponseBytes(bytes) {
+    return this.consume({ bytes, observed: true });
   }
 
   recordObjects(count = 1) {

@@ -295,7 +295,13 @@ await check("an in-flight provider request receives and honors the deadline Abor
     });
     const pending = store.initialize();
     setTimeout(() => abortController.abort(), 5);
-    await assert.rejects(pending, (error) => error.code === "request_aborted");
+    await assert.rejects(
+      pending,
+      (error) =>
+        error.code === "indeterminate_write" &&
+        error.requiresReconciliation === true &&
+        error.cause?.code === "request_aborted",
+    );
     assert.equal(receivedSignal, true);
   });
 
@@ -349,6 +355,79 @@ await check("an in-flight provider request receives and honors the deadline Abor
     );
     assert.equal(commits, 0);
     assert.equal(store.liveProviderCallCount(), 0);
+  });
+
+  await check("Content-Length rejects before body read but classifies a sent mutation as indeterminate", async () => {
+    let commits = 0;
+    let bodyReads = 0;
+    const budget = new OperationBudget({
+      limits: { maxOperations: 10, maxObjects: 10, maxBytes: 4, maxDurationMs: 1000 },
+    });
+    const store = new GitHubRepoStore({
+      dryRun: false,
+      owner: "O",
+      repo: "R",
+      runId: "s0-response-length-budget",
+      githubToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl: async () => {
+        commits++;
+        return {
+          ok: true,
+          status: 201,
+          headers: new Headers({ "Content-Length": "10" }),
+          json: async () => {
+            bodyReads++;
+            return { ok: true };
+          },
+        };
+      },
+    });
+    await assert.rejects(
+      store.gh("POST", "https://api.github.invalid/mutation", { body: "x" }),
+      (error) =>
+        error.code === "indeterminate_write" &&
+        error.requiresReconciliation === true &&
+        error.reason === "response_content_length_overrun",
+    );
+    assert.equal(commits, 1, "the provider mutation was already sent");
+    assert.equal(bodyReads, 0, "Content-Length must be checked before reading the body");
+  });
+
+  await check("actual consumed response bytes can make a committed mutation indeterminate", async () => {
+    const responseBody = JSON.stringify({ committed: true, padding: "1234567890" });
+    let commits = 0;
+    const budget = new OperationBudget({
+      limits: { maxOperations: 10, maxObjects: 10, maxBytes: 8, maxDurationMs: 1000 },
+    });
+    const store = new GitHubRepoStore({
+      dryRun: false,
+      owner: "O",
+      repo: "R",
+      runId: "s0-response-body-budget",
+      githubToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl: async () => {
+        commits++;
+        return new Response(responseBody, { status: 201 });
+      },
+    });
+    const response = await store.gh(
+      "POST",
+      "https://api.github.invalid/mutation",
+      { body: "x" },
+    );
+    await assert.rejects(
+      response.json(),
+      (error) =>
+        error.code === "indeterminate_write" &&
+        error.requiresReconciliation === true &&
+        error.reason === "response_body_overrun",
+    );
+    assert.equal(commits, 1);
+    assert.equal(store.providerTelemetry().responseBytes, Buffer.byteLength(responseBody));
+    assert.equal(store.providerTelemetry().failures.indeterminate_write, 1);
+    assert.equal(budget.snapshot().bytes, 1 + Buffer.byteLength(responseBody));
   });
 
   await check("provider workers share one run-wide operation allowance", async () => {

@@ -25,7 +25,7 @@ import {
 } from "../workspace-contract.mjs";
 import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
 import { providerTargetHash } from "../preflight.mjs";
-import { resolveProviderIdentity } from "../provider-identity.mjs";
+import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
@@ -79,6 +79,18 @@ export class AdoGitStore {
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
+    this.credentialBinding = new ProviderCredentialBinding({
+      provider: "ado",
+      getToken: this._getToken,
+      fetchImpl: this.fetchImpl,
+      signal: this.signal,
+      identityResolver: this.identityResolver,
+      beforeAttempt: async () => {
+        await this.telemetry.recordRequest();
+        this.liveProviderCalls++;
+      },
+      wrapResponse: (response, context) => this.telemetry.wrapResponse(response, context),
+    });
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this._fault = null;
     this.offline = false;
@@ -96,19 +108,15 @@ export class AdoGitStore {
 
   async resolveCredentialIdentity() {
     if (this.resolvedIdentity) return this.resolvedIdentity;
-    this.resolvedIdentity = await resolveProviderIdentity({
-      provider: "ado",
-      getToken: this._getToken,
-      fetchImpl: this.fetchImpl,
-      signal: this.signal,
-      identityResolver: this.identityResolver,
-      beforeAttempt: async () => {
-        await this.telemetry.recordRequest();
-        this.liveProviderCalls++;
-      },
-      wrapResponse: (response) => this.telemetry.wrapResponse(response),
-    });
+    this.resolvedIdentity = await this.credentialBinding.resolveIdentity();
     return this.resolvedIdentity;
+  }
+
+  async credentialToken() {
+    if (!this.enforcePreflight) {
+      return (await this.credentialBinding.issuePinned()).token;
+    }
+    return (await this.credentialBinding.issueApproved()).token;
   }
 
   async assertEffectiveTargetApproved() {
@@ -136,6 +144,7 @@ export class AdoGitStore {
         "preflight_required",
       );
     }
+    this.credentialBinding.approveIdentity(identity);
   }
 
   record(op, detail = {}) {
@@ -159,38 +168,50 @@ export class AdoGitStore {
       await this.telemetry.recordRequest(body);
       this.liveProviderCalls++;
       this._fault = null;
-      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
-      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
-      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) });
-      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) });
+      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "outage") {
         this.telemetry.recordFailure("outage");
         throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
       }
       if (fault.kind === "lost-response") {
-        const token0 = await this._getToken();
-        await this.fetchImpl(url, {
-          method,
-          headers: { Authorization: `Bearer ${token0}`, ...headers },
-          body,
-          signal: this.signal,
-        });
-        this.telemetry.recordFailure("lost-response");
-        throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
+        const token0 = await this.credentialToken();
+        try {
+          await this.fetchImpl(url, {
+            method,
+            headers: { Authorization: `Bearer ${token0}`, ...headers },
+            body,
+            signal: this.signal,
+          });
+        } catch (error) {
+          throw this.telemetry.indeterminateWrite(error, "transport_failure");
+        }
+        throw this.telemetry.indeterminateWrite(
+          new Error("response lost (injected)"),
+          "response_lost",
+        );
       }
     }
-    const token = await this._getToken();
+    const token = await this.credentialToken();
     for (let attempt = 0; ; attempt++) {
+      let transportStarted = false;
       try {
         await this.telemetry.recordRequest(body);
         this.liveProviderCalls++;
-        return this.telemetry.wrapResponse(await this.fetchImpl(url, {
+        transportStarted = true;
+        return await this.telemetry.wrapResponse(await this.fetchImpl(url, {
           method,
           headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers },
           body,
           signal: this.signal,
-        }));
+        }), { method });
       } catch (error) {
+        if (error?.code === "indeterminate_write") throw error;
+        if (method !== "GET" && transportStarted) {
+          throw this.telemetry.indeterminateWrite(error, "transport_failure");
+        }
         if (method !== "GET" || attempt >= 2 || !(error instanceof TypeError)) throw error;
         const delayMs = 250 * (attempt + 1);
         this.telemetry.recordRetry();
@@ -412,6 +433,8 @@ export class AdoGitStore {
               remove: false,
               kind: "conflict",
               value: {
+                headId: entry.id,
+                headGeneration: entry.generation,
                 workspaceId: request.workspaceId,
                 expected: error.expectedGeneration,
                 actual: error.actualGeneration,
@@ -436,6 +459,14 @@ export class AdoGitStore {
 
   async pendingCount() {
     return this.pendingQueue.count();
+  }
+
+  async inspectHead() {
+    return this.pendingQueue.inspectHead();
+  }
+
+  async resolveHead(resolution) {
+    return this.pendingQueue.resolveHead(resolution);
   }
 
   async deleteWorkspace(workspaceId) {

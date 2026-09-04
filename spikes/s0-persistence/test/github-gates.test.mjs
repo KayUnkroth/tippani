@@ -91,6 +91,7 @@ function liveContext(scenarioId) {
     config: { runId, adapter: "github", backingPath: "github", dryRun: false },
     scenario: { id: scenarioId },
     inProcessProviderClients: true,
+    primaryRoot: storeRoot,
     createStore: () => new GitHubRepoStore({
       dryRun: false, owner: "O", repo: "R", runId,
       githubToken: "syn-token", fetchImpl: (u, o) => repo.fetch(u, o), storeRoot,
@@ -121,6 +122,10 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
       }
       if (["S0-COL-005", "S0-REC-004"].includes(id)) {
         assert.equal(result.evidence.processRestartRecoveredQueue, true);
+        assert.notEqual(result.evidence.queueRestartInspectorProcessId, process.pid);
+        const writers = result.evidence.queueWriterProcessIds ||
+          [result.evidence.queueWriterProcessId];
+        assert(writers.every((pid) => Number.isInteger(pid) && pid !== process.pid));
       }
     } finally {
       context.cleanupLocal();
@@ -135,7 +140,7 @@ await check("gates report Blocked outside a live provider context", async () => 
   }
 });
 
-await check("GitHub teardown is manifest-authorized and expected-SHA safe", async () => {
+await check("GitHub teardown fails closed when REST cannot delete by expected SHA", async () => {
   const runId = "s0-github-cleanup";
   let deletes = 0;
   const store = new GitHubRepoStore({
@@ -171,13 +176,17 @@ await check("GitHub teardown is manifest-authorized and expected-SHA safe", asyn
     },
   }, store);
   await store.prepareCleanup(authorization);
-  await store.cleanup(authorization);
-  assert.equal(deletes, 1);
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_unsupported",
+  );
+  assert.equal(deletes, 0);
+  assert.equal(authorization.manifest.authorize(authorization.resource), true);
 });
 
-await check("GitHub cleanup fails closed if the ref changes after authorization", async () => {
+await check("a moved GitHub ref survives unsupported cleanup and remains in the manifest", async () => {
   const runId = "s0-github-cleanup-race";
-  let reads = 0;
+  let tip = "tip-1";
   let deletes = 0;
   const store = new GitHubRepoStore({
     dryRun: false,
@@ -189,12 +198,11 @@ await check("GitHub cleanup fails closed if the ref changes after authorization"
     githubToken: "syn-token",
     fetchImpl: async (_url, options) => {
       if (options.method === "GET") {
-        reads++;
         return {
           ok: true,
           status: 200,
           headers: new Headers(),
-          json: async () => ({ object: { sha: reads === 1 ? "tip-1" : "tip-2" } }),
+          json: async () => ({ object: { sha: tip } }),
         };
       }
       deletes++;
@@ -212,41 +220,45 @@ await check("GitHub cleanup fails closed if the ref changes after authorization"
     },
   }, store);
   await store.prepareCleanup(authorization);
-  await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_conflict");
+  tip = "tip-2";
+  await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_unsupported");
   assert.equal(deletes, 0);
+  assert.equal(tip, "tip-2");
+  assert.equal(authorization.manifest.authorize(authorization.resource), true);
 });
 
-await check("GitHub cleanup treats a 422 delete response as a conflict", async () => {
-  const runId = "s0-github-cleanup-422";
+await check("GitHub branch creation treats 422 as a failure", async () => {
+  const runId = "s0-github-create-422";
+  let calls = 0;
   const store = new GitHubRepoStore({
     dryRun: false,
     owner: "O",
     repo: "R",
     runId,
-    cleanupManifestId: `syn-cleanup-${runId}`,
-    effectiveTargetHash: "sha256:syn-target",
     githubToken: "syn-token",
-    fetchImpl: async (_url, options) => options.method === "GET"
-      ? {
-        ok: true,
-        status: 200,
-        headers: new Headers(),
-        json: async () => ({ object: { sha: "tip-1" } }),
+    fetchImpl: async (url, options) => {
+      calls++;
+      if (options.method === "GET" && /\/repos\/O\/R$/.test(new URL(url).pathname)) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ default_branch: "main" }),
+        };
       }
-      : { ok: false, status: 422, headers: new Headers(), text: async () => "race" },
-  });
-  const authorization = createCleanupAuthorization({
-    runId,
-    backingPath: "github",
-    sandbox: {
-      ownershipMarker: `tippani-s0:${runId}`,
-      effectiveTargetHash: "sha256:syn-target",
-      coordinates: { owner: "O", repository: "R" },
-      cleanup: { manifestId: `syn-cleanup-${runId}` },
+      if (options.method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ object: { sha: "base" } }),
+        };
+      }
+      return { ok: false, status: 422, headers: new Headers(), text: async () => "exists" };
     },
-  }, store);
-  await store.prepareCleanup(authorization);
-  await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_conflict");
+  });
+  await assert.rejects(store.initialize(), (error) => error.code === "provider_error");
+  assert.equal(calls, 3);
 });
 
 console.log(`s0-github-gates: ${pass} passed, ${fail} failed`);

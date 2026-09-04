@@ -8,7 +8,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProviderWorkspaceStore } from "../src/adapters/provider-store.mjs";
+import { AdoGitStore } from "../src/adapters/ado-git-store.mjs";
 import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
+import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
 import { createStore } from "../src/adapters/registry.mjs";
 import { applicableScenarioIds } from "../src/applicability.mjs";
 import {
@@ -18,6 +20,7 @@ import {
 } from "../src/provider-preflight-sheet.mjs";
 import {
   findEmbeddedSecrets,
+  providerTargetHash,
   resolveEffectiveProviderConfig,
   validatePreflight,
   withResolvedProviderIdentity,
@@ -227,6 +230,181 @@ await check("provider adapter rejects a mismatched approved target before fetch"
   });
   await assert.rejects(store.initialize(), (error) => error.code === "preflight_required");
   assert.equal(calls, 0);
+});
+
+const credentialRotationCases = [
+  {
+    provider: "github",
+    Store: GitHubRepoStore,
+    options: { owner: "synthetic-owner", repo: "synthetic-repository" },
+    coordinates: { owner: "synthetic-owner", repository: "synthetic-repository" },
+    request: async (store) => store.initialize(),
+  },
+  {
+    provider: "ado",
+    Store: AdoGitStore,
+    options: {
+      org: "synthetic-org",
+      project: "synthetic-project",
+      repo: "synthetic-repository",
+    },
+    coordinates: {
+      organization: "synthetic-org",
+      project: "synthetic-project",
+      repository: "synthetic-repository",
+    },
+    request: async (store) => {
+      await store.initialize();
+      await store.listWorkspaces();
+    },
+  },
+  {
+    provider: "onedrive",
+    Store: OneDriveGraphStore,
+    options: { driveId: "synthetic-drive", folderPath: "Synthetic" },
+    coordinates: { driveId: "synthetic-drive", folder: "Synthetic" },
+    request: async (store) => store.initialize(),
+  },
+];
+
+for (const item of credentialRotationCases) {
+  await check(`${item.provider} token A approval cannot authorize token B`, async () => {
+    const runId = `s0-${item.provider}-credential-binding`;
+    const approvedIdentity = `${item.provider}:identity-a`;
+    const targetHash = providerTargetHash({
+      provider: item.provider,
+      identity: approvedIdentity,
+      coordinates: item.coordinates,
+      namespace: `tippani-s0/${runId}`,
+    });
+    let issuance = 0;
+    let providerCalls = 0;
+    const store = new item.Store({
+      dryRun: false,
+      runId,
+      ...item.options,
+      getToken: async () => issuance++ === 0 ? "token-a" : "token-b",
+      identityResolver: async ({ token }) => ({
+        subject: `${item.provider}:${token === "token-a" ? "identity-a" : "identity-b"}`,
+      }),
+      effectiveTargetHash: targetHash,
+      preflightApproval: {
+        approver: "Synthetic Reviewer",
+        approvedAt: "2026-09-03T20:00:00.000Z",
+        reference: "syn-review-91",
+        targetHash,
+      },
+      enforcePreflight: true,
+      fetchImpl: async () => {
+        providerCalls++;
+        throw new Error("mismatched credential must not reach the provider");
+      },
+    });
+    await assert.rejects(
+      item.request(store),
+      (error) => error.code === "credential_identity_mismatch",
+    );
+    assert.equal(providerCalls, 0);
+  });
+}
+
+await check("a rotated credential is re-resolved and accepted only for the approved identity", async () => {
+  const runId = "s0-github-approved-rotation";
+  const approvedIdentity = "github:identity-a";
+  const targetHash = providerTargetHash({
+    provider: "github",
+    identity: approvedIdentity,
+    coordinates: { owner: "synthetic-owner", repository: "synthetic-repository" },
+    namespace: `tippani-s0/${runId}`,
+  });
+  let issuance = 0;
+  const resolvedTokens = [];
+  let providerCalls = 0;
+  const store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "synthetic-owner",
+    repo: "synthetic-repository",
+    runId,
+    getToken: async () => issuance++ === 0 ? "token-a" : "token-b",
+    identityResolver: async ({ token }) => {
+      resolvedTokens.push(token);
+      return { subject: approvedIdentity };
+    },
+    effectiveTargetHash: targetHash,
+    preflightApproval: {
+      approver: "Synthetic Reviewer",
+      approvedAt: "2026-09-03T20:00:00.000Z",
+      reference: "syn-review-91",
+      targetHash,
+    },
+    enforcePreflight: true,
+    fetchImpl: async (url, options) => {
+      providerCalls++;
+      if (options.method === "GET" && /\/repos\/synthetic-owner\/synthetic-repository$/.test(new URL(url).pathname)) {
+        return { ok: true, status: 200, json: async () => ({ default_branch: "main" }) };
+      }
+      if (options.method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ object: { sha: "base" } }) };
+      }
+      return { ok: true, status: 201, json: async () => ({ ref: "created" }) };
+    },
+  });
+  await store.initialize();
+  assert.deepEqual(resolvedTokens, ["token-a", "token-b"]);
+  assert.equal(providerCalls, 3);
+});
+
+await check("all provider stores unblock FIFO replay only after explicit head resolution", async () => {
+  const storeRoot = path.join(spikeRoot, ".test-state", "provider-queue-resolution");
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  fs.mkdirSync(storeRoot, { recursive: true });
+  try {
+    for (const item of credentialRotationCases) {
+      const store = new item.Store({
+        dryRun: true,
+        runId: `s0-${item.provider}-queue-resolution`,
+        storeRoot,
+        ...item.options,
+      });
+      await store.initialize();
+      const workspace = createSyntheticWorkspace({ seed: `${item.provider}-queue-resolution` });
+      await store.createWorkspace(workspace);
+      await store.compareAndSwap({
+        workspaceId: workspace.workspaceId,
+        expectedGeneration: 0,
+        operation: { auditEvent: { actor: "Synthetic B", action: "authority-advance" } },
+      });
+      store.goOffline();
+      await store.stageOffline({
+        workspaceId: workspace.workspaceId,
+        expectedGeneration: 0,
+        operation: { auditEvent: { actor: "Synthetic A", action: "stale-head" } },
+      });
+      await store.stageOffline({
+        workspaceId: workspace.workspaceId,
+        expectedGeneration: 1,
+        operation: { auditEvent: { actor: "Synthetic A", action: "later-edit" } },
+      });
+      const blocked = await store.reconnect();
+      assert.equal(blocked.conflicts.length, 1, `${item.provider} must report the FIFO conflict`);
+      assert.equal(blocked.pendingCount, 2);
+      const inspected = await store.inspectHead();
+      assert.equal(inspected.head.id, blocked.conflicts[0].headId);
+      assert.equal(inspected.head.generation, blocked.conflicts[0].headGeneration);
+      await store.resolveHead({
+        headId: inspected.head.id,
+        headGeneration: inspected.head.generation,
+        action: "discard",
+      });
+      const replayed = await store.reconnect();
+      assert.equal(replayed.applied.length, 1, `${item.provider} must replay the later entry`);
+      assert.equal(replayed.pendingCount, 0);
+      assert.equal((await store.readWorkspace(workspace.workspaceId)).generation, 2);
+      await store.close();
+    }
+  } finally {
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+  }
 });
 
 await check("caller-supplied identity labels cannot satisfy live approval", () => {

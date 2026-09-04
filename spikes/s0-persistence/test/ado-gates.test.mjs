@@ -90,6 +90,7 @@ function liveContext(scenarioId) {
     config: { runId, adapter: "ado", backingPath: "ado", dryRun: false },
     scenario: { id: scenarioId },
     inProcessProviderClients: true,
+    primaryRoot: storeRoot,
     createStore: () => new AdoGitStore({
       dryRun: false, org: "O", project: "P", repo: "R", runId,
       adoToken: "syn-token", fetchImpl: (u, o) => repo.fetch(u, o), storeRoot,
@@ -120,6 +121,10 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
       }
       if (["S0-COL-005", "S0-REC-004"].includes(id)) {
         assert.equal(result.evidence.processRestartRecoveredQueue, true);
+        assert.notEqual(result.evidence.queueRestartInspectorProcessId, process.pid);
+        const writers = result.evidence.queueWriterProcessIds ||
+          [result.evidence.queueWriterProcessId];
+        assert(writers.every((pid) => Number.isInteger(pid) && pid !== process.pid));
       }
     } finally {
       context.cleanupLocal();

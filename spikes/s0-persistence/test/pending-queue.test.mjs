@@ -107,6 +107,65 @@ await check("FIFO processing stops at the first retained entry", async () => {
   );
 });
 
+await check("head resolution is durably guarded by ID and queue generation", async () => {
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  const queue = new PersistentPendingQueue({
+    storeRoot: root,
+    provider: "github",
+    runId: "s0-pending-queue-test",
+  });
+  await queue.append({ workspaceId: "syn-ws-first", expectedGeneration: 0 });
+  const inspected = await queue.inspectHead();
+  assert.equal(inspected.head.generation, 0);
+  await assert.rejects(
+    queue.resolveHead({
+      headId: inspected.head.id,
+      headGeneration: inspected.head.generation + 1,
+      action: "discard",
+    }),
+    (error) => error.code === "pending_queue_head_changed",
+  );
+  const replaced = await queue.resolveHead({
+    headId: inspected.head.id,
+    headGeneration: inspected.head.generation,
+    action: "replace",
+    replacement: { workspaceId: "syn-ws-first", expectedGeneration: 2 },
+  });
+  assert.equal(replaced.head.id, inspected.head.id);
+  assert.equal(replaced.head.generation, 1);
+  assert.equal(replaced.head.request.expectedGeneration, 2);
+  const reopened = new PersistentPendingQueue({
+    storeRoot: root,
+    provider: "github",
+    runId: "s0-pending-queue-test",
+  });
+  assert.deepEqual((await reopened.inspectHead()).head, replaced.head);
+});
+
+await check("discarding a conflicted head unblocks the next FIFO entry", async () => {
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  const queue = new PersistentPendingQueue({
+    storeRoot: root,
+    provider: "github",
+    runId: "s0-pending-queue-test",
+  });
+  await queue.append({ workspaceId: "syn-ws-conflict" });
+  await queue.append({ workspaceId: "syn-ws-later" });
+  const blocked = await queue.processHead(async () => ({ remove: false, kind: "conflict" }));
+  assert.equal(blocked.entry.request.workspaceId, "syn-ws-conflict");
+  const head = (await queue.inspectHead()).head;
+  await queue.resolveHead({
+    headId: head.id,
+    headGeneration: head.generation,
+    action: "discard",
+  });
+  const replayed = await queue.processHead(async () => ({ remove: true, kind: "applied" }));
+  assert.equal(replayed.entry.request.workspaceId, "syn-ws-later");
+  assert.equal(await queue.count(), 0);
+});
+
 fs.rmSync(root, { recursive: true, force: true });
 console.log(`s0-pending-queue: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
