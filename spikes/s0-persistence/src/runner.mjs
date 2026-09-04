@@ -283,6 +283,7 @@ export async function runHarness({
         runRoot,
         signal: abortController.signal,
         deadlineAt,
+        safetyBudget,
       });
       const scenarioStarted = performance.now();
       try {

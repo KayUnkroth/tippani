@@ -29,11 +29,15 @@ function fakeGitHubRepo() {
   const history = new Map();      // path -> [ { commitSha, content } ]
   let seq = 0;
   let tip = "base";               // current branch tip commit sha
+  let defaultTip = "base";
   let branchCreated = false;
   const stats = { refCreateAttempts: 0, markerWrites: 0 };
   const okJson = (obj, status = 200) => ({ ok: true, status, json: async () => obj, text: async () => JSON.stringify(obj) });
   return {
     stats,
+    advanceDefault(nextTip) {
+      defaultTip = nextTip;
+    },
     seedRunBranch(markerContent) {
       branchCreated = true;
       const blobSha = gitBlobSha(markerContent);
@@ -48,7 +52,7 @@ function fakeGitHubRepo() {
       const method = opts.method;
 
       if (/\/repos\/[^/]+\/[^/]+$/.test(p) && method === "GET") return okJson({ default_branch: "main" });
-      if (p.endsWith("/git/ref/heads/main") && method === "GET") return okJson({ object: { sha: "base" } });
+      if (p.endsWith("/git/ref/heads/main") && method === "GET") return okJson({ object: { sha: defaultTip } });
       if (/\/git\/ref\/heads\//.test(p) && method === "GET") return okJson({ object: { sha: tip } });
       if (p.endsWith("/git/refs") && method === "POST") {
         stats.refCreateAttempts++;
@@ -163,7 +167,7 @@ await check("gates report Blocked outside a live provider context", async () => 
   }
 });
 
-await check("GitHub initialize creates once and valid later clients attach", async () => {
+await check("GitHub initialize attaches after the default branch advances", async () => {
   const repo = fakeGitHubRepo();
   const options = {
     dryRun: false,
@@ -178,6 +182,7 @@ await check("GitHub initialize creates once and valid later clients attach", asy
   assert.equal(repo.stats.refCreateAttempts, 1);
   assert.equal(repo.stats.markerWrites, 1);
   await first.createWorkspace(createSyntheticWorkspace({ seed: "github-safe-attach" }));
+  repo.advanceDefault("base-advanced");
 
   const resumed = new GitHubRepoStore(options);
   await resumed.initialize();
@@ -298,6 +303,45 @@ await check("a moved GitHub ref survives unsupported cleanup and remains in the 
   await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_unsupported");
   assert.equal(deletes, 0);
   assert.equal(tip, "tip-2");
+  assert.equal(authorization.manifest.authorize(authorization.resource), true);
+});
+
+await check("GitHub cleanup rechecks an absent ref and rejects concurrent creation", async () => {
+  const runId = "s0-github-cleanup-absent-race";
+  let exists = false;
+  const store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "O",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    githubToken: "syn-token",
+    fetchImpl: async () => exists
+      ? {
+        ok: true,
+        status: 200,
+        json: async () => ({ object: { sha: "tip-new" } }),
+      }
+      : { ok: false, status: 404, json: async () => ({}) },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "github",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { owner: "O", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  exists = true;
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_conflict",
+  );
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
   assert.equal(authorization.manifest.authorize(authorization.resource), true);
 });
 

@@ -205,7 +205,7 @@ export class GitHubRepoStore {
     }
   }
 
-  async verifyRunMarker(baseSha) {
+  async verifyRunMarker() {
     const refResponse = await this.gh(
       "GET",
       `${this.repoBase()}/git/ref/heads/${this.branch}`,
@@ -243,9 +243,15 @@ export class GitHubRepoStore {
         "branch_ownership_conflict",
       );
     }
-    const expected = this.runMarker(baseSha);
+    if (typeof marker.baseSha !== "string" || !marker.baseSha) {
+      throw new WorkspaceStoreError(
+        "existing run branch ownership marker has no creation base",
+        "branch_ownership_conflict",
+      );
+    }
+    const expected = this.runMarker(marker.baseSha);
     if (JSON.stringify(marker) !== JSON.stringify(expected) ||
-        (body.sha && body.sha !== this.runMarkerBlobSha(baseSha))) {
+        (body.sha && body.sha !== this.runMarkerBlobSha(marker.baseSha))) {
       throw new WorkspaceStoreError(
         "existing run branch is not owned by this approved run",
         "branch_ownership_conflict",
@@ -353,7 +359,7 @@ export class GitHubRepoStore {
       body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: baseSha }),
     });
     if (createResp.status === 422) {
-      await this.verifyRunMarker(baseSha);
+      await this.verifyRunMarker();
     } else if (!createResp.ok) {
       throw new WorkspaceStoreError(`branch create failed: ${createResp.status}`, "provider_error");
     } else {
@@ -682,6 +688,37 @@ export class GitHubRepoStore {
     assertCleanupAuthorized(manifest, resource, expected);
     if (!resource.condition) {
       throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
+    }
+    const phase = manifest.phase(resource);
+    if (phase === "deleted") {
+      if (!this.dryRun) {
+        const current = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
+        if (current.status !== 404) {
+          if (!current.ok) {
+            throw new WorkspaceStoreError(`cleanup lookup failed: ${current.status}`, "provider_error");
+          }
+          throw new WorkspaceStoreError("cleanup target was recreated after deletion", "cleanup_conflict");
+        }
+      }
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, reconciled: true };
+    }
+    if (resource.condition.absent === true) {
+      if (this.dryRun) {
+        manifest.markDeleted(resource);
+        manifest.markCleaned(resource);
+        return { deleted: this.branch, absent: true, dryRun: true };
+      }
+      const current = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
+      if (current.status !== 404) {
+        if (!current.ok) {
+          throw new WorkspaceStoreError(`cleanup lookup failed: ${current.status}`, "provider_error");
+        }
+        throw new WorkspaceStoreError("cleanup target appeared after preparation", "cleanup_conflict");
+      }
+      manifest.markDeleted(resource);
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, absent: true };
     }
     this.record("cleanup-unsupported", {
       ref: `refs/heads/${this.branch}`,

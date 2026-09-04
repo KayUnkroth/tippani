@@ -8,7 +8,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
 import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
-import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
+import {
+  CleanupManifest,
+  createCleanupAuthorization,
+} from "../src/cleanup-manifest.mjs";
 import { buildPreflightSheet } from "../src/provider-preflight-sheet.mjs";
 import { findEmbeddedSecrets } from "../src/preflight.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
@@ -209,6 +212,125 @@ await check("cleanup authorization rejects different immutable coordinates", asy
     effectiveTargetHash: "sha256:different-target",
   });
   await assert.rejects(differentTarget.prepareCleanup(authorization), /manifest authorization/);
+});
+
+await check("OneDrive cleanup rechecks an absent target and rejects concurrent creation", async () => {
+  const runId = "s0-cleanup-absent-race";
+  let exists = false;
+  let deletes = 0;
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    graphToken: "syn-token",
+    fetchImpl: async (_url, options) => {
+      if (options.method === "GET") {
+        return exists
+          ? { ok: true, status: 200, json: async () => ({ id: "folder-new", eTag: "etag-new" }) }
+          : { ok: false, status: 404, json: async () => ({}) };
+      }
+      deletes++;
+      return { ok: true, status: 204 };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  exists = true;
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_conflict",
+  );
+  assert.equal(deletes, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
+  assert.equal(authorization.manifest.authorize(authorization.resource), true);
+});
+
+await check("OneDrive cleanup reconciles a crash after remote deletion", async () => {
+  const runId = "s0-cleanup-post-delete-crash";
+  const root = path.join(spikeRoot, ".test-state", runId);
+  const manifestPath = path.join(root, "cleanup-manifest.json");
+  const config = {
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  };
+  let exists = true;
+  let deletes = 0;
+  const fetchImpl = async (_url, options) => {
+    if (options.method === "GET") {
+      return exists
+        ? { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) }
+        : { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (options.method === "DELETE") {
+      deletes++;
+      exists = false;
+      return { ok: true, status: 204 };
+    }
+    throw new Error(`Unexpected cleanup method: ${options.method}`);
+  };
+  fs.rmSync(root, { recursive: true, force: true });
+  try {
+    const first = new OneDriveGraphStore({
+      dryRun: false,
+      driveId: "d1",
+      folderPath: "Base",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      graphToken: "syn-token",
+      fetchImpl,
+    });
+    const authorization = createCleanupAuthorization(config, first, {
+      filePath: manifestPath,
+    });
+    await first.prepareCleanup(authorization);
+    authorization.manifest.markCleaned = () => {
+      throw new Error("simulated process death after remote deletion");
+    };
+    await assert.rejects(first.cleanup(authorization), /simulated process death/);
+    assert.equal(deletes, 1);
+    assert.equal(CleanupManifest.load(manifestPath).resources[0].phase, "deleted");
+
+    const resumed = new OneDriveGraphStore({
+      dryRun: false,
+      driveId: "d1",
+      folderPath: "Base",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      graphToken: "syn-token",
+      fetchImpl,
+    });
+    const recovered = createCleanupAuthorization(config, resumed, {
+      filePath: manifestPath,
+    });
+    const result = await resumed.cleanup(recovered);
+    assert.equal(result.reconciled, true);
+    assert.equal(deletes, 1, "reconciliation must not issue a second delete");
+    const finalManifest = CleanupManifest.load(manifestPath);
+    assert.equal(finalManifest.resources[0].phase, "cleaned");
+    assert.equal(finalManifest.resources[0].cleaned, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 await check("provider requests enforce operation, object, byte, and abort budgets", async () => {

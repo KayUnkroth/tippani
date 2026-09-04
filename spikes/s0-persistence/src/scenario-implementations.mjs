@@ -1533,6 +1533,9 @@ async function cleanupOnlyOwned(context) {
   assert.equal(manifest.authorize(foreign), false, "A resource from another run is never authorized");
   assert.throws(() => manifest.markCleaned(foreign), /Refusing cleanup/);
 
+  manifest.bindCondition(owned, { syntheticPrepared: true });
+  manifest.markMutating(owned);
+  manifest.markDeleted(owned);
   manifest.markCleaned(owned);
   assert.equal(manifest.authorize(owned), false, "An already-cleaned resource is not re-authorized");
   return { evidence: { ownedAuthorized: true, foreignRefused: true } };
@@ -1579,6 +1582,30 @@ async function budgetsStopUnsafeRuns(context) {
   });
   abortController.abort();
   assert.throws(() => abortedBudget.assertActive(), SafetyBudgetError);
+  let providerChildBudget = null;
+  if (["onedrive", "ado", "github"].includes(context.config.backingPath) &&
+      context.config.dryRun === false) {
+    const before = context.safetyBudget.snapshot();
+    const [probe] = await raceWorkers([[
+      "--mode=budget-probe",
+      "--provider-live=true",
+      `--deadline-ms=${Math.max(1, context.config.budgets.maxDurationMs)}`,
+    ]], {
+      budget: context.safetyBudget,
+      timeoutMs: 5000,
+    });
+    const after = context.safetyBudget.snapshot();
+    assert.equal(probe.code, 0);
+    assert.equal(probe.report?.status, "budget-consumed");
+    assert.notEqual(probe.report?.pid, process.pid);
+    assert.equal(after.operations, before.operations + 1);
+    providerChildBudget = {
+      metered: true,
+      childPid: probe.report.pid,
+      operationsBefore: before.operations,
+      operationsAfter: after.operations,
+    };
+  }
   return {
     evidence: {
       nonPositiveBudgetsRejected: true,
@@ -1587,6 +1614,7 @@ async function budgetsStopUnsafeRuns(context) {
       byteLimitEnforced: true,
       deadlineEnforced: true,
       abortSignalEnforced: true,
+      ...(providerChildBudget ? { providerChildBudget } : {}),
     },
   };
 }

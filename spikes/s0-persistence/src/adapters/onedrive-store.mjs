@@ -442,15 +442,43 @@ export class OneDriveGraphStore {
     if (!resource.condition) {
       throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
     }
+    const phase = manifest.phase(resource);
     if (this.dryRun) {
       this.record("delete-folder", {
         path: this.subfolder,
         precondition: "If-Match:<folder-etag>",
       });
+      manifest.markMutating(resource);
+      manifest.markDeleted(resource);
       manifest.markCleaned(resource);
       return { deleted: this.subfolder, dryRun: true };
     }
+    if (phase === "deleted") {
+      const current = await this.graph(
+        "GET",
+        `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}?$select=id,eTag`,
+      );
+      if (current.status !== 404) {
+        if (!current.ok) {
+          throw new WorkspaceStoreError(`cleanup lookup failed: ${current.status}`, "provider_error");
+        }
+        throw new WorkspaceStoreError("cleanup target was recreated after deletion", "cleanup_conflict");
+      }
+      manifest.markCleaned(resource);
+      return { deleted: this.subfolder, reconciled: true };
+    }
     if (resource.condition.absent === true) {
+      const current = await this.graph(
+        "GET",
+        `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}?$select=id,eTag`,
+      );
+      if (current.status !== 404) {
+        if (!current.ok) {
+          throw new WorkspaceStoreError(`cleanup lookup failed: ${current.status}`, "provider_error");
+        }
+        throw new WorkspaceStoreError("cleanup target appeared after preparation", "cleanup_conflict");
+      }
+      manifest.markDeleted(resource);
       manifest.markCleaned(resource);
       return { deleted: this.subfolder, absent: true };
     }
@@ -458,22 +486,33 @@ export class OneDriveGraphStore {
       "GET",
       `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}?$select=id,eTag`,
     );
-    if (meta.status === 404) throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
+    if (meta.status === 404) {
+      if (phase === "mutating") {
+        manifest.markDeleted(resource);
+        manifest.markCleaned(resource);
+        return { deleted: this.subfolder, reconciled: true };
+      }
+      throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
+    }
     if (!meta.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${meta.status}`, "provider_error");
     const { id, eTag } = await meta.json();
     if (id !== resource.condition.expectedItemId ||
         eTag !== resource.condition.expectedETag) {
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
     }
+    manifest.markMutating(resource);
     const resp = await this.graph("DELETE", `/drives/${this.driveId}/items/${id}`, {
       headers: { "If-Match": resource.condition.expectedETag },
     });
     if (resp.status === 412) {
+      manifest.markPrepared(resource);
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
     }
     if (!resp.ok && resp.status !== 404) {
+      manifest.markPrepared(resource);
       throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
     }
+    manifest.markDeleted(resource);
     manifest.markCleaned(resource);
     return { deleted: this.subfolder };
   }

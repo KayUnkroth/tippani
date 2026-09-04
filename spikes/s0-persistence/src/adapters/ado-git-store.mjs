@@ -517,31 +517,57 @@ export class AdoGitStore {
     if (!resource.condition) {
       throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
     }
+    const phase = manifest.phase(resource);
     if (this.dryRun) {
       this.record("delete-ref", { ref: this.refName(), precondition: "oldObjectId=<tip>" });
+      manifest.markMutating(resource);
+      manifest.markDeleted(resource);
       manifest.markCleaned(resource);
       return { deleted: this.branch, dryRun: true };
     }
+    if (phase === "deleted") {
+      if (await this.getTip() !== null) {
+        throw new WorkspaceStoreError("cleanup target was recreated after deletion", "cleanup_conflict");
+      }
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, reconciled: true };
+    }
     if (resource.condition.absent === true) {
+      const current = await this.getTip();
+      if (current !== null) {
+        throw new WorkspaceStoreError("cleanup target appeared after preparation", "cleanup_conflict");
+      }
+      manifest.markDeleted(resource);
       manifest.markCleaned(resource);
       return { deleted: this.branch, absent: true };
     }
     const tip = await this.getTip();
+    if (tip === null && phase === "mutating") {
+      manifest.markDeleted(resource);
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, reconciled: true };
+    }
     if (tip !== resource.condition.expectedObjectId) {
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
     }
+    manifest.markMutating(resource);
     const body = JSON.stringify([{
       name: this.refName(),
       oldObjectId: resource.condition.expectedObjectId,
       newObjectId: ZERO_OID,
     }]);
     const resp = await this.ado("POST", `${this.base()}/refs?${API}`, { headers: { "Content-Type": "application/json" }, body });
-    if (!resp.ok) throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
+    if (!resp.ok) {
+      manifest.markPrepared(resource);
+      throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
+    }
     const outcome = await resp.json();
     const update = Array.isArray(outcome) ? outcome[0] : outcome.value?.[0];
     if (update?.success !== true) {
+      manifest.markPrepared(resource);
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
     }
+    manifest.markDeleted(resource);
     manifest.markCleaned(resource);
     return { deleted: this.branch };
   }

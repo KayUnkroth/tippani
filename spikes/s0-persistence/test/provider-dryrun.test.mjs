@@ -474,7 +474,8 @@ await check("an atomically persisted cleanup manifest survives process death and
     await store.cleanup({ manifest: recovered, resource: recoveredResource });
     const cleaned = CleanupManifest.load(manifestPath);
     assert.equal(cleaned.resources[0].cleaned, true);
-    assert.equal(cleaned.revision, 3);
+    assert.equal(cleaned.resources[0].phase, "cleaned");
+    assert.equal(cleaned.revision, 5);
     assert.notEqual(cleaned.evidence().digest, initialDigest);
   } finally {
     fs.rmSync(storeRoot, { recursive: true, force: true });
@@ -557,6 +558,8 @@ await check("runner persists and meters cleanup under the shared approved deadli
     assert.equal(run.results[0].status, "Pass", JSON.stringify(run.results[0]));
     assert.equal(run.results[0].evidence.cleanupBudgeted, true);
     assert.equal(run.results[0].evidence.cleanupSharedDeadline, true);
+    assert.equal(run.results[0].evidence.providerChildBudget.metered, true);
+    assert.notEqual(run.results[0].evidence.providerChildBudget.childPid, process.pid);
     assert.equal(cleanupMutationSawManifest, true);
     assert.equal(run.cleanup.status, "complete");
     assert.equal(run.cleanup.budgeted, true);
@@ -570,9 +573,10 @@ await check("runner persists and meters cleanup under the shared approved deadli
     assert.equal(run.cleanup.providerTelemetry.retries, 1);
     assert(run.cleanup.providerTelemetry.transferredBytes > 0);
     assert.equal(run.cleanup.manifest.cleanedCount, 1);
-    assert.equal(run.cleanup.manifest.revision, 3);
+    assert.equal(run.cleanup.manifest.phases.cleaned, 1);
+    assert.equal(run.cleanup.manifest.revision, 5);
     assert.deepEqual(run.budgetTelemetry.final, run.safetyBudget);
-    assert.equal(run.safetyBudget.operations, 6);
+    assert.equal(run.safetyBudget.operations, 7);
     assert.equal(artifacts.cleanupManifestPath, manifestPath);
     assert(
       fs.readFileSync(artifacts.reportPath, "utf8").includes(run.cleanup.manifest.digest),

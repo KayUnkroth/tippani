@@ -7,7 +7,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { AdoGitStore } from "../src/adapters/ado-git-store.mjs";
-import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
+import {
+  CleanupManifest,
+  createCleanupAuthorization,
+} from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 
 let pass = 0;
@@ -174,6 +177,127 @@ await check("ADO teardown is manifest-authorized and oldObjectId-conditional", a
   await store.prepareCleanup(authorization);
   await store.cleanup(authorization);
   assert.equal(conditional, true);
+});
+
+await check("ADO cleanup rechecks an absent ref and rejects concurrent creation", async () => {
+  const runId = "s0-ado-cleanup-absent-race";
+  let tip = null;
+  let updates = 0;
+  const store = new AdoGitStore({
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    adoToken: "syn-token",
+    fetchImpl: async (_url, options) => {
+      if (options.method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ value: tip ? [{ objectId: tip }] : [] }),
+        };
+      }
+      updates++;
+      return { ok: true, status: 200, json: async () => ({ value: [{ success: true }] }) };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "ado",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { organization: "O", project: "P", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  tip = "tip-new";
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_conflict",
+  );
+  assert.equal(updates, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
+});
+
+await check("ADO cleanup reconciles a crash after remote ref deletion", async () => {
+  const runId = "s0-ado-cleanup-post-delete-crash";
+  const root = path.resolve("spikes/s0-persistence/.test-state", runId);
+  const manifestPath = path.join(root, "cleanup-manifest.json");
+  const config = {
+    runId,
+    backingPath: "ado",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { organization: "O", project: "P", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  };
+  let tip = "tip-1";
+  let updates = 0;
+  const fetchImpl = async (_url, options) => {
+    if (options.method === "GET") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ value: tip ? [{ objectId: tip }] : [] }),
+      };
+    }
+    updates++;
+    tip = null;
+    return { ok: true, status: 200, json: async () => ({ value: [{ success: true }] }) };
+  };
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    const first = new AdoGitStore({
+      dryRun: false,
+      org: "O",
+      project: "P",
+      repo: "R",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      adoToken: "syn-token",
+      fetchImpl,
+    });
+    const authorization = createCleanupAuthorization(config, first, {
+      filePath: manifestPath,
+    });
+    await first.prepareCleanup(authorization);
+    authorization.manifest.markDeleted = () => {
+      throw new Error("simulated process death after remote deletion");
+    };
+    await assert.rejects(first.cleanup(authorization), /simulated process death/);
+    assert.equal(updates, 1);
+    assert.equal(CleanupManifest.load(manifestPath).resources[0].phase, "mutating");
+
+    const resumed = new AdoGitStore({
+      dryRun: false,
+      org: "O",
+      project: "P",
+      repo: "R",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      adoToken: "syn-token",
+      fetchImpl,
+    });
+    const recovered = createCleanupAuthorization(config, resumed, {
+      filePath: manifestPath,
+    });
+    const result = await resumed.cleanup(recovered);
+    assert.equal(result.reconciled, true);
+    assert.equal(updates, 1);
+    assert.equal(CleanupManifest.load(manifestPath).resources[0].phase, "cleaned");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 console.log(`s0-ado-gates: ${pass} passed, ${fail} failed`);

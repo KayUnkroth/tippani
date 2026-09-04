@@ -631,6 +631,9 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
   };
   manifest.record(owned);
   assert.equal(manifest.authorize(owned), true);
+  manifest.bindCondition(owned, { syntheticPrepared: true });
+  manifest.markMutating(owned);
+  manifest.markDeleted(owned);
   manifest.markCleaned(owned);
   assert.equal(manifest.authorize(owned), false);
   assert.throws(() => manifest.markCleaned(owned), /Refusing cleanup/);

@@ -3,7 +3,14 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { writeFileAtomicSync } from "./adapters/fs-atomic.mjs";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+const CLEANUP_PHASES = new Set([
+  "recorded",
+  "prepared",
+  "mutating",
+  "deleted",
+  "cleaned",
+]);
 
 function stable(value) {
   if (Array.isArray(value)) return value.map(stable);
@@ -55,7 +62,7 @@ export class CleanupManifest {
       throw new Error("Cleanup manifest is not valid JSON");
     }
     const { manifestDigest: recordedDigest, ...payload } = document || {};
-    if (payload.schemaVersion !== SCHEMA_VERSION ||
+    if (![2, SCHEMA_VERSION].includes(payload.schemaVersion) ||
         payload.syntheticData !== true ||
         !Number.isInteger(payload.revision) ||
         payload.revision < 0 ||
@@ -63,6 +70,16 @@ export class CleanupManifest {
         recordedDigest !== manifestDigest(payload)) {
       throw new Error("Cleanup manifest failed integrity validation");
     }
+    const resources = payload.resources.map((resource) => ({
+      ...structuredClone(resource),
+      phase: resource.phase || (
+        resource.cleaned === true
+          ? "cleaned"
+          : resource.condition
+            ? "prepared"
+            : "recorded"
+      ),
+    }));
     const manifest = new CleanupManifest({
       runId: payload.runId,
       ownershipMarker: payload.ownershipMarker,
@@ -72,13 +89,15 @@ export class CleanupManifest {
       filePath,
       revision: payload.revision,
     });
-    manifest.resources = payload.resources.map((resource) => structuredClone(resource));
+    manifest.resources = resources;
     for (const resource of manifest.resources) {
       if (!resource?.id || !resource?.kind ||
           resource.runId !== manifest.runId ||
           resource.ownershipMarker !== manifest.ownershipMarker ||
           (resource.coordinatesHash ?? null) !== manifest.coordinatesHash ||
           (resource.effectiveTargetHash ?? null) !== manifest.effectiveTargetHash ||
+          !CLEANUP_PHASES.has(resource.phase) ||
+          (resource.cleaned === true) !== (resource.phase === "cleaned") ||
           typeof resource.cleaned !== "boolean") {
         throw new Error("Cleanup manifest contains an invalid resource");
       }
@@ -102,7 +121,12 @@ export class CleanupManifest {
     if (this.resources.some((item) => item.id === resource.id && item.kind === resource.kind)) {
       throw new Error(`Cleanup resource already recorded: ${resource.kind}/${resource.id}`);
     }
-    this.resources.push({ ...structuredClone(resource), cleaned: false });
+    resource.phase = "recorded";
+    this.resources.push({
+      ...structuredClone(resource),
+      phase: "recorded",
+      cleaned: false,
+    });
     this.revision++;
     try {
       this.persistIfConfigured();
@@ -126,17 +150,55 @@ export class CleanupManifest {
   }
 
   markCleaned(resource) {
+    this.transition(resource, ["deleted"], "cleaned", { cleaned: true });
+  }
+
+  markMutating(resource) {
+    this.transition(resource, ["prepared", "mutating"], "mutating");
+  }
+
+  markPrepared(resource) {
+    this.transition(resource, ["mutating", "prepared"], "prepared");
+  }
+
+  markDeleted(resource) {
+    const phase = this.phase(resource);
+    const absentWithoutMutation = phase === "prepared" && resource.condition?.absent === true;
+    if (!absentWithoutMutation && phase !== "mutating" && phase !== "deleted") {
+      throw new Error("Refusing cleanup phase transition");
+    }
+    this.transition(resource, [phase], "deleted");
+  }
+
+  phase(resource) {
+    return this.resources.find((candidate) =>
+      candidate.kind === resource.kind && candidate.id === resource.id)?.phase || null;
+  }
+
+  transition(resource, allowedPhases, nextPhase, { cleaned = false } = {}) {
     const item = this.resources.find((candidate) =>
       candidate.kind === resource.kind && candidate.id === resource.id);
-    if (!item || !this.authorize(resource)) {
-      throw new Error("Refusing cleanup for an unowned or already cleaned resource");
+    if (!item || !this.authorize(resource) || !allowedPhases.includes(item.phase)) {
+      throw new Error("Refusing cleanup phase transition");
     }
-    item.cleaned = true;
+    if (item.phase === nextPhase && item.cleaned === cleaned) {
+      resource.phase = nextPhase;
+      return;
+    }
+    const previousItemPhase = item.phase;
+    const previousResourcePhase = resource.phase;
+    const previousCleaned = item.cleaned;
+    item.phase = nextPhase;
+    item.cleaned = cleaned;
+    resource.phase = nextPhase;
     this.revision++;
     try {
       this.persistIfConfigured();
     } catch (error) {
-      item.cleaned = false;
+      item.phase = previousItemPhase;
+      item.cleaned = previousCleaned;
+      if (previousResourcePhase === undefined) delete resource.phase;
+      else resource.phase = previousResourcePhase;
       this.revision--;
       throw error;
     }
@@ -145,17 +207,22 @@ export class CleanupManifest {
   bindCondition(resource, condition) {
     const item = this.resources.find((candidate) =>
       candidate.kind === resource.kind && candidate.id === resource.id);
-    if (!item || item.cleaned || item.condition || resource.condition) {
+    if (!item || item.cleaned || item.phase !== "recorded" ||
+        item.condition || resource.condition) {
       throw new Error("Refusing to replace or duplicate a cleanup condition");
     }
     item.condition = structuredClone(condition);
     resource.condition = structuredClone(condition);
+    item.phase = "prepared";
+    resource.phase = "prepared";
     this.revision++;
     try {
       this.persistIfConfigured();
     } catch (error) {
       delete item.condition;
       delete resource.condition;
+      item.phase = "recorded";
+      resource.phase = "recorded";
       this.revision--;
       throw error;
     }
@@ -193,6 +260,12 @@ export class CleanupManifest {
       revision: document.revision,
       resourceCount: document.resources.length,
       cleanedCount: document.resources.filter((resource) => resource.cleaned).length,
+      phases: Object.fromEntries(
+        [...CLEANUP_PHASES].map((phase) => [
+          phase,
+          document.resources.filter((resource) => resource.phase === phase).length,
+        ]),
+      ),
     };
   }
 
@@ -259,6 +332,7 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
     }
     const resumedResource = structuredClone(recorded);
     delete resumedResource.cleaned;
+    manifest.persist();
     return { manifest, resource: resumedResource };
   }
   const manifest = new CleanupManifest({
