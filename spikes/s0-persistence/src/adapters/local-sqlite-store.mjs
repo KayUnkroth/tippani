@@ -42,19 +42,20 @@ export class LocalSqliteWorkspaceStore {
     }
   }
 
-  async initialize() {
+  async initialize({ faultInjector = null } = {}) {
     fs.mkdirSync(this.root, { recursive: true });
     this.db = new DatabaseSync(this.databasePath);
+    this.db.exec(`PRAGMA busy_timeout = ${Number(this.busyTimeoutMs)}`);
     this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA synchronous = FULL");
     this.db.exec("PRAGMA foreign_keys = ON");
-    this.db.exec(`PRAGMA busy_timeout = ${Number(this.busyTimeoutMs)}`);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS workspaces (
         workspace_id   TEXT PRIMARY KEY,
         schema_version INTEGER NOT NULL,
         generation     INTEGER NOT NULL,
-        payload        TEXT NOT NULL
+        payload        TEXT NOT NULL,
+        checksum       TEXT NOT NULL
       );
       CREATE TABLE IF NOT EXISTS aliases (
         alias        TEXT PRIMARY KEY,
@@ -69,6 +70,57 @@ export class LocalSqliteWorkspaceStore {
         payload      TEXT NOT NULL
       );
     `);
+    let migrationCommitted = false;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const workspaceColumns = this.db.prepare("PRAGMA table_info(workspaces)").all();
+      if (!workspaceColumns.some((column) => column.name === "checksum")) {
+        this.db.exec("ALTER TABLE workspaces ADD COLUMN checksum TEXT");
+      }
+      const legacyRows = this.db.prepare(`
+        SELECT workspace_id, payload
+        FROM workspaces
+        WHERE checksum IS NULL OR checksum = ''
+        ORDER BY workspace_id
+      `).all();
+      const updateChecksum = this.db.prepare(
+        "UPDATE workspaces SET checksum = ? WHERE workspace_id = ?",
+      );
+      for (const row of legacyRows) {
+        let parsed;
+        try {
+          parsed = JSON.parse(row.payload);
+          validateWorkspaceRecord(parsed);
+        } catch {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} cannot be upgraded with an integrity checksum`,
+          );
+        }
+        if (parsed.workspaceId !== row.workspace_id) {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} cannot be upgraded because its payload identity differs`,
+          );
+        }
+        updateChecksum.run(
+          checksumWorkspace(parsed, row.workspace_id),
+          row.workspace_id,
+        );
+        faultInjector?.hit("during-checksum-backfill");
+      }
+      const remaining = this.db.prepare(`
+        SELECT COUNT(*) AS n
+        FROM workspaces
+        WHERE checksum IS NULL OR checksum = ''
+      `).get().n;
+      if (remaining !== 0) {
+        throw new CorruptWorkspaceStoreError("Checksum backfill left incomplete rows");
+      }
+      this.db.exec("COMMIT");
+      migrationCommitted = true;
+    } catch (error) {
+      if (!migrationCommitted) this.rollbackQuietly();
+      throw error;
+    }
     // Boot-time validation: every stored record must parse and validate before
     // the store is usable.
     const rows = this.db.prepare("SELECT workspace_id FROM workspaces ORDER BY workspace_id").all();
@@ -90,7 +142,11 @@ export class LocalSqliteWorkspaceStore {
       );
     }
     const row = this.db
-      .prepare("SELECT payload, schema_version FROM workspaces WHERE workspace_id = ?")
+      .prepare(`
+        SELECT payload, schema_version, generation, checksum
+        FROM workspaces
+        WHERE workspace_id = ?
+      `)
       .get(workspaceId);
     if (!row) throw new WorkspaceNotFoundError(workspaceId);
     if (row.schema_version !== SCHEMA_VERSION) {
@@ -101,6 +157,21 @@ export class LocalSqliteWorkspaceStore {
       parsed = JSON.parse(row.payload);
     } catch {
       throw new CorruptWorkspaceStoreError(`Workspace ${workspaceId} payload is not valid JSON`);
+    }
+    if (parsed.workspaceId !== workspaceId) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} payload identity does not match its database key`,
+      );
+    }
+    if (row.generation !== parsed.generation) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} generation columns disagree`,
+      );
+    }
+    if (row.checksum !== checksumWorkspace(parsed, workspaceId)) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} failed checksum validation`,
+      );
     }
     try {
       return validateWorkspaceRecord(parsed);
@@ -114,12 +185,20 @@ export class LocalSqliteWorkspaceStore {
   writeRows(workspace) {
     this.db
       .prepare(`
-        INSERT INTO workspaces (workspace_id, schema_version, generation, payload)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(workspace_id) DO UPDATE SET generation = excluded.generation,
-                                                payload = excluded.payload
+        INSERT INTO workspaces (workspace_id, schema_version, generation, payload, checksum)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(workspace_id) DO UPDATE SET schema_version = excluded.schema_version,
+                                                generation = excluded.generation,
+                                                payload = excluded.payload,
+                                                checksum = excluded.checksum
       `)
-      .run(workspace.workspaceId, SCHEMA_VERSION, workspace.generation, JSON.stringify(workspace));
+      .run(
+        workspace.workspaceId,
+        SCHEMA_VERSION,
+        workspace.generation,
+        JSON.stringify(workspace),
+        checksumWorkspace(workspace, workspace.workspaceId),
+      );
     this.db.prepare("DELETE FROM aliases WHERE workspace_id = ?").run(workspace.workspaceId);
     const insert = this.db.prepare("INSERT INTO aliases (alias, workspace_id) VALUES (?, ?)");
     for (const alias of workspace.aliases) {
@@ -244,14 +323,38 @@ export class LocalSqliteWorkspaceStore {
     }
   }
 
-  injectCorruption(workspaceId) {
+  injectCorruption(workspaceId, mode = "truncated") {
     const existing = this.db
-      .prepare("SELECT 1 AS present FROM workspaces WHERE workspace_id = ?")
+      .prepare("SELECT payload FROM workspaces WHERE workspace_id = ?")
       .get(workspaceId);
     if (!existing) throw new WorkspaceNotFoundError(workspaceId);
+    let payload = '{"workspaceId":"syn-ws-trunc';
+    if (mode === "valid-json-tamper") {
+      const parsed = JSON.parse(existing.payload);
+      parsed.private.audit.push({ actor: "Synthetic Tamper", action: "checksum-bypass-attempt" });
+      payload = JSON.stringify(parsed);
+    }
     this.db
       .prepare("UPDATE workspaces SET payload = ? WHERE workspace_id = ?")
-      .run('{"workspaceId":"syn-ws-trunc', workspaceId);
+      .run(payload, workspaceId);
+  }
+
+  injectIdentitySubstitution(workspaceId, replacementWorkspaceId) {
+    const existing = this.db
+      .prepare("SELECT payload FROM workspaces WHERE workspace_id = ?")
+      .get(workspaceId);
+    if (!existing) throw new WorkspaceNotFoundError(workspaceId);
+    const parsed = JSON.parse(existing.payload);
+    parsed.workspaceId = replacementWorkspaceId;
+    this.db.prepare(`
+      UPDATE workspaces
+      SET payload = ?, checksum = ?
+      WHERE workspace_id = ?
+    `).run(
+      JSON.stringify(parsed),
+      checksumWorkspace(parsed, replacementWorkspaceId),
+      workspaceId,
+    );
   }
 
   /** Force the next raw read of this workspace to fail as permission-denied. */

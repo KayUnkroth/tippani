@@ -5,6 +5,7 @@ import { BackingPathStore, ProviderWorkspaceStore } from "./provider-store.mjs";
 import { OneDriveGraphStore } from "./onedrive-store.mjs";
 import { AdoGitStore } from "./ado-git-store.mjs";
 import { GitHubRepoStore } from "./github-repo-store.mjs";
+import { resolveEffectiveProviderConfig } from "../preflight.mjs";
 
 /**
  * Adapters that keep authoritative state on disk. Only these can supply
@@ -49,6 +50,18 @@ const FACTORIES = {
     folderPath: options.folderPath,
     runId: options.runId,
     configurationId: options.configurationId,
+    storeRoot: options.storeRoot,
+    safetyBudget: options.safetyBudget,
+    signal: options.signal,
+    identityResolver: options.identityResolver,
+    preflightApproval: options.preflightApproval,
+    effectiveTargetHash: options.effectiveTargetHash,
+    enforcePreflight: options.enforcePreflight,
+    ownershipMarker: options.ownershipMarker,
+    cleanupManifestId: options.sandbox?.cleanup?.manifestId,
+    graphToken: options.graphToken,
+    getToken: options.getToken,
+    fetchImpl: options.fetchImpl,
   }),
   // ADO has a real Git-REST transport with oldObjectId ref-precondition CAS.
   "ado": (options) => new AdoGitStore({
@@ -58,6 +71,18 @@ const FACTORIES = {
     repo: options.repo,
     runId: options.runId,
     configurationId: options.configurationId,
+    storeRoot: options.storeRoot,
+    safetyBudget: options.safetyBudget,
+    signal: options.signal,
+    identityResolver: options.identityResolver,
+    preflightApproval: options.preflightApproval,
+    effectiveTargetHash: options.effectiveTargetHash,
+    enforcePreflight: options.enforcePreflight,
+    ownershipMarker: options.ownershipMarker,
+    cleanupManifestId: options.sandbox?.cleanup?.manifestId,
+    adoToken: options.adoToken,
+    getToken: options.getToken,
+    fetchImpl: options.fetchImpl,
   }),
   // GitHub has a real REST transport with Contents-API blob-sha CAS.
   "github": (options) => new GitHubRepoStore({
@@ -66,6 +91,18 @@ const FACTORIES = {
     repo: options.repo,
     runId: options.runId,
     configurationId: options.configurationId,
+    storeRoot: options.storeRoot,
+    safetyBudget: options.safetyBudget,
+    signal: options.signal,
+    identityResolver: options.identityResolver,
+    preflightApproval: options.preflightApproval,
+    effectiveTargetHash: options.effectiveTargetHash,
+    enforcePreflight: options.enforcePreflight,
+    ownershipMarker: options.ownershipMarker,
+    cleanupManifestId: options.sandbox?.cleanup?.manifestId,
+    githubToken: options.githubToken,
+    getToken: options.getToken,
+    fetchImpl: options.fetchImpl,
   }),
 };
 
@@ -80,7 +117,26 @@ if (process.env.S0_ENABLE_TEST_MUTANTS === "1") {
 export function createStore(adapter, options = {}) {
   const factory = FACTORIES[adapter];
   if (!factory) throw new Error(`Unknown S0 adapter: ${adapter}`);
-  return factory(options);
+  if (!["onedrive", "ado", "github"].includes(adapter)) return factory(options);
+  const sandbox = options.sandbox || {
+    namespace: `tippani-s0/${options.runId}`,
+    ownershipMarker: `tippani-s0:${options.runId}`,
+    coordinates: {},
+    approval: options.preflightApproval,
+  };
+  const resolved = resolveEffectiveProviderConfig({
+    ...options,
+    adapter,
+    backingPath: adapter,
+    sandbox,
+  });
+  return factory({
+    ...resolved,
+    preflightApproval: resolved.sandbox?.approval,
+    effectiveTargetHash:
+      resolved.sandbox?.effectiveTargetHash || resolved.sandbox?.approval?.targetHash,
+    ownershipMarker: resolved.sandbox?.ownershipMarker,
+  });
 }
 
 export function isDurable(adapter) {

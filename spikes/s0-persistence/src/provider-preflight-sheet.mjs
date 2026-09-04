@@ -3,12 +3,21 @@
 // path would issue, produced by running the provider adapter in dry-run so the
 // manifest is real and zero provider calls are made.
 
-import { PreflightError, assertPreflight, findEmbeddedSecrets, validatePreflight } from "./preflight.mjs";
+import {
+  PreflightError,
+  assertPreflight,
+  findEmbeddedSecrets,
+  resolveEffectiveProviderConfig,
+  validatePreflight,
+  withResolvedProviderIdentity,
+} from "./preflight.mjs";
+import { resolveProviderIdentityForConfig } from "./provider-identity.mjs";
 import { PROVIDER_PREREQUISITES } from "./provider-gates.mjs";
 import { ProviderWorkspaceStore } from "./adapters/provider-store.mjs";
 import { OneDriveGraphStore } from "./adapters/onedrive-store.mjs";
 import { AdoGitStore } from "./adapters/ado-git-store.mjs";
 import { GitHubRepoStore } from "./adapters/github-repo-store.mjs";
+import { createCleanupAuthorization } from "./cleanup-manifest.mjs";
 import { createSyntheticWorkspace } from "./synthetic-fixtures.mjs";
 
 function makeDryRunStore(config) {
@@ -19,6 +28,9 @@ function makeDryRunStore(config) {
       configurationId: config.configurationId,
       driveId: config.sandbox?.coordinates?.driveId,
       folderPath: config.sandbox?.coordinates?.folder,
+      ownershipMarker: config.sandbox?.ownershipMarker,
+      cleanupManifestId: config.sandbox?.cleanup?.manifestId,
+      effectiveTargetHash: config.sandbox?.effectiveTargetHash,
     });
   }
   if (config.backingPath === "ado") {
@@ -29,6 +41,9 @@ function makeDryRunStore(config) {
       org: config.sandbox?.coordinates?.organization,
       project: config.sandbox?.coordinates?.project,
       repo: config.sandbox?.coordinates?.repository,
+      ownershipMarker: config.sandbox?.ownershipMarker,
+      cleanupManifestId: config.sandbox?.cleanup?.manifestId,
+      effectiveTargetHash: config.sandbox?.effectiveTargetHash,
     });
   }
   if (config.backingPath === "github") {
@@ -38,6 +53,9 @@ function makeDryRunStore(config) {
       configurationId: config.configurationId,
       owner: config.sandbox?.coordinates?.owner,
       repo: config.sandbox?.coordinates?.repository,
+      ownershipMarker: config.sandbox?.ownershipMarker,
+      cleanupManifestId: config.sandbox?.cleanup?.manifestId,
+      effectiveTargetHash: config.sandbox?.effectiveTargetHash,
     });
   }
   return new ProviderWorkspaceStore({
@@ -61,7 +79,11 @@ export async function runProviderDryRun(config) {
   await store.readWorkspace(workspace.workspaceId);
   await store.listWorkspaces();
   await store.backup();
-  if (typeof store.cleanup === "function") await store.cleanup();
+  if (typeof store.cleanup === "function") {
+    const authorization = createCleanupAuthorization(config, store);
+    if (typeof store.prepareCleanup === "function") await store.prepareCleanup(authorization);
+    await store.cleanup(authorization);
+  }
   await store.close();
   return {
     operations: store.providerOperationManifest(),
@@ -69,10 +91,25 @@ export async function runProviderDryRun(config) {
   };
 }
 
-export async function buildPreflightSheet(config) {
-  const errors = validatePreflight(config);
+export async function buildPreflightSheet(config, {
+  env = process.env,
+  identityResolver = null,
+  identityFetchImpl = null,
+} = {}) {
+  const errors = validatePreflight(config, { env, requireApproval: false });
   if (errors.length) throw new PreflightError(errors);
-  const preflight = assertPreflight(config, new Date());
+  config = resolveEffectiveProviderConfig(config, env);
+  let identityResolutionCalls = 0;
+  if (config.dryRun === false) {
+    const identity = await resolveProviderIdentityForConfig(config, {
+      env,
+      identityResolver,
+      fetchImpl: identityFetchImpl || globalThis.fetch,
+      beforeAttempt: () => { identityResolutionCalls++; },
+    });
+    config = withResolvedProviderIdentity(config, identity, env);
+  }
+  const preflight = assertPreflight(config, new Date(), { requireApproval: false });
 
   const dryRun = await runProviderDryRun(config);
   if (dryRun.liveProviderCalls !== 0) {
@@ -87,6 +124,8 @@ export async function buildPreflightSheet(config) {
     syntheticDataOnly: config.syntheticDataOnly === true,
     identity: {
       label: config.sandbox.identityLabel,
+      subject: preflight.sandbox.providerIdentity,
+      source: preflight.sandbox.providerIdentity ? "provider credential" : "unresolved",
       verified: config.sandbox.identityVerified === true,
       corporateFallbackDisabled: config.sandbox.corporateFallbackDisabled === true,
     },
@@ -98,6 +137,9 @@ export async function buildPreflightSheet(config) {
     cleanup: preflight.sandbox.cleanup,
     dryRunOperations: dryRun.operations,
     liveProviderCalls: dryRun.liveProviderCalls,
+    identityResolutionCalls,
+    effectiveTargetHash: preflight.sandbox.effectiveTargetHash,
+    approvalReady: Boolean(preflight.sandbox.effectiveTargetHash),
     prerequisites: PROVIDER_PREREQUISITES,
   };
 
@@ -116,10 +158,14 @@ export function renderPreflightSheet(sheet) {
     `**Synthetic data only:** ${sheet.syntheticDataOnly}`,
     `**Approval required before any live provider call:** ${sheet.approvalRequired ? "Yes" : "No"}`,
     `**Live provider calls during dry-run:** ${sheet.liveProviderCalls}`,
+    `**Credential identity-resolution calls:** ${sheet.identityResolutionCalls}`,
+    `**Effective target hash ready for approval:** ${sheet.approvalReady ? "Yes" : "No"}`,
     "",
     "## Effective identity (non-secret)",
     "",
     `- Label: ${sheet.identity.label}`,
+    `- Provider-derived subject: ${sheet.identity.subject || "unresolved"}`,
+    `- Source: ${sheet.identity.source}`,
     `- Verified: ${sheet.identity.verified}`,
     `- Corporate fallback disabled: ${sheet.identity.corporateFallbackDisabled}`,
     "",
@@ -129,6 +175,7 @@ export function renderPreflightSheet(sheet) {
     `- Per-run namespace: ${sheet.namespace}`,
     `- Default/protected branch excluded: ${sheet.defaultBranchExcluded}`,
     `- Ownership marker: ${sheet.ownershipMarker}`,
+    `- Approved target hash input: ${sheet.effectiveTargetHash || "unresolved runtime target"}`,
     "",
     "## Budgets",
     "",

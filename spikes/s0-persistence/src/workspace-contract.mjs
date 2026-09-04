@@ -84,6 +84,55 @@ export function validateWorkspaceRecord(workspace) {
   if (!workspace.publication?.journalsById || !workspace.private || !workspace.lifecycle) {
     throw new WorkspaceStoreError("Workspace partitions are incomplete", "invalid_workspace");
   }
+  const journals = workspace.publication.journalsById;
+  for (const [journalId, journal] of Object.entries(journals)) {
+    if (!journal || journal.journalId !== journalId) {
+      throw new WorkspaceStoreError("Journal identity does not match its key", "invalid_journal");
+    }
+    if (journal.workspaceId !== workspace.workspaceId) {
+      throw new WorkspaceStoreError("Journal references another workspace", "invalid_journal_workspace");
+    }
+    if (!Number.isInteger(journal.generation) ||
+        journal.generation < 0 ||
+        journal.generation > workspace.generation) {
+      throw new WorkspaceStoreError("Journal references an invalid generation", "invalid_journal_generation");
+    }
+    if (!["planned", "committed", "aborted"].includes(journal.status) ||
+        !Array.isArray(journal.intentTuples)) {
+      throw new WorkspaceStoreError("Journal shape is invalid", "invalid_journal");
+    }
+    for (const tuple of journal.intentTuples) {
+      if (!tuple?.intentId || !Number.isInteger(tuple.intentRevision) || !tuple.contentHash) {
+        throw new WorkspaceStoreError("Journal tuple is invalid", "dangling_journal_tuple");
+      }
+      if (journal.status === "planned" && !tupleMatchesIntent(tuple, intents[tuple.intentId])) {
+        throw new WorkspaceStoreError(
+          `Journal tuple does not resolve: ${tuple?.intentId || "unknown"}`,
+          "dangling_journal_tuple",
+        );
+      }
+    }
+  }
+  const activeJournalId = workspace.publication.activeJournalId;
+  if (activeJournalId !== null && activeJournalId !== undefined && !journals[activeJournalId]) {
+    throw new WorkspaceStoreError("Active journal does not resolve", "dangling_active_journal");
+  }
+  if (activeJournalId && journals[activeJournalId]?.status !== "planned") {
+    throw new WorkspaceStoreError("Active journal must be planned", "invalid_active_journal");
+  }
+  for (const journal of Object.values(journals)) {
+    if (journal.status === "planned") {
+      if (journal.journalId !== activeJournalId) {
+        throw new WorkspaceStoreError("Planned journal must be active", "invalid_active_journal");
+      }
+      if (journal.generation !== workspace.generation - 1) {
+        throw new WorkspaceStoreError(
+          "Planned journal generation must be the exact pre-mutation generation",
+          "invalid_journal_generation",
+        );
+      }
+    }
+  }
   return workspace;
 }
 
@@ -141,6 +190,15 @@ export function applyWorkspaceOperation(current, operation = {}) {
     if (!journal.journalId || journal.status !== "planned" || !Array.isArray(journal.intentTuples)) {
       throw new WorkspaceStoreError("Invalid planned journal", "invalid_journal");
     }
+    if (journal.workspaceId !== current.workspaceId) {
+      throw new WorkspaceStoreError("Journal references another workspace", "invalid_journal_workspace");
+    }
+    if (journal.generation !== current.generation) {
+      throw new WorkspaceStoreError(
+        "Planned journal generation must equal the pre-mutation generation",
+        "invalid_journal_generation",
+      );
+    }
     for (const tuple of journal.intentTuples) {
       const intent = next.pushable.remote.intentsById[tuple.intentId];
       if (!tupleMatchesIntent(tuple, intent)) {
@@ -160,6 +218,9 @@ export function applyWorkspaceOperation(current, operation = {}) {
     if (!journal) {
       throw new WorkspaceStoreError(`Unknown journal: ${journalId}`, "invalid_reconciliation");
     }
+    if (journal.status !== "planned") {
+      throw new WorkspaceStoreError("Only a planned journal can be reconciled", "invalid_reconciliation");
+    }
     if (!["committed", "aborted"].includes(outcome)) {
       throw new WorkspaceStoreError("Reconciliation outcome must be committed or aborted", "invalid_reconciliation");
     }
@@ -176,8 +237,11 @@ export function applyWorkspaceOperation(current, operation = {}) {
   return next;
 }
 
-export function checksumWorkspace(workspace) {
-  return crypto.createHash("sha256").update(JSON.stringify(workspace)).digest("hex");
+export function checksumWorkspace(workspace, durableWorkspaceId = workspace?.workspaceId) {
+  return crypto.createHash("sha256").update(JSON.stringify({
+    durableWorkspaceId,
+    workspace,
+  })).digest("hex");
 }
 
 // A workspace whose active journal is still `planned` has an indeterminate

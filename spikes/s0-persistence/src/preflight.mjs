@@ -1,4 +1,28 @@
+import crypto from "node:crypto";
+
 const PROVIDERS = new Set(["onedrive", "ado", "github"]);
+const PROVIDER_TARGETS = Object.freeze({
+  onedrive: Object.freeze({
+    coordinates: Object.freeze({
+      driveId: Object.freeze({ option: "driveId", env: "S0_ONEDRIVE_DRIVE_ID" }),
+      folder: Object.freeze({ option: "folderPath", env: "S0_ONEDRIVE_FOLDER" }),
+    }),
+  }),
+  ado: Object.freeze({
+    coordinates: Object.freeze({
+      organization: Object.freeze({ option: "org", env: "S0_ADO_ORG" }),
+      project: Object.freeze({ option: "project", env: "S0_ADO_PROJECT" }),
+      repository: Object.freeze({ option: "repo", env: "S0_ADO_REPO" }),
+    }),
+  }),
+  github: Object.freeze({
+    coordinates: Object.freeze({
+      owner: Object.freeze({ option: "owner", env: "S0_GITHUB_OWNER" }),
+      repository: Object.freeze({ option: "repo", env: "S0_GITHUB_REPO" }),
+    }),
+  }),
+});
+const TRUSTED_IDENTITY = Symbol("s0.trustedProviderIdentity");
 const ALLOWED_CREDENTIAL_METADATA = new Set([
   "credentialbrokerref",
   "credentialsource",
@@ -34,6 +58,108 @@ function positiveNumber(value) {
   return Number.isFinite(value) && value > 0;
 }
 
+export function isRuntimePlaceholder(value) {
+  return typeof value !== "string" || !value.trim() ||
+    /supplied at runtime|replace before live|<[^>]+>|\btemplate\b/i.test(value);
+}
+
+function hashTarget(target) {
+  return crypto.createHash("sha256").update(JSON.stringify(target)).digest("hex");
+}
+
+export function providerTargetHash(target) {
+  if (!target || typeof target !== "object") return null;
+  const coordinates = target.coordinates || {};
+  if (isRuntimePlaceholder(target.identity) ||
+      Object.values(coordinates).some(isRuntimePlaceholder) ||
+      isRuntimePlaceholder(target.namespace)) {
+    return null;
+  }
+  return `sha256:${hashTarget({
+    provider: target.provider,
+    identity: target.identity,
+    coordinates,
+    namespace: target.namespace,
+  })}`;
+}
+
+function approvalFrom(config, env) {
+  const declared = config?.sandbox?.approval || {};
+  return {
+    approver: env.S0_PREFLIGHT_APPROVER || declared.approver,
+    approvedAt: env.S0_PREFLIGHT_APPROVED_AT || declared.approvedAt,
+    reference: env.S0_PREFLIGHT_APPROVAL_REFERENCE || declared.reference,
+    targetHash: env.S0_PREFLIGHT_TARGET_HASH || declared.targetHash,
+  };
+}
+
+function cloneRecord(value) {
+  if (!value || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map(cloneRecord);
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, cloneRecord(item)]));
+}
+
+export function resolveEffectiveProviderConfig(config, env = process.env, {
+  resolvedIdentity = config?.[TRUSTED_IDENTITY] || null,
+} = {}) {
+  const resolved = {
+    ...config,
+    budgets: cloneRecord(config?.budgets),
+    scenarioIds: cloneRecord(config?.scenarioIds),
+    sandbox: config?.sandbox ? {
+      ...config.sandbox,
+      coordinates: cloneRecord(config.sandbox.coordinates),
+      dryRunOperations: cloneRecord(config.sandbox.dryRunOperations),
+      cleanup: cloneRecord(config.sandbox.cleanup),
+      approval: cloneRecord(config.sandbox.approval),
+    } : {},
+  };
+  const targetDefinition = PROVIDER_TARGETS[resolved?.backingPath];
+  if (!targetDefinition) return resolved;
+  const declaredCoordinates = resolved.sandbox?.coordinates || {};
+  const coordinates = {};
+  for (const [name, definition] of Object.entries(targetDefinition.coordinates)) {
+    const explicit = resolved[definition.option];
+    coordinates[name] = !isRuntimePlaceholder(explicit)
+      ? explicit
+      : env[definition.env] || declaredCoordinates[name] || null;
+    resolved[definition.option] = coordinates[name];
+  }
+  const target = {
+    provider: resolved.backingPath,
+    identity: resolvedIdentity,
+    coordinates,
+    namespace: resolved.sandbox?.namespace || null,
+  };
+  delete resolved.effectiveIdentity;
+  resolved.sandbox = {
+    ...(resolved.sandbox || {}),
+    coordinates,
+    effectiveTargetHash: providerTargetHash(target),
+    approval: approvalFrom(resolved, env),
+  };
+  if (resolvedIdentity) {
+    Object.defineProperty(resolved, TRUSTED_IDENTITY, {
+      configurable: false,
+      enumerable: true,
+      value: resolvedIdentity,
+      writable: false,
+    });
+  }
+  return resolved;
+}
+
+export function withResolvedProviderIdentity(config, identity, env = process.env) {
+  if (isRuntimePlaceholder(identity)) {
+    throw new PreflightError(["Provider-derived identity is required"]);
+  }
+  return resolveEffectiveProviderConfig(config, env, { resolvedIdentity: identity });
+}
+
+export function trustedProviderIdentity(config) {
+  return config?.[TRUSTED_IDENTITY] || null;
+}
+
 export function normalizedCleanup(sandbox, now = new Date()) {
   const cleanup = sandbox?.cleanup;
   if (!cleanup) return null;
@@ -59,19 +185,24 @@ function findEmbeddedSecrets(value, path = "$", errors = []) {
 
 export { findEmbeddedSecrets };
 
-export function validatePreflight(config) {
+export function validatePreflight(config, {
+  env = process.env,
+  requireApproval = config?.dryRun === false,
+} = {}) {
   const errors = findEmbeddedSecrets(config);
-  const runId = String(config?.runId || "");
-  const sandbox = config?.sandbox || {};
-  const budgets = config?.budgets || {};
+  const effectiveConfig = resolveEffectiveProviderConfig(config, env);
+  findEmbeddedSecrets(effectiveConfig, "$", errors);
+  const runId = String(effectiveConfig?.runId || "");
+  const sandbox = effectiveConfig?.sandbox || {};
+  const budgets = effectiveConfig?.budgets || {};
 
-  if (!/^CFG-[A-Z0-9-]+$/.test(config?.configurationId || "")) {
+  if (!/^CFG-[A-Z0-9-]+$/.test(effectiveConfig?.configurationId || "")) {
     errors.push("configurationId must match CFG-<ID>");
   }
   if (!/^s0-[a-z0-9-]+$/.test(runId)) {
     errors.push("runId must match s0-<lowercase-id>");
   }
-  if (config?.syntheticDataOnly !== true) {
+  if (effectiveConfig?.syntheticDataOnly !== true) {
     errors.push("syntheticDataOnly must be true");
   }
   for (const name of ["maxOperations", "maxDurationMs", "maxObjects", "maxBytes"]) {
@@ -85,7 +216,7 @@ export function validatePreflight(config) {
     errors.push("Sandbox ownership marker must match the run ID");
   }
 
-  if (PROVIDERS.has(config?.backingPath)) {
+  if (PROVIDERS.has(effectiveConfig?.backingPath)) {
     if (sandbox.allowListed !== true) errors.push("Provider sandbox must be allow-listed");
     if (!sandbox.identityLabel) errors.push("Provider sandbox identityLabel is required");
     if (sandbox.identityVerified !== true) errors.push("Provider sandbox identity must be verified");
@@ -104,35 +235,56 @@ export function validatePreflight(config) {
       (!positiveNumber(Number(sandbox.cleanup?.retentionHours)) && Date.parse(cleanup.expiresAt) <= Date.now())) {
       errors.push("Provider cleanup manifest and expiry are required");
     }
-    if (!sandbox.coordinates || typeof sandbox.coordinates !== "object") {
+    if (!sandbox.coordinates || typeof sandbox.coordinates !== "object" ||
+        Object.values(sandbox.coordinates).some((value) =>
+          typeof value !== "string" || !value.trim())) {
       errors.push("Provider sandbox coordinates are required");
+    }
+    if (requireApproval) {
+      if (!trustedProviderIdentity(effectiveConfig) ||
+          Object.values(sandbox.coordinates || {}).some(isRuntimePlaceholder)) {
+        errors.push("Live provider identity must be provider-derived and coordinates resolved before provider calls");
+      }
+      const approval = sandbox.approval || {};
+      if (typeof approval.approver !== "string" || !approval.approver.trim() ||
+          typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+          typeof approval.reference !== "string" || !approval.reference.trim()) {
+        errors.push("Structured preflight approval requires approver, approval date, and reference");
+      }
+      if (!sandbox.effectiveTargetHash || approval.targetHash !== sandbox.effectiveTargetHash) {
+        errors.push("Preflight approval target hash does not match the effective provider target");
+      }
     }
   }
 
   return errors;
 }
 
-export function assertPreflight(config, now = new Date()) {
-  const errors = validatePreflight(config);
+export function assertPreflight(config, now = new Date(), options = {}) {
+  const effectiveConfig = resolveEffectiveProviderConfig(config, options.env || process.env);
+  const errors = validatePreflight(effectiveConfig, options);
   if (errors.length) throw new PreflightError(errors);
   return {
-    configurationId: config.configurationId,
-    runId: config.runId,
-    adapter: config.adapter,
-    backingPath: config.backingPath,
+    configurationId: effectiveConfig.configurationId,
+    runId: effectiveConfig.runId,
+    adapter: effectiveConfig.adapter,
+    backingPath: effectiveConfig.backingPath,
     syntheticDataOnly: true,
     sandbox: {
       approved: true,
-      kind: config.sandbox.kind,
-      identityLabel: config.sandbox.identityLabel || "Synthetic Local Harness",
-      identityVerified: config.sandbox.identityVerified === true,
-      ownershipMarker: config.sandbox.ownershipMarker,
-      namespace: config.sandbox.namespace || null,
-      defaultBranchExcluded: config.sandbox.defaultBranchExcluded === true,
+      kind: effectiveConfig.sandbox.kind,
+      identityLabel: effectiveConfig.sandbox.identityLabel || "Synthetic Local Harness",
+      identityVerified: effectiveConfig.sandbox.identityVerified === true,
+      providerIdentity: trustedProviderIdentity(effectiveConfig),
+      ownershipMarker: effectiveConfig.sandbox.ownershipMarker,
+      namespace: effectiveConfig.sandbox.namespace || null,
+      defaultBranchExcluded: effectiveConfig.sandbox.defaultBranchExcluded === true,
       corporateFallbackDisabled: true,
-      dryRunOperations: [...(config.sandbox.dryRunOperations || [])],
-      cleanup: normalizedCleanup(config.sandbox, now),
+      dryRunOperations: [...(effectiveConfig.sandbox.dryRunOperations || [])],
+      cleanup: normalizedCleanup(effectiveConfig.sandbox, now),
+      effectiveTargetHash: effectiveConfig.sandbox.effectiveTargetHash || null,
+      approval: effectiveConfig.sandbox.approval || null,
     },
-    budgets: { ...config.budgets },
+    budgets: { ...effectiveConfig.budgets },
   };
 }

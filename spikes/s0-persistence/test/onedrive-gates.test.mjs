@@ -4,6 +4,8 @@
 // A live run confirms the same gates against a real drive.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 
@@ -112,6 +114,9 @@ function fakeGraphDrive() {
 function liveContext(scenarioId) {
   const drive = fakeGraphDrive();
   const runId = `s0-gate-${scenarioId.toLowerCase()}`;
+  const storeRoot = path.resolve("spikes/s0-persistence/.test-state", runId);
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  fs.mkdirSync(storeRoot, { recursive: true });
   return {
     drive,
     config: { runId, adapter: "onedrive", backingPath: "onedrive", dryRun: false },
@@ -119,24 +124,38 @@ function liveContext(scenarioId) {
     inProcessProviderClients: true,
     createStore: () => new OneDriveGraphStore({
       dryRun: false, driveId: "d1", folderPath: "Base", runId,
-      graphToken: "syn-token", fetchImpl: (u, o) => drive.fetch(u, o),
+      graphToken: "syn-token", fetchImpl: (u, o) => drive.fetch(u, o), storeRoot,
     }),
+    cleanupLocal: () => fs.rmSync(storeRoot, { recursive: true, force: true }),
   };
 }
 
 for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
   await check(`gate ${id} passes against the fake drive`, async () => {
     const context = liveContext(id);
-    const result = await impl(context);
-    assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
-    assert.ok(!result.blocked, `${id} must not be blocked in a live context`);
-    if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
-      assert.equal(result.evidence.accounts, 1);
-      assert.equal(result.evidence.clientProcesses, 2);
-    }
-    if (id === "S0-BCK-005") {
-      assert.equal(result.evidence.throttleResponses, 1);
-      assert.ok(result.evidence.transferredBytes > 0);
+    try {
+      const result = await impl(context);
+      assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
+      assert.ok(!result.blocked, `${id} must not be blocked in a live context`);
+      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
+        assert.equal(result.evidence.accounts, 1);
+        assert.equal(result.evidence.clientProcesses, 2);
+      }
+      if (id === "S0-BCK-005") {
+        assert.deepEqual(result.evidence.faultsExercised,
+          ["throttle", "auth-expiry", "outage", "quota", "permission-loss"]);
+        assert.equal(result.evidence.throttleResponses, 1);
+        assert.ok(result.evidence.transferredBytes > 0);
+      }
+      if (id === "S0-REC-003") {
+        assert.deepEqual(result.evidence.faultsExercised,
+          ["outage", "throttle", "auth-expiry", "quota", "permission-loss", "lost-response"]);
+      }
+      if (["S0-COL-005", "S0-REC-004"].includes(id)) {
+        assert.equal(result.evidence.processRestartRecoveredQueue, true);
+      }
+    } finally {
+      context.cleanupLocal();
     }
   });
 }

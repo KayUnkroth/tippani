@@ -305,10 +305,10 @@ await check("a failing absolute gate blocks the recommendation", async () => {
   assert(report.includes("S0-CON-001"));
 });
 
-await check("reference-only complexity is N/A, never fabricated", async () => {
+await check("reference-only complexity is incomplete, never fabricated as N/A", async () => {
   const run = await runWith(ReferenceMemoryWorkspaceStore, ["S0-PER-005"]);
-  assert.equal(run.results[0].status, "N/A");
-  assert(renderOutcomeReport(run).includes("Not applicable"));
+  assert.equal(run.results[0].status, "Incomplete");
+  assert.match(run.results[0].reason, /reference-memory adapter/);
 });
 
 await check("results are deterministic across repeated runs", async () => {
@@ -318,17 +318,15 @@ await check("results are deterministic across repeated runs", async () => {
   assert.equal(shape(first), shape(second));
 });
 
-await check("budgets stop an oversized run before it executes", async () => {
+await check("operation budgets do not count scenario selections", async () => {
   const tight = structuredClone(baseConfig);
   tight.budgets.maxOperations = 1;
-  await assert.rejects(
-    runHarness({
-      config: tight,
-      scenarioIds: ["S0-ATM-001", "S0-ATM-002"],
-      writeArtifacts: false,
-    }),
-    /operation budget/,
-  );
+  const { run } = await runHarness({
+    config: tight,
+    scenarioIds: ["S0-ATM-001", "S0-ATM-002"],
+    writeArtifacts: false,
+  });
+  assert(run.results.every((result) => result.status === "Pass"));
 });
 
 console.log(`s0-detection-power: ${pass} passed, ${fail} failed`);

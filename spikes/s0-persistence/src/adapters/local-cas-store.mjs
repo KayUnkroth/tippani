@@ -25,8 +25,8 @@ import { acquireLock, listTempArtifacts, writeFileAtomicSync } from "./fs-atomic
 
 const SCHEMA_VERSION = 1;
 
-function checksumOf(workspace) {
-  return checksumWorkspace(workspace);
+function checksumOf(workspace, durableWorkspaceId = workspace.workspaceId) {
+  return checksumWorkspace(workspace, durableWorkspaceId);
 }
 
 export class LocalCasWorkspaceStore {
@@ -83,7 +83,12 @@ export class LocalCasWorkspaceStore {
     if (envelope?.schemaVersion !== SCHEMA_VERSION || !envelope.workspace) {
       throw new CorruptWorkspaceStoreError(`Workspace ${workspaceId} envelope is unusable`);
     }
-    if (envelope.checksum !== checksumOf(envelope.workspace)) {
+    if (envelope.workspace.workspaceId !== workspaceId) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} envelope identity does not match its filename`,
+      );
+    }
+    if (envelope.checksum !== checksumOf(envelope.workspace, workspaceId)) {
       throw new CorruptWorkspaceStoreError(`Workspace ${workspaceId} failed checksum validation`);
     }
     return validateWorkspaceRecord(envelope.workspace);
@@ -247,10 +252,26 @@ export class LocalCasWorkspaceStore {
     return { workspaceCount: snapshot.workspaces.length };
   }
 
-  injectCorruption(workspaceId) {
+  injectCorruption(workspaceId, mode = "truncated") {
     const file = this.envelopePath(workspaceId);
     if (!fs.existsSync(file)) throw new WorkspaceNotFoundError(workspaceId);
+    if (mode === "valid-json-tamper") {
+      const envelope = JSON.parse(fs.readFileSync(file, "utf8"));
+      envelope.workspace.private.audit.push({
+        actor: "Synthetic Tamper",
+        action: "checksum-bypass-attempt",
+      });
+      fs.writeFileSync(file, JSON.stringify(envelope));
+      return;
+    }
     fs.writeFileSync(file, '{"schemaVersion":1,"workspace":{"trunc');
+  }
+
+  injectIdentitySubstitution(workspaceId, replacementWorkspaceId) {
+    const source = this.envelopePath(workspaceId);
+    const replacement = this.envelopePath(replacementWorkspaceId);
+    if (!fs.existsSync(source)) throw new WorkspaceNotFoundError(workspaceId);
+    fs.renameSync(source, replacement);
   }
 
   /** Force the next raw read of this workspace to fail as permission-denied. */

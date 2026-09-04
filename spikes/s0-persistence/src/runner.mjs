@@ -4,7 +4,16 @@ import path from "node:path";
 import { performance } from "node:perf_hooks";
 import { applicableScenarioIds, applicabilityProfile } from "./applicability.mjs";
 import { createStore as createAdapterStore, isDurable } from "./adapters/registry.mjs";
-import { assertPreflight } from "./preflight.mjs";
+import { buildEvidenceIdentity } from "./evidence-identity.mjs";
+import { OperationBudget } from "./operation-budget.mjs";
+import {
+  assertPreflight,
+  resolveEffectiveProviderConfig,
+  withResolvedProviderIdentity,
+} from "./preflight.mjs";
+import { createCleanupAuthorization } from "./cleanup-manifest.mjs";
+import { ProviderTelemetry } from "./adapters/provider-telemetry.mjs";
+import { resolveProviderIdentityForConfig } from "./provider-identity.mjs";
 import { SCENARIO_IMPLEMENTATIONS, PENDING_REASONS } from "./scenario-implementations.mjs";
 import { BLOCKED_REASONS } from "./provider-gates.mjs";
 import {
@@ -28,10 +37,16 @@ const LIVE_PROVIDER_ENV = Object.freeze({
   ado: ["S0_ADO_TOKEN", "S0_ADO_ORG", "S0_ADO_PROJECT", "S0_ADO_REPO"],
   github: ["S0_GITHUB_TOKEN", "S0_GITHUB_OWNER", "S0_GITHUB_REPO"],
 });
+const LIVE_APPROVAL_ENV = Object.freeze([
+  "S0_PREFLIGHT_APPROVER",
+  "S0_PREFLIGHT_APPROVED_AT",
+  "S0_PREFLIGHT_APPROVAL_REFERENCE",
+  "S0_PREFLIGHT_TARGET_HASH",
+]);
 
 function missingProviderEnvironment(config) {
   if (config.dryRun !== false) return [];
-  return (LIVE_PROVIDER_ENV[config.backingPath] || [])
+  return [...(LIVE_PROVIDER_ENV[config.backingPath] || []), ...LIVE_APPROVAL_ENV]
     .filter((name) => !process.env[name]);
 }
 
@@ -79,7 +94,15 @@ function environmentDetails(config, runRoot) {
  * adapter - while createStore({ fresh: true }) allocates a separate root for
  * source/target comparisons.
  */
-function createScenarioContext({ config, scenarioId, adapterFactory, runRoot }) {
+function createScenarioContext({
+  config,
+  scenarioId,
+  adapterFactory,
+  runRoot,
+  signal,
+  deadlineAt,
+  safetyBudget,
+}) {
   const roots = [];
   const openStores = [];
   let index = 0;
@@ -104,6 +127,9 @@ function createScenarioContext({ config, scenarioId, adapterFactory, runRoot }) 
     scenario: scenarioById(scenarioId),
     durable: isDurable(config.adapter),
     adapter: config.adapter,
+    signal,
+    deadlineAt,
+    safetyBudget,
     primaryRoot,
     createStore,
     // Kept so negative-control tests can inject their own factory.
@@ -125,28 +151,66 @@ export async function runHarness({
   outputDir,
   scenarioIds = config.scenarioIds,
   adapterFactory = null,
+  identityResolver = null,
+  identityFetchImpl = null,
   writeArtifacts = true,
-  harnessRevision = "s0-harness-v3",
+  harnessRevision = "s0-harness-v4",
 } = {}) {
+  config = resolveEffectiveProviderConfig(config);
   validateScenarioCatalog();
   const preflightTime = new Date();
-  const preflight = assertPreflight(config, preflightTime);
   const applicableIds = applicableScenarioIds(config);
   const missingProviderEnv = adapterFactory ? [] : missingProviderEnvironment(config);
+  const abortController = new AbortController();
+  const deadlineAt = performance.now() + config.budgets.maxDurationMs;
+  const safetyBudget = new OperationBudget({
+    limits: config.budgets,
+    signal: abortController.signal,
+    deadlineAt,
+  });
+  const liveProviderRun = config.dryRun === false &&
+    ["onedrive", "ado", "github"].includes(config.backingPath);
+  let preflight;
+  if (liveProviderRun && missingProviderEnv.length === 0) {
+    const identityTelemetry = new ProviderTelemetry({ safetyBudget });
+    const identity = await resolveProviderIdentityForConfig(config, {
+      identityResolver,
+      fetchImpl: identityFetchImpl || config.fetchImpl || globalThis.fetch,
+      signal: abortController.signal,
+      beforeAttempt: () => identityTelemetry.recordRequest(),
+      wrapResponse: (response) => identityTelemetry.wrapResponse(response),
+    });
+    config = withResolvedProviderIdentity(config, identity);
+    preflight = assertPreflight(config, preflightTime);
+  } else {
+    preflight = assertPreflight(config, preflightTime, { requireApproval: false });
+  }
+  const evidenceIdentity = buildEvidenceIdentity(config);
   const factory = adapterFactory ||
-    ((options) => createAdapterStore(config.adapter, options));
+    ((options) => createAdapterStore(config.adapter, {
+      ...options,
+      safetyBudget,
+      signal: abortController.signal,
+      enforcePreflight: config.dryRun === false,
+    }));
+  let cleanupAuthorization = null;
+  if (liveProviderRun && !adapterFactory) {
+    const descriptor = createAdapterStore(config.adapter, {
+      ...config,
+      enforcePreflight: true,
+    });
+    cleanupAuthorization = createCleanupAuthorization(config, descriptor);
+  }
 
   const selected = scenarioIds || config.scenarioIds || applicableIds;
   const unknown = selected.filter((id) => !scenarioById(id));
   if (unknown.length) throw new Error(`Unknown scenario IDs: ${unknown.join(", ")}`);
-  if (selected.length > config.budgets.maxOperations) {
-    throw new Error("Selected scenarios exceed the operation budget");
-  }
-
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), `tippani-s0-${config.runId}-`));
   const startedAt = preflightTime.toISOString();
-  const deadline = performance.now() + config.budgets.maxDurationMs;
+  const deadlineTimer = setTimeout(() => abortController.abort(), config.budgets.maxDurationMs);
+  deadlineTimer.unref?.();
   const results = [];
+  let cleanupEvidence = { required: liveProviderRun, status: liveProviderRun ? "pending" : "not-applicable" };
 
   try {
     for (const scenarioId of selected) {
@@ -158,7 +222,7 @@ export async function runHarness({
         criterionType: scenario.criterionType,
       };
 
-      if (performance.now() > deadline) {
+      if (abortController.signal.aborted || performance.now() > deadlineAt) {
         results.push({
           ...base,
           status: "Blocked",
@@ -194,10 +258,13 @@ export async function runHarness({
         scenarioId,
         adapterFactory: factory,
         runRoot,
+        signal: abortController.signal,
+        deadlineAt,
       });
       const scenarioStarted = performance.now();
       try {
         const detail = await implementation(context);
+        await safetyBudget.assertActive();
         if (detail?.blocked) {
           results.push({
             ...base,
@@ -206,14 +273,28 @@ export async function runHarness({
             reason: detail.blocked,
           });
         } else if (detail?.na) {
-          // Reviewer-approved not-applicable: the invariant is real but does not
-          // apply to this adapter's contract. Distinct from Incomplete, which is
-          // missing evidence and must never read as a pass.
-          results.push({
+          const approval = detail.naApproval;
+          const contractRationale = detail.contractRationale;
+          const completeApproval = approval &&
+            typeof approval.approver === "string" && approval.approver.trim() &&
+            typeof approval.approvedAt === "string" && Number.isFinite(Date.parse(approval.approvedAt)) &&
+            typeof approval.reference === "string" && approval.reference.trim();
+          const completeRationale = contractRationale &&
+            contractRationale.scenarioId === scenarioId &&
+            typeof contractRationale.rationale === "string" &&
+            contractRationale.rationale.trim();
+          results.push(completeApproval && completeRationale ? {
             ...base,
             status: "N/A",
             durationMs: performance.now() - scenarioStarted,
             reason: detail.na,
+            approval: { ...approval },
+            contractRationale: { ...contractRationale },
+          } : {
+            ...base,
+            status: "Incomplete",
+            durationMs: performance.now() - scenarioStarted,
+            reason: `N/A claim lacks structured approval or scenario-specific rationale: ${detail.na}`,
           });
         } else if (detail?.skip) {
           results.push({
@@ -245,12 +326,31 @@ export async function runHarness({
       }
     }
   } finally {
+    clearTimeout(deadlineTimer);
     // Tear down a live provider run's per-run namespace (best effort).
-    if (config.dryRun === false && ["onedrive", "ado", "github"].includes(config.backingPath)) {
+    if (liveProviderRun && !adapterFactory) {
       try {
-        const teardown = createAdapterStore(config.adapter, { ...config });
-        if (typeof teardown.cleanup === "function") await teardown.cleanup();
-      } catch { /* best effort */ }
+        const teardown = createAdapterStore(config.adapter, {
+          ...config,
+          enforcePreflight: true,
+        });
+        if (typeof teardown.cleanup === "function") {
+          if (typeof teardown.prepareCleanup === "function") {
+            await teardown.prepareCleanup(cleanupAuthorization);
+          }
+          const outcome = await teardown.cleanup(cleanupAuthorization);
+          cleanupEvidence = { required: true, status: "complete", outcome };
+        }
+      } catch (error) {
+        cleanupEvidence = { required: true, status: "failed", error: errorSummary(error) };
+        const cleanupGate = results.find((result) => result.scenarioId === "S0-SEC-005");
+        if (cleanupGate) {
+          cleanupGate.status = "Fail";
+          cleanupGate.error = errorSummary(error);
+          delete cleanupGate.reason;
+          delete cleanupGate.evidence;
+        }
+      }
     }
     if (!config.keepStoreArtifacts) {
       try { fs.rmSync(runRoot, { recursive: true, force: true }); } catch { /* best effort */ }
@@ -258,9 +358,10 @@ export async function runHarness({
   }
 
   const run = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     syntheticData: true,
     harnessRevision,
+    evidenceIdentity,
     startedAt,
     completedAt: new Date().toISOString(),
     configuration: {
@@ -282,8 +383,11 @@ export async function runHarness({
       id: scenario.id,
       criterionType: scenario.criterionType,
       title: scenario.title,
+      section: scenario.section,
     })),
     results,
+    safetyBudget: safetyBudget.snapshot(),
+    cleanup: cleanupEvidence,
   };
   const artifacts = writeArtifacts ? writeRunArtifacts(run, outputDir) : null;
   return { run, artifacts };

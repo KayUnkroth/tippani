@@ -7,9 +7,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
+import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
+import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
 import { buildPreflightSheet } from "../src/provider-preflight-sheet.mjs";
 import { findEmbeddedSecrets } from "../src/preflight.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
+import { OperationBudget } from "../src/operation-budget.mjs";
+import { raceWorkers } from "../src/process-runner.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const spikeRoot = path.dirname(here);
@@ -45,7 +49,17 @@ await check("dry-run records Graph operations and makes zero network calls", asy
   });
   await store.readWorkspace(workspace.workspaceId);
   await store.listWorkspaces();
-  await store.cleanup();
+  const authorization = createCleanupAuthorization({
+    runId: "s0-od-test",
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: "tippani-s0:s0-od-test",
+      coordinates: { driveId: null, folder: null },
+      cleanup: { manifestId: "syn-cleanup-s0-od-test" },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  await store.cleanup(authorization);
   assert.equal(store.liveProviderCallCount(), 0);
   const ops = store.providerOperationManifest().map((o) => o.op);
   for (const expected of ["ensure-folder", "put-content", "get-content", "list-children", "delete-folder"]) {
@@ -94,6 +108,259 @@ await check("live fails closed without a token", async () => {
   await assert.rejects(store.initialize(), (e) => e.code === "no_token");
 });
 
+await check("cleanup requires manifest authorization before any provider call", async () => {
+  let calls = 0;
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId: "s0-cleanup-denied",
+    graphToken: "syn-token",
+    fetchImpl: async () => {
+      calls++;
+      return { ok: true, status: 204 };
+    },
+  });
+  await assert.rejects(store.cleanup(), /manifest authorization/);
+  assert.equal(calls, 0);
+});
+
+await check("cleanup uses the authorized folder ETag as a delete precondition", async () => {
+  let conditionalDelete = false;
+  const runId = "s0-cleanup-conditional";
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    graphToken: "syn-token",
+    fetchImpl: async (_url, options) => {
+      if (options.method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) };
+      }
+      if (options.method === "DELETE") {
+        conditionalDelete = options.headers["If-Match"] === "etag-1";
+        return { ok: true, status: 204 };
+      }
+      return { ok: true, status: 201, json: async () => ({}) };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  const wrongManifest = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: "syn-cleanup-wrong" },
+    },
+  }, store);
+  await assert.rejects(store.cleanup(wrongManifest), /manifest authorization/);
+  await store.prepareCleanup(authorization);
+  await store.cleanup(authorization);
+  assert.equal(conditionalDelete, true);
+  assert.equal(authorization.manifest.authorize(authorization.resource), false);
+});
+
+await check("cleanup authorization rejects different immutable coordinates", async () => {
+  const runId = "s0-cleanup-coordinate-binding";
+  const approved = new OneDriveGraphStore({
+    dryRun: true,
+    driveId: "drive-a",
+    folderPath: "Base",
+    runId,
+    effectiveTargetHash: "sha256:syn-target",
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "drive-a", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, approved);
+  const different = new OneDriveGraphStore({
+    dryRun: true,
+    driveId: "drive-b",
+    folderPath: "Base",
+    runId,
+    effectiveTargetHash: "sha256:syn-target",
+  });
+  await assert.rejects(different.prepareCleanup(authorization), /manifest authorization/);
+  const differentTarget = new OneDriveGraphStore({
+    dryRun: true,
+    driveId: "drive-a",
+    folderPath: "Base",
+    runId,
+    effectiveTargetHash: "sha256:different-target",
+  });
+  await assert.rejects(differentTarget.prepareCleanup(authorization), /manifest authorization/);
+});
+
+await check("provider requests enforce operation, object, byte, and abort budgets", async () => {
+    const cases = [
+      {
+        limits: { maxOperations: 0, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+        setup: () => {},
+      },
+      {
+        limits: { maxOperations: 10, maxObjects: 0, maxBytes: 10000, maxDurationMs: 1000 },
+        setup: () => {},
+      },
+      {
+        limits: { maxOperations: 10, maxObjects: 10, maxBytes: 1, maxDurationMs: 1000 },
+        setup: () => {},
+      },
+    ];
+    for (const item of cases) {
+      let calls = 0;
+      const budget = new OperationBudget({ limits: item.limits });
+      const store = new OneDriveGraphStore({
+        dryRun: false,
+        driveId: "d1",
+        folderPath: "Base",
+        runId: "s0-budget-enforcement",
+        graphToken: "syn-token",
+        safetyBudget: budget,
+        fetchImpl: async () => {
+          calls++;
+          return { ok: true, status: 201, json: async () => ({}) };
+        },
+      });
+      await assert.rejects(store.initialize(), (error) => error.code === "safety_budget_exceeded");
+      assert.equal(calls, 0);
+    }
+
+    const abortController = new AbortController();
+    abortController.abort();
+    let calls = 0;
+    const budget = new OperationBudget({
+      limits: { maxOperations: 10, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+      signal: abortController.signal,
+    });
+    const store = new OneDriveGraphStore({
+      dryRun: false,
+      driveId: "d1",
+      folderPath: "Base",
+      runId: "s0-budget-abort",
+      graphToken: "syn-token",
+      safetyBudget: budget,
+      signal: abortController.signal,
+      fetchImpl: async () => {
+        calls++;
+        return { ok: true, status: 201, json: async () => ({}) };
+      },
+    });
+    await assert.rejects(store.initialize(), (error) => error.code === "safety_budget_exceeded");
+    assert.equal(calls, 0);
+  });
+
+await check("an in-flight provider request receives and honors the deadline AbortSignal", async () => {
+    const abortController = new AbortController();
+    const budget = new OperationBudget({
+      limits: { maxOperations: 10, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+      signal: abortController.signal,
+    });
+    let receivedSignal = false;
+    const store = new OneDriveGraphStore({
+      dryRun: false,
+      driveId: "d1",
+      folderPath: "Base",
+      runId: "s0-running-abort",
+      graphToken: "syn-token",
+      safetyBudget: budget,
+      signal: abortController.signal,
+      fetchImpl: async (_url, options) => new Promise((_resolve, reject) => {
+        receivedSignal = options.signal === abortController.signal;
+        options.signal.addEventListener("abort", () => {
+          const error = new Error("request aborted");
+          error.code = "request_aborted";
+          reject(error);
+        }, { once: true });
+      }),
+    });
+    const pending = store.initialize();
+    setTimeout(() => abortController.abort(), 5);
+    await assert.rejects(pending, (error) => error.code === "request_aborted");
+    assert.equal(receivedSignal, true);
+  });
+
+  await check("maxOperations=1 prevents a retry transport attempt", async () => {
+    let calls = 0;
+    const budget = new OperationBudget({
+      limits: { maxOperations: 1, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+    });
+    const store = new GitHubRepoStore({
+      dryRun: false,
+      owner: "O",
+      repo: "R",
+      runId: "s0-retry-budget",
+      githubToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl: async () => {
+        calls++;
+        throw new TypeError("transient network failure");
+      },
+    });
+    await assert.rejects(
+      store.gh("GET", "https://api.github.invalid/retry"),
+      (error) => error.code === "safety_budget_exceeded",
+    );
+    assert.equal(calls, 1);
+    assert.equal(budget.snapshot().operations, 1);
+  });
+
+  await check("an oversized mutation is rejected before the provider can commit it", async () => {
+    let commits = 0;
+    const budget = new OperationBudget({
+      limits: { maxOperations: 10, maxObjects: 10, maxBytes: 8, maxDurationMs: 1000 },
+    });
+    const store = new GitHubRepoStore({
+      dryRun: false,
+      owner: "O",
+      repo: "R",
+      runId: "s0-byte-budget",
+      githubToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl: async () => {
+        commits++;
+        return { ok: true, status: 201, json: async () => ({ content: { sha: "b1" } }) };
+      },
+    });
+    store.initialized = true;
+    const workspace = createSyntheticWorkspace({ seed: "oversized-mutation" });
+    await assert.rejects(
+      store.createWorkspace(workspace),
+      (error) => error.code === "safety_budget_exceeded",
+    );
+    assert.equal(commits, 0);
+    assert.equal(store.liveProviderCallCount(), 0);
+  });
+
+  await check("provider workers share one run-wide operation allowance", async () => {
+    const budget = new OperationBudget({
+      limits: { maxOperations: 1, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+    });
+    const args = () => ["--mode=budget-probe", "--provider-live=true", "--deadline-ms=1000"];
+    const results = await raceWorkers([args(), args()], { budget, timeoutMs: 5000 });
+    assert.equal(results.filter((result) => result.report?.status === "budget-consumed").length, 1);
+    assert.equal(results.filter((result) => result.report?.code === "safety_budget_exceeded").length, 1);
+    assert.equal(budget.snapshot().operations, 1);
+  });
 // A minimal in-memory Graph drive: enough to exercise create/read/CAS + 412.
 function fakeGraphDrive() {
   const items = new Map(); // path -> { id, eTag, content }

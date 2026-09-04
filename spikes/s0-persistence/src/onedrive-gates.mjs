@@ -32,11 +32,19 @@ async function seedWorkspace(store, seed) {
 }
 
 function providerWorkerArgs(context, workspaceId, extra = []) {
+  const remainingMs = Number.isFinite(context.deadlineAt)
+    ? Math.max(1, Math.floor(context.deadlineAt - performance.now()))
+    : context.config.budgets?.maxDurationMs || 30_000;
   return [
     `--adapter=${context.adapter || context.config.adapter || context.config.backingPath}`,
     "--provider-live=true",
     `--run-id=${context.config.runId}`,
+    `--root=${context.primaryRoot || ""}`,
     `--workspace=${workspaceId}`,
+    `--max-operations=${context.config.budgets?.maxOperations || 100}`,
+    `--max-objects=${context.config.budgets?.maxObjects || 10000}`,
+    `--max-bytes=${context.config.budgets?.maxBytes || 104857600}`,
+    `--deadline-ms=${remainingMs}`,
     ...extra,
   ];
 }
@@ -128,7 +136,7 @@ async function runProviderClient(context, options) {
     `--target=${options.targetGeneration ?? 1}`,
     `--actor=${options.actor}`,
   ]);
-  return runWorker(args);
+  return runWorker(args, { budget: context.safetyBudget });
 }
 
 async function commitProviderClient(context, store, options) {
@@ -192,7 +200,7 @@ async function raceProviderClients(context, workspaceId, actors, expectedGenerat
     "--mode=write",
     `--expected=${expectedGeneration}`,
     `--actor=${actor}`,
-  ])));
+  ])), { budget: context.safetyBudget });
 }
 
 async function twoClientNoSilentOverwrite(context) {
@@ -350,7 +358,8 @@ async function noSuccessShapedOnFailure(context) {
   await store.initialize();
   const workspace = await seedWorkspace(store, `bck005-${context.config.runId}`);
   try {
-    for (const kind of ["throttle", "auth-expiry", "outage"]) {
+    const faults = ["throttle", "auth-expiry", "outage", "quota", "permission-loss"];
+    for (const kind of faults) {
       store.injectFault(kind); // faults the compare-and-swap write
       await assert.rejects(
         store.compareAndSwap({
@@ -366,10 +375,13 @@ async function noSuccessShapedOnFailure(context) {
     const telemetry = store.providerTelemetry?.() || {};
     return {
       evidence: {
-        faultsRejected: 3,
+        faultsRejected: faults.length,
+        faultsExercised: faults,
         generationUnchanged: true,
         throttleResponses: telemetry.throttleResponses,
         retries: telemetry.retries,
+        retryAfterSeconds: telemetry.retryAfterSeconds,
+        backoffMs: telemetry.backoffMs,
         transferredBytes: telemetry.transferredBytes,
       },
     };
@@ -424,11 +436,21 @@ async function offlinePendingUntilCas(context) {
     });
     // A goes offline and stages a write from generation 1.
     a.goOffline();
-    a.stageOffline({
+    await a.stageOffline({
       workspaceId: workspace.workspaceId,
       expectedGeneration: 1,
       operation: { auditEvent: { actor: "Synthetic A", action: "offline-edit" } },
     });
+    await a.stageOffline({
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 2,
+      operation: { auditEvent: { actor: "Synthetic A", action: "later-offline-edit" } },
+    });
+    assert.equal(await a.pendingCount(), 2);
+    await a.close();
+    const resumed = context.createStore();
+    await resumed.initialize();
+    assert.equal(await resumed.pendingCount(), 2, "Pending work must survive a client process restart");
     // Meanwhile B advances the authority.
     const b = context.createStore();
     await b.initialize();
@@ -438,12 +460,27 @@ async function offlinePendingUntilCas(context) {
       operation: { auditEvent: { actor: "Synthetic B", action: "online-edit" } },
     });
     // A reconnects: the pending write must not silently overwrite B's newer state.
-    const report = await a.reconnect();
+    const report = await resumed.reconnect();
     assert.equal(report.applied.length, 0, "a stale offline write must not be applied");
     assert.equal(report.conflicts.length, 1, "the offline write must surface as a conflict");
+    assert.equal(report.pendingCount, 2, "A stale edit and all later edits remain pending");
     const authority = await b.readWorkspace(workspace.workspaceId);
     assert.equal(authority.generation, 2, "authority must still reflect B's write");
-    return { evidence: { offlinePendingConflicted: true, noSilentOverwrite: true, authorityGeneration: 2 } };
+    assert.equal(
+      authority.private.audit.some((entry) => entry.action === "later-offline-edit"),
+      false,
+      "A later queued edit must not bypass the stale FIFO head",
+    );
+    return {
+      evidence: {
+        offlinePendingConflicted: true,
+        processRestartRecoveredQueue: true,
+        fifoStoppedAtFirstConflict: true,
+        staleEntryRetained: true,
+        noSilentOverwrite: true,
+        authorityGeneration: 2,
+      },
+    };
   } finally {
     await a.deleteWorkspace(workspace.workspaceId).catch(() => {});
   }
@@ -461,11 +498,20 @@ async function offlineCacheReconcile(context) {
       operation: { auditEvent: { actor: "Synthetic A", action: "base" } },
     });
     a.goOffline();
-    a.stageOffline({
+    await a.stageOffline({
       workspaceId: workspace.workspaceId,
       expectedGeneration: 1,
       operation: { auditEvent: { actor: "Synthetic A", action: "cached-edit" } },
     });
+    await a.close();
+    const transient = context.createStore();
+    await transient.initialize();
+    transient.injectFault("outage");
+    const retained = await transient.reconnect();
+    assert.equal(retained.retained.length, 1, "A transient provider failure must retain pending work");
+    assert.equal(retained.pendingCount, 1);
+    await transient.close();
+
     const b = context.createStore();
     await b.initialize();
     await b.compareAndSwap({
@@ -473,13 +519,24 @@ async function offlineCacheReconcile(context) {
       expectedGeneration: 1,
       operation: { auditEvent: { actor: "Synthetic B", action: "authority-advance" } },
     });
-    const report = await a.reconnect();
+    const resumed = context.createStore();
+    await resumed.initialize();
+    assert.equal(await resumed.pendingCount(), 1, "Retained work must survive another restart");
+    const report = await resumed.reconnect();
     // The offline cache discovers the newer authority instead of overwriting it.
     assert.equal(report.conflicts.length, 1);
     assert.equal(report.conflicts[0].actual, 2, "reconnect must discover the newer committed generation");
-    const authority = await a.readWorkspace(workspace.workspaceId);
+    assert.equal(report.pendingCount, 1, "A stale edit is retained after conflict");
+    const authority = await resumed.readWorkspace(workspace.workspaceId);
     assert.equal(authority.generation, 2, "no silent overwrite of newer authority");
-    return { evidence: { discoveredNewerAuthority: true, noSilentOverwrite: true } };
+    return {
+      evidence: {
+        discoveredNewerAuthority: true,
+        transientFailureRetained: true,
+        processRestartRecoveredQueue: true,
+        noSilentOverwrite: true,
+      },
+    };
   } finally {
     await a.deleteWorkspace(workspace.workspaceId).catch(() => {});
   }
@@ -489,29 +546,60 @@ async function recoverAfterFault(context) {
   if (!isLiveProvider(context)) return blocked(context);
   const store = context.createStore();
   await store.initialize();
-  const workspace = await seedWorkspace(store, `rec003-${context.config.runId}`);
+  const faults = ["outage", "throttle", "auth-expiry", "quota", "permission-loss"];
+  const recovered = [];
   try {
-    store.injectFault("outage");
-    await assert.rejects(
-      store.compareAndSwap({
+    for (const kind of faults) {
+      const workspace = await seedWorkspace(store, `rec003-${kind}-${context.config.runId}`);
+      store.injectFault(kind);
+      await assert.rejects(
+        store.compareAndSwap({
+          workspaceId: workspace.workspaceId,
+          expectedGeneration: 0,
+          operation: { auditEvent: { actor: "Synthetic A", action: `during-${kind}` } },
+        }),
+        (error) => typeof error?.code === "string" && error.code !== "generation_conflict",
+      );
+      const mid = await store.readWorkspace(workspace.workspaceId);
+      assert.equal(mid.generation, 0, `${kind} must not leave a partial write`);
+      const next = await store.compareAndSwap({
         workspaceId: workspace.workspaceId,
         expectedGeneration: 0,
-        operation: { auditEvent: { actor: "Synthetic A", action: "during-outage" } },
+        operation: { auditEvent: { actor: "Synthetic A", action: `recover-${kind}` } },
+      });
+      assert.equal(next.generation, 1);
+      recovered.push(kind);
+      await store.deleteWorkspace(workspace.workspaceId);
+    }
+
+    const lost = await seedWorkspace(store, `rec003-lost-response-${context.config.runId}`);
+    store.injectFault("lost-response");
+    await assert.rejects(
+      store.compareAndSwap({
+        workspaceId: lost.workspaceId,
+        expectedGeneration: 0,
+        operation: { auditEvent: { actor: "Synthetic A", action: "lost-response" } },
       }),
-      (e) => e.code === "provider_unreachable",
+      (error) => error.code === "provider_response_lost",
     );
-    const mid = await store.readWorkspace(workspace.workspaceId);
-    assert.equal(mid.generation, 0, "an outage must not leave a partial write");
-    // Recover: the same write succeeds once the provider is reachable again.
-    const recovered = await store.compareAndSwap({
-      workspaceId: workspace.workspaceId,
+    const reconciled = await store.readWorkspace(lost.workspaceId);
+    assert.equal(reconciled.generation, 1, "lost response recovery must find the committed generation");
+    await assert.rejects(store.compareAndSwap({
+      workspaceId: lost.workspaceId,
       expectedGeneration: 0,
-      operation: { auditEvent: { actor: "Synthetic A", action: "recover" } },
-    });
-    assert.equal(recovered.generation, 1);
-    return { evidence: { outageRejected: true, recoveredGeneration: 1 } };
+      operation: { auditEvent: { actor: "Synthetic A", action: "blind-retry" } },
+    }), (error) => error.code === "generation_conflict");
+    await store.deleteWorkspace(lost.workspaceId);
+    return {
+      evidence: {
+        faultsExercised: [...faults, "lost-response"],
+        recoveredFaults: recovered,
+        lostResponseReconciled: true,
+        blindRetryRejected: true,
+      },
+    };
   } finally {
-    await store.deleteWorkspace(workspace.workspaceId).catch(() => {});
+    await store.close().catch(() => {});
   }
 }
 

@@ -16,7 +16,31 @@ function parseReport(stdout) {
   return null;
 }
 
-function collect(child) {
+function attachBudgetBroker(child, budget) {
+  if (!budget) return;
+  child.on("message", async (message) => {
+    if (message?.type !== "s0-budget-request") return;
+    try {
+      const snapshot = await budget.consume(message.delta || {});
+      child.send({ type: "s0-budget-response", id: message.id, ok: true, snapshot });
+    } catch (error) {
+      child.send({
+        type: "s0-budget-response",
+        id: message.id,
+        ok: false,
+        error: {
+          message: error?.message,
+          kind: error?.kind,
+          limit: error?.limit,
+          actual: error?.actual,
+        },
+      });
+    }
+  });
+}
+
+function collect(child, budget = null) {
+  attachBudgetBroker(child, budget);
   let stdout = "";
   let stderr = "";
   child.stdout?.on("data", (chunk) => { stdout += chunk.toString(); });
@@ -29,9 +53,9 @@ function collect(child) {
   };
 }
 
-export async function runWorker(args, { timeoutMs = 30_000 } = {}) {
+export async function runWorker(args, { timeoutMs = 30_000, budget = null } = {}) {
   const child = fork(WORKER, args, { stdio: ["ignore", "pipe", "pipe", "ipc"] });
-  const streams = collect(child);
+  const streams = collect(child, budget);
   const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
   try {
     const { code, signal } = await streams.exit;
@@ -45,10 +69,10 @@ export async function runWorker(args, { timeoutMs = 30_000 } = {}) {
  * Start every writer, wait until each is loaded and blocked at the barrier,
  * then release them together so they contend for the same generation.
  */
-export async function raceWorkers(argsList, { timeoutMs = 30_000 } = {}) {
+export async function raceWorkers(argsList, { timeoutMs = 30_000, budget = null } = {}) {
   const children = argsList.map((args) => {
     const child = fork(WORKER, args, { stdio: ["ignore", "pipe", "pipe", "ipc"] });
-    return { child, streams: collect(child) };
+    return { child, streams: collect(child, budget) };
   });
   const timer = setTimeout(() => {
     for (const { child } of children) child.kill("SIGKILL");

@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { gateSummary } from "./eligibility.mjs";
+import { effectiveResult, gateSummary } from "./eligibility.mjs";
 
 function fixed(value, digits = 3) {
   return typeof value === "number" ? value.toFixed(digits) : "";
@@ -21,7 +21,8 @@ function outcomeFor(run, scenario) {
       reason: "Assigned to another engine/backing-path configuration by the applicability matrix.",
     };
   }
-  return run.results.find((result) => result.scenarioId === scenario.id) || {
+  const result = run.results.find((item) => item.scenarioId === scenario.id);
+  return result ? effectiveResult(result) : {
     status: "Not executed",
     reason: "Applicable scenario has no result.",
   };
@@ -56,7 +57,7 @@ function coverageSection(run) {
     `| Fail | ${counts.get("Fail") || 0} | Executed and violated |`,
     `| Blocked | ${counts.get("Blocked") || 0} | Applicable, but a prerequisite is unavailable |`,
     `| Incomplete | ${counts.get("Incomplete") || 0} | Applicable implementation or evidence is incomplete |`,
-    `| N/A | ${counts.get("N/A") || 0} | Applicable family, contract-level exception approved by review |`,
+    `| N/A | ${counts.get("N/A") || 0} | Scenario-specific contract rationale plus approver identity, approval date, and reference |`,
     `| Not applicable | ${counts.get("Not applicable") || 0} | Assigned to another configuration by design |`,
     `| Not executed | ${counts.get("Not executed") || 0} | Applicable, but no result exists |`,
     "",
@@ -106,6 +107,10 @@ export function renderOutcomeReport(run) {
     "",
     `**Report date:** ${run.completedAt.slice(0, 10)}`,
     `**Harness revision:** ${run.harnessRevision}`,
+    `**Source revision:** ${display(run.evidenceIdentity?.sourceRevision)}`,
+    `**Catalog revision:** ${display(run.evidenceIdentity?.catalogRevision)}`,
+    `**Applicability revision:** ${display(run.evidenceIdentity?.applicabilityRevision)}`,
+    `**Configuration revision:** ${display(run.evidenceIdentity?.configRevision)}`,
     `**Configuration ID:** ${run.configuration.configurationId}`,
     `**Adapter:** ${run.configuration.adapter}`,
     `**Authoritative backing path:** ${run.configuration.backingPath}`,
@@ -144,6 +149,7 @@ export function renderOutcomeReport(run) {
     `| Authentication setup | ${display(run.preflight.sandbox.identityLabel)} |`,
     `| Cleanup manifest | ${display(run.preflight.sandbox.cleanup?.manifestId)} |`,
     `| Cleanup expiry | ${display(run.preflight.sandbox.cleanup?.expiresAt)} |`,
+    `| Effective target hash | ${display(run.preflight.sandbox.effectiveTargetHash)} |`,
     "",
     "## Method and preflight",
     "",
@@ -174,9 +180,15 @@ export function renderOutcomeReport(run) {
       .filter(([key]) => key !== "rawSamples")
       .map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : value}`)
       .join("; ");
+    const approval = result.approval
+      ? `approval=${JSON.stringify(result.approval)}`
+      : "";
+    const rationale = result.contractRationale
+      ? `contractRationale=${JSON.stringify(result.contractRationale)}`
+      : "";
     lines.push(
       `| \`${scenario.id}\` | ${scenario.criterionType} | ${result.status} | ` +
-      `${fixed(result.durationMs)} | ${display(evidence || result.reason)} | [JSON](raw-results.json) |`,
+      `${fixed(result.durationMs)} | ${display([evidence, rationale, approval].filter(Boolean).join("; ") || result.reason)} | [JSON](raw-results.json) |`,
     );
   }
 

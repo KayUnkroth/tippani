@@ -4,7 +4,10 @@
 // transport + the shared gates without a live org; a live run confirms it.
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import { AdoGitStore } from "../src/adapters/ado-git-store.mjs";
+import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 
 let pass = 0;
@@ -80,29 +83,46 @@ function fakeAdoRepo() {
 function liveContext(scenarioId) {
   const repo = fakeAdoRepo();
   const runId = `s0-ado-gate-${scenarioId.toLowerCase()}`;
+  const storeRoot = path.resolve("spikes/s0-persistence/.test-state", runId);
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  fs.mkdirSync(storeRoot, { recursive: true });
   return {
     config: { runId, adapter: "ado", backingPath: "ado", dryRun: false },
     scenario: { id: scenarioId },
     inProcessProviderClients: true,
     createStore: () => new AdoGitStore({
       dryRun: false, org: "O", project: "P", repo: "R", runId,
-      adoToken: "syn-token", fetchImpl: (u, o) => repo.fetch(u, o),
+      adoToken: "syn-token", fetchImpl: (u, o) => repo.fetch(u, o), storeRoot,
     }),
+    cleanupLocal: () => fs.rmSync(storeRoot, { recursive: true, force: true }),
   };
 }
 
 for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
   await check(`gate ${id} passes against the fake ADO repo`, async () => {
-    const result = await impl(liveContext(id));
-    assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
-    assert.ok(!result.blocked, `${id} must not be blocked in a live ADO context`);
-    if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
-      assert.equal(result.evidence.accounts, 1);
-      assert.equal(result.evidence.clientProcesses, 2);
-    }
-    if (id === "S0-BCK-005") {
-      assert.equal(result.evidence.throttleResponses, 1);
-      assert.ok(result.evidence.transferredBytes > 0);
+    const context = liveContext(id);
+    try {
+      const result = await impl(context);
+      assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
+      assert.ok(!result.blocked, `${id} must not be blocked in a live ADO context`);
+      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
+        assert.equal(result.evidence.accounts, 1);
+        assert.equal(result.evidence.clientProcesses, 2);
+      }
+      if (id === "S0-BCK-005") {
+        assert.deepEqual(result.evidence.faultsExercised,
+          ["throttle", "auth-expiry", "outage", "quota", "permission-loss"]);
+        assert.equal(result.evidence.throttleResponses, 1);
+        assert.ok(result.evidence.transferredBytes > 0);
+      }
+      if (id === "S0-REC-003") {
+        assert.equal(result.evidence.faultsExercised.includes("lost-response"), true);
+      }
+      if (["S0-COL-005", "S0-REC-004"].includes(id)) {
+        assert.equal(result.evidence.processRestartRecoveredQueue, true);
+      }
+    } finally {
+      context.cleanupLocal();
     }
   });
 }
@@ -112,6 +132,43 @@ await check("gates report Blocked outside a live provider context", async () => 
     const result = await impl({ config: { backingPath: "local", dryRun: false }, scenario: { id } });
     assert.ok(result.blocked, `${id} must be Blocked on a local backing path`);
   }
+});
+
+await check("ADO teardown is manifest-authorized and oldObjectId-conditional", async () => {
+  const runId = "s0-ado-cleanup";
+  let conditional = false;
+  const store = new AdoGitStore({
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    adoToken: "syn-token",
+    fetchImpl: async (_url, options) => {
+      if (options.method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ value: [{ objectId: "tip-1" }] }) };
+      }
+      const update = JSON.parse(options.body)[0];
+      conditional = update.oldObjectId === "tip-1" && update.newObjectId === ZERO;
+      return { ok: true, status: 200, json: async () => ({ value: [{ success: true }] }) };
+    },
+  });
+  await assert.rejects(store.cleanup(), /manifest authorization/);
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "ado",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { organization: "O", project: "P", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  await store.cleanup(authorization);
+  assert.equal(conditional, true);
 });
 
 console.log(`s0-ado-gates: ${pass} passed, ${fail} failed`);

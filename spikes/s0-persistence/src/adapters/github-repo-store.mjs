@@ -23,7 +23,11 @@ import {
   deepClone,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
+import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
+import { providerTargetHash } from "../preflight.mjs";
+import { resolveProviderIdentity } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const API = "https://api.github.com";
@@ -43,6 +47,15 @@ export class GitHubRepoStore {
     getToken,
     configurationId = "CFG-GITHUB",
     fetchImpl,
+    storeRoot,
+    safetyBudget = null,
+    signal = null,
+    identityResolver = null,
+    preflightApproval = null,
+    effectiveTargetHash = null,
+    enforcePreflight = false,
+    ownershipMarker,
+    cleanupManifestId = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.owner = owner || process.env.S0_GITHUB_OWNER || null;
@@ -54,20 +67,73 @@ export class GitHubRepoStore {
       || (process.env.S0_GITHUB_TOKEN ? async () => process.env.S0_GITHUB_TOKEN : null);
     this.configurationId = configurationId;
     this.fetchImpl = fetchImpl || globalThis.fetch;
+    this.safetyBudget = safetyBudget;
+    this.signal = signal;
+    this.identityResolver = identityResolver;
+    this.resolvedIdentity = null;
+    this.preflightApproval = preflightApproval;
+    this.effectiveTargetHash = effectiveTargetHash;
+    this.enforcePreflight = enforcePreflight === true;
+    this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
+    this.cleanupManifestId = cleanupManifestId;
     this.operations = [];
     this.liveProviderCalls = 0;
-    this.telemetry = new ProviderTelemetry();
+    this.telemetry = new ProviderTelemetry({ safetyBudget });
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this.shas = new Map();
     this._fault = null;
     this._maxGen = new Map(); // highest generation observed/written per workspace
     this.offline = false;
-    this.pending = [];
+    this.pendingQueue = new PersistentPendingQueue({
+      storeRoot,
+      provider: "github",
+      runId: this.runId,
+    });
     this.initialized = false;
   }
 
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  async resolveCredentialIdentity() {
+    if (this.resolvedIdentity) return this.resolvedIdentity;
+    this.resolvedIdentity = await resolveProviderIdentity({
+      provider: "github",
+      getToken: this._getToken,
+      fetchImpl: this.fetchImpl,
+      signal: this.signal,
+      identityResolver: this.identityResolver,
+      beforeAttempt: async () => {
+        await this.telemetry.recordRequest();
+        this.liveProviderCalls++;
+      },
+      wrapResponse: (response) => this.telemetry.wrapResponse(response),
+    });
+    return this.resolvedIdentity;
+  }
+
+  async assertEffectiveTargetApproved() {
+    if (this.dryRun || !this.enforcePreflight) return;
+    const identity = await this.resolveCredentialIdentity();
+    const targetHash = providerTargetHash({
+      provider: "github",
+      identity,
+      coordinates: { owner: this.owner, repository: this.repo },
+      namespace: `tippani-s0/${this.runId}`,
+    });
+    const approval = this.preflightApproval || {};
+    if (!targetHash ||
+        targetHash !== this.effectiveTargetHash ||
+        approval.targetHash !== targetHash ||
+        typeof approval.approver !== "string" || !approval.approver.trim() ||
+        typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        typeof approval.reference !== "string" || !approval.reference.trim()) {
+      throw new WorkspaceStoreError(
+        "Effective GitHub target is not covered by a structured preflight approval",
+        "preflight_required",
+      );
+    }
   }
 
   record(op, detail = {}) {
@@ -82,20 +148,27 @@ export class GitHubRepoStore {
     if (this.dryRun) throw new Error("gh() must not be called in dry-run");
     if (!this._getToken) throw new WorkspaceStoreError("No GitHub token supplied", "no_token");
     if (!this.owner || !this.repo) throw new WorkspaceStoreError("owner/repo required for a live run", "no_coordinates");
-    this.liveProviderCalls++;
-    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
+      await this.telemetry.recordRequest(body);
+      this.liveProviderCalls++;
       this._fault = null;
       if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
+      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) });
+      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) });
       if (fault.kind === "outage") {
         this.telemetry.recordFailure("outage");
         throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
       }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
-        await this.fetchImpl(url, { method, headers: this.headers(token0, headers), body });
+        await this.fetchImpl(url, {
+          method,
+          headers: this.headers(token0, headers),
+          body,
+          signal: this.signal,
+        });
         this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
@@ -103,7 +176,14 @@ export class GitHubRepoStore {
     const token = await this._getToken();
     for (let attempt = 0; ; attempt++) {
       try {
-        return this.telemetry.wrapResponse(await this.fetchImpl(url, { method, headers: this.headers(token, headers), body }));
+        await this.telemetry.recordRequest(body);
+        this.liveProviderCalls++;
+        return this.telemetry.wrapResponse(await this.fetchImpl(url, {
+          method,
+          headers: this.headers(token, headers),
+          body,
+          signal: this.signal,
+        }));
       } catch (error) {
         const retryable = method === "GET" && attempt < 2 &&
           (error instanceof TypeError || RETRYABLE_NETWORK_CODES.has(error?.code) ||
@@ -128,6 +208,7 @@ export class GitHubRepoStore {
   }
 
   async initialize() {
+    await this.assertEffectiveTargetApproved();
     this.record("connect");
     if (this.dryRun) { await this.model.initialize(); this.initialized = true; return { backingPath: "github", dryRun: true, branch: this.branch }; }
     // Create the per-run branch off the default branch; the default is untouched.
@@ -137,6 +218,7 @@ export class GitHubRepoStore {
     const refResp = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${defaultBranch}`);
     if (!refResp.ok) throw new WorkspaceStoreError(`default ref lookup failed: ${refResp.status}`, "provider_error");
     const baseSha = (await refResp.json()).object.sha;
+    await this.safetyBudget?.recordObjects(1);
     const createResp = await this.gh("POST", `${this.repoBase()}/git/refs`, {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: baseSha }),
@@ -155,6 +237,7 @@ export class GitHubRepoStore {
   async createWorkspace(workspace) {
     this.ensureInitialized();
     validateWorkspaceRecord(workspace);
+    await this.safetyBudget?.recordObjects(1);
     this.record("put-contents", { changeType: "create", item: `${workspace.workspaceId}.json` });
     if (this.dryRun) return this.model.createWorkspace(workspace);
     const resp = await this.gh("PUT", `${this.repoBase()}/contents/${workspace.workspaceId}.json`, {
@@ -317,6 +400,7 @@ export class GitHubRepoStore {
     }
     for (const workspace of snapshot.workspaces) {
       validateWorkspaceRecord(workspace);
+      await this.safetyBudget?.recordObjects(1);
       let sha;
       try { sha = (await this.readItem(workspace.workspaceId)).sha; } catch { sha = undefined; }
       const resp = await this.gh("PUT", `${this.repoBase()}/contents/${workspace.workspaceId}.json`, {
@@ -348,31 +432,57 @@ export class GitHubRepoStore {
 
   goOffline() { this.offline = true; }
 
-  stageOffline(request) {
+  async stageOffline(request) {
     if (!this.offline) throw new WorkspaceStoreError("stageOffline requires offline mode", "not_offline");
-    this.pending.push(request);
-    return { status: "pending", pendingCount: this.pending.length };
+    await this.pendingQueue.append(request);
+    return { status: "pending", pendingCount: await this.pendingQueue.count() };
   }
 
   async reconnect() {
     this.offline = false;
     const applied = [];
     const conflicts = [];
-    const queued = this.pending;
-    this.pending = [];
-    for (const request of queued) {
-      try {
-        const next = await this.compareAndSwap(request);
-        applied.push({ workspaceId: request.workspaceId, generation: next.generation });
-      } catch (error) {
-        if (error instanceof WorkspaceConflictError) {
-          conflicts.push({ workspaceId: request.workspaceId, expected: error.expectedGeneration, actual: error.actualGeneration });
-        } else {
-          throw error;
+    const retained = [];
+    for (;;) {
+      const outcome = await this.pendingQueue.processHead(async (entry) => {
+        const request = entry.request;
+        try {
+          const next = await this.compareAndSwap(request);
+          return {
+            remove: true,
+            kind: "applied",
+            value: { workspaceId: request.workspaceId, generation: next.generation },
+          };
+        } catch (error) {
+          if (error instanceof WorkspaceConflictError) {
+            return {
+              remove: false,
+              kind: "conflict",
+              value: {
+                workspaceId: request.workspaceId,
+                expected: error.expectedGeneration,
+                actual: error.actualGeneration,
+              },
+            };
+          }
+          return {
+            remove: false,
+            kind: "retained",
+            value: { workspaceId: request.workspaceId, code: error?.code || "provider_error" },
+          };
         }
-      }
+      });
+      if (outcome.empty) break;
+      if (outcome.kind === "applied") applied.push(outcome.value);
+      if (outcome.kind === "conflict") conflicts.push(outcome.value);
+      if (outcome.kind === "retained") retained.push(outcome.value);
+      if (outcome.remove !== true) break;
     }
-    return { applied, conflicts };
+    return { applied, conflicts, retained, pendingCount: await this.pendingQueue.count() };
+  }
+
+  async pendingCount() {
+    return this.pendingQueue.count();
   }
 
   async deleteWorkspace(workspaceId) {
@@ -387,12 +497,76 @@ export class GitHubRepoStore {
   }
 
   // Delete the per-run branch; never touches the default branch.
-  async cleanup() {
-    if (this.dryRun) { this.record("delete-ref", { ref: `refs/heads/${this.branch}` }); return { deleted: this.branch, dryRun: true }; }
+  cleanupResource() {
+    return {
+      kind: "github-ref",
+      id: `refs/heads/${this.branch}`,
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      coordinatesHash: cleanupCoordinatesHash("github", {
+        owner: this.owner,
+        repository: this.repo,
+      }),
+      effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+    };
+  }
+
+  async prepareCleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
+    if (this.dryRun) {
+      manifest.bindCondition(resource, { expectedSha: "<ref-sha>" });
+      return resource.condition;
+    }
+    const lookup = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
+    if (lookup.status === 404) {
+      manifest.bindCondition(resource, { absent: true });
+      return resource.condition;
+    }
+    if (!lookup.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${lookup.status}`, "provider_error");
+    const expectedSha = (await lookup.json())?.object?.sha;
+    if (!expectedSha) {
+      throw new WorkspaceStoreError("cleanup precondition unavailable", "cleanup_precondition_unavailable");
+    }
+    manifest.bindCondition(resource, { expectedSha });
+    return resource.condition;
+  }
+
+  async cleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
+    if (!resource.condition) {
+      throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
+    }
+    if (this.dryRun) {
+      this.record("delete-ref", {
+        ref: `refs/heads/${this.branch}`,
+        precondition: "expected-sha=<ref-sha>",
+      });
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, dryRun: true };
+    }
+    if (resource.condition.absent === true) {
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, absent: true };
+    }
+    const lookup = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
+    if (lookup.status === 404) throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
+    if (!lookup.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${lookup.status}`, "provider_error");
+    const currentSha = (await lookup.json())?.object?.sha;
+    if (currentSha !== resource.condition.expectedSha) {
+      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
     const resp = await this.gh("DELETE", `${this.repoBase()}/git/refs/heads/${this.branch}`);
-    if (!resp.ok && resp.status !== 404 && resp.status !== 422) {
+    if (!resp.ok) {
+      if (resp.status === 404 || resp.status === 409 || resp.status === 422) {
+        throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+      }
       throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
     }
+    manifest.markCleaned(resource);
     return { deleted: this.branch };
   }
 

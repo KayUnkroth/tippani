@@ -8,16 +8,24 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { ProviderWorkspaceStore } from "../src/adapters/provider-store.mjs";
+import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
+import { createStore } from "../src/adapters/registry.mjs";
 import { applicableScenarioIds } from "../src/applicability.mjs";
 import {
   buildPreflightSheet,
   renderPreflightSheet,
   runProviderDryRun,
 } from "../src/provider-preflight-sheet.mjs";
-import { findEmbeddedSecrets } from "../src/preflight.mjs";
+import {
+  findEmbeddedSecrets,
+  resolveEffectiveProviderConfig,
+  validatePreflight,
+  withResolvedProviderIdentity,
+} from "../src/preflight.mjs";
 import { BLOCKED_REASONS } from "../src/provider-gates.mjs";
 import { runHarness } from "../src/runner.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
+import { OperationBudget } from "../src/operation-budget.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const spikeRoot = path.dirname(here);
@@ -44,6 +52,28 @@ async function check(name, action) {
 await check("fails closed before any provider call with an unapproved sandbox", async () => {
   const store = new ProviderWorkspaceStore({ backingPath: "ado", sandbox: { approved: false }, dryRun: true });
   await assert.rejects(store.initialize(), (error) => error.code === "preflight_required");
+});
+
+await check("registry preserves runtime-only budget, signal, and callback objects", () => {
+  const abortController = new AbortController();
+  const safetyBudget = new OperationBudget({
+    limits: { maxOperations: 10, maxDurationMs: 1000, maxObjects: 10, maxBytes: 1000 },
+  });
+  const fetchImpl = async () => ({ ok: true, status: 200 });
+  const identityResolver = async () => ({ subject: "github:syn-runtime" });
+  const store = createStore("github", {
+    ...providerConfig,
+    owner: "synthetic-owner",
+    repo: "synthetic-repository",
+    safetyBudget,
+    signal: abortController.signal,
+    fetchImpl,
+    identityResolver,
+  });
+  assert.equal(store.safetyBudget, safetyBudget);
+  assert.equal(store.signal, abortController.signal);
+  assert.equal(store.fetchImpl, fetchImpl);
+  assert.equal(store.identityResolver, identityResolver);
 });
 
 await check("refuses live provider operations until a sandbox is wired in", async () => {
@@ -104,6 +134,7 @@ await check("dry-run enforces generation CAS in its coherent model", async () =>
 await check("preflight sheet is non-secret and lists the dry-run manifest and prerequisites", async () => {
   const sheet = await buildPreflightSheet(providerConfig);
   assert.equal(sheet.liveProviderCalls, 0);
+  assert.equal(sheet.identityResolutionCalls, 0);
   assert.deepEqual(findEmbeddedSecrets(sheet), []);
   assert.ok(sheet.dryRunOperations.length >= 4);
   assert.ok(sheet.prerequisites.length > 0);
@@ -113,6 +144,106 @@ await check("preflight sheet is non-secret and lists the dry-run manifest and pr
   assert.ok(markdown.includes("preflight sheet"));
   assert.ok(markdown.includes("Dry-run operation manifest"));
   assert.ok(markdown.includes(providerConfig.sandbox.namespace));
+  assert.equal(sheet.approvalReady, false, "Placeholder coordinates are not approval-ready");
+});
+
+await check("live preflight binds provider-derived identity and coordinates to an approved hash", async () => {
+  const live = structuredClone(providerConfig);
+  live.dryRun = false;
+  const targetEnv = {
+    S0_GITHUB_TOKEN: "syn-token",
+    S0_GITHUB_OWNER: "synthetic-owner",
+    S0_GITHUB_REPO: "synthetic-repository",
+  };
+  const resolved = withResolvedProviderIdentity(
+    resolveEffectiveProviderConfig(live, targetEnv),
+    "github:syn-identity-001",
+    targetEnv,
+  );
+  assert.ok(resolved.sandbox.effectiveTargetHash?.startsWith("sha256:"));
+  const approvedEnv = {
+    ...targetEnv,
+    S0_PREFLIGHT_APPROVER: "Synthetic Reviewer",
+    S0_PREFLIGHT_APPROVED_AT: "2026-09-03T20:00:00.000Z",
+    S0_PREFLIGHT_APPROVAL_REFERENCE: "syn-review-91",
+    S0_PREFLIGHT_TARGET_HASH: resolved.sandbox.effectiveTargetHash,
+  };
+  const approved = withResolvedProviderIdentity(live, "github:syn-identity-001", approvedEnv);
+  assert.deepEqual(validatePreflight(approved, { env: approvedEnv }), []);
+
+  const mismatched = { ...approvedEnv, S0_GITHUB_REPO: "different-synthetic-repository" };
+  const mismatchedTarget = withResolvedProviderIdentity(
+    live,
+    "github:syn-identity-001",
+    mismatched,
+  );
+  assert(
+    validatePreflight(mismatchedTarget, { env: mismatched }).some((error) => /target hash/.test(error)),
+    "Runtime substitution must invalidate the approved target hash",
+  );
+
+  const sheet = await buildPreflightSheet(live, {
+    env: targetEnv,
+    identityResolver: async ({ token }) => {
+      assert.equal(token, "syn-token");
+      return { subject: "github:syn-identity-001" };
+    },
+  });
+  assert.equal(sheet.approvalReady, true);
+  assert.equal(sheet.effectiveTargetHash, resolved.sandbox.effectiveTargetHash);
+  assert.equal(sheet.identity.subject, "github:syn-identity-001");
+  assert.equal(sheet.identity.source, "provider credential");
+});
+
+await check("live preflight rejects unresolved placeholders before any network call", () => {
+  const live = structuredClone(providerConfig);
+  live.dryRun = false;
+  const errors = validatePreflight(live, { env: {} });
+  assert(errors.some((error) => /resolved before provider calls/.test(error)));
+  assert(errors.some((error) => /Structured preflight approval/.test(error)));
+});
+
+await check("provider adapter rejects a mismatched approved target before fetch", async () => {
+  let calls = 0;
+  const store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "synthetic-owner",
+    repo: "synthetic-repository",
+    runId: "s0-provider-binding",
+    githubToken: "syn-token",
+    identityResolver: async () => ({ subject: "github:syn-identity-001" }),
+    effectiveTargetHash: "sha256:not-the-effective-target",
+    preflightApproval: {
+      approver: "Synthetic Reviewer",
+      approvedAt: "2026-09-03T20:00:00.000Z",
+      reference: "syn-review-91",
+      targetHash: "sha256:not-the-effective-target",
+    },
+    enforcePreflight: true,
+    fetchImpl: async () => {
+      calls++;
+      throw new Error("network must not be reached");
+    },
+  });
+  await assert.rejects(store.initialize(), (error) => error.code === "preflight_required");
+  assert.equal(calls, 0);
+});
+
+await check("caller-supplied identity labels cannot satisfy live approval", () => {
+  const live = structuredClone(providerConfig);
+  live.dryRun = false;
+  live.effectiveIdentity = "github:caller-supplied";
+  const errors = validatePreflight(live, {
+    env: {
+      S0_GITHUB_OWNER: "synthetic-owner",
+      S0_GITHUB_REPO: "synthetic-repository",
+      S0_PREFLIGHT_APPROVER: "Synthetic Reviewer",
+      S0_PREFLIGHT_APPROVED_AT: "2026-09-03T20:00:00.000Z",
+      S0_PREFLIGHT_APPROVAL_REFERENCE: "syn-review-91",
+      S0_PREFLIGHT_TARGET_HASH: "sha256:caller",
+    },
+  });
+  assert(errors.some((error) => /provider-derived/.test(error)));
 });
 
 await check("preflight sheet build rejects a config that embeds a credential", async () => {

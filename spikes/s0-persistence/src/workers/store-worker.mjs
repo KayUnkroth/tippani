@@ -9,10 +9,11 @@
 //   stale-reconcile - reject a stale write, reload, then commit on the new generation
 //   observe       - poll until a target generation is visible
 //   crash         - hard-exit at a named commit boundary during a mutation
-//   restore-crash - hard-exit at a named boundary during a restore
+//   migration-crash - hard-exit at a named boundary during a migration
 //   read          - reopen the store and report durable state
 
 import { createStore } from "../adapters/registry.mjs";
+import { IpcOperationBudget, OperationBudget } from "../operation-budget.mjs";
 
 function argOf(name, fallback = null) {
   const prefixed = process.argv.find((arg) => arg.startsWith(`--${name}=`));
@@ -33,6 +34,25 @@ const observationTimeoutMs = Number(argOf("observe-timeout-ms", "30000"));
 const crashAt = argOf("crash-at", "before-commit");
 const op = argOf("op", "audit");
 const alias = argOf("alias", `syn-alias-crash-${process.pid}`);
+const deadlineMs = Number(argOf("deadline-ms", "30000"));
+const abortController = new AbortController();
+const deadlineTimer = providerLive
+  ? setTimeout(() => abortController.abort(), deadlineMs)
+  : null;
+deadlineTimer?.unref?.();
+const safetyBudget = providerLive
+  ? (process.send ? new IpcOperationBudget({
+    signal: abortController.signal,
+  }) : new OperationBudget({
+    limits: {
+      maxOperations: Number(argOf("max-operations", "100")),
+      maxObjects: Number(argOf("max-objects", "10000")),
+      maxBytes: Number(argOf("max-bytes", "104857600")),
+      maxDurationMs: deadlineMs,
+    },
+    signal: abortController.signal,
+  }))
+  : null;
 
 function report(payload) {
   process.stdout.write(`${JSON.stringify({ pid: process.pid, ...payload })}\n`);
@@ -65,11 +85,35 @@ async function waitForRelease() {
   });
 }
 
+if (mode === "budget-probe") {
+  try {
+    await waitForRelease();
+    await safetyBudget.recordRequest("syn-budget-probe");
+    report({ status: "budget-consumed" });
+    process.exit(0);
+  } catch (error) {
+    report({ status: "error", code: error?.code, message: error?.message });
+    process.exit(1);
+  }
+}
+
 const store = createStore(adapter, {
   storeRoot,
   runId,
-  ...(providerLive ? { dryRun: false } : {}),
+  ...(providerLive ? {
+    dryRun: false,
+    enforcePreflight: true,
+    safetyBudget,
+    signal: abortController.signal,
+  } : {}),
 });
+
+if (mode === "checksum-backfill-crash") {
+  await store.initialize({ faultInjector: crashInjector() });
+  report({ status: "backfilled-unexpectedly" });
+  process.exit(0);
+}
+
 await store.initialize();
 
 try {
@@ -83,12 +127,9 @@ try {
       faultInjector: crashInjector(),
     });
     report({ status: "committed-unexpectedly" });
-  } else if (mode === "restore-crash") {
-    const snapshot = await store.backup();
-    // Tamper the snapshot so a completed restore would be observable.
-    if (snapshot.workspaces[0]) snapshot.workspaces[0].generation = 10;
-    await store.restore(snapshot, { faultInjector: crashInjector() });
-    report({ status: "restored-unexpectedly" });
+  } else if (mode === "migration-crash") {
+    await store.migrate({ faultInjector: crashInjector() });
+    report({ status: "migrated-unexpectedly" });
   } else if (mode === "stale-reconcile") {
     let conflict;
     try {
@@ -149,6 +190,7 @@ try {
     });
   }
   await store.close();
+  if (deadlineTimer) clearTimeout(deadlineTimer);
   process.exit(0);
 } catch (error) {
   const conflict = error?.code === "generation_conflict";
@@ -158,5 +200,6 @@ try {
     message: error?.message,
   });
   try { await store.close(); } catch { /* best effort */ }
+  if (deadlineTimer) clearTimeout(deadlineTimer);
   process.exit(conflict ? 0 : 1);
 }

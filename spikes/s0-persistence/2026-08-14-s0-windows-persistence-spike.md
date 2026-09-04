@@ -143,12 +143,18 @@ Before execution, Kay reviews a generated preflight sheet containing only:
 - Effective non-secret identity labels.
 - Sandbox organization/project/repository or drive/item coordinates.
 - Ownership markers and per-run namespaces.
+- A canonical SHA-256 hash of the resolved provider identity, coordinates, and
+  namespace.
 - Effective permission summaries.
 - Default/protected branch exclusions.
 - Operation, request, object, time, and storage budgets.
 - Cleanup manifests, retention holds, and expiry dates.
 
-Execution requires Kay's explicit approval of that preflight sheet. Any missing prerequisite remains `Blocked`; the harness must not compensate by using an accessible corporate or production resource.
+Execution requires a structured approval containing the approver identity,
+approval date, reference, and exact target hash. Runtime substitution that
+changes the effective target invalidates the approval before any provider call.
+Any missing prerequisite remains `Blocked`; the harness must not compensate by
+using an accessible corporate or production resource.
 
 ### ADO and GitHub test-safety contract
 
@@ -660,7 +666,9 @@ Create one completed report for every tested engine/backing-path configuration. 
 |---|---|---|---|---|---|---|
 | S0-01 | | | Pass / Fail / Blocked / N/A | | | |
 
-Every `Fail`, `Blocked`, or `N/A` entry requires an explanation. Do not collapse repeated fault points into one row unless the raw per-run evidence remains linked.
+Every `Fail` or `Blocked` entry requires an explanation. Every `N/A` additionally
+requires approver identity, approval date, and a reference. Do not collapse
+repeated fault points into one row unless the raw per-run evidence remains linked.
 
 ## 4. Correctness summary
 
@@ -758,4 +766,12 @@ The ADR must link every summary cell to a completed configuration report and raw
 
 S0 is complete only when the viable local SQLite, local envelope, OneDrive envelope, ADO envelope, and GitHub envelope configurations run the applicable automated correctness and collaboration harnesses; cross-platform local/cache results are recorded; measured results and failures are published; and an approved ADR selects the persistence architecture and implementation mapping behind one workspace-store contract. The ADR must also record authoritative-head, offline, rehome, and support policies. R1 design must not begin before that approval.
 
-The exit condition is met: all five configurations have applicable evidence, the unchanged local harness passed on Windows/NTFS, macOS/APFS, and the Linux runner's detected ext-family filesystem, and the accepted ADR selects the hybrid SQLite plus provider-native generation-CAS mapping.
+The exit condition is **not met**. The previous hybrid SQLite plus
+provider-native generation-CAS acceptance is withdrawn. The retained campaigns
+predate corrected evidence identity, safety-budget, offline-queue, cleanup,
+fault, and performance semantics. In addition, SQLite structurally fails the
+current absolute `S0-CON-003` no-global-serialization criterion because
+`BEGIN IMMEDIATE` serializes writers database-wide. Closing that condition
+requires changing the criterion or an independently approved, scenario-specific
+`N/A` rationale; rerunning SQLite alone cannot turn the current behavior into a
+pass. R1 design must wait for current campaigns and a newly approved ADR.

@@ -1,18 +1,19 @@
 # S0 Persistence Spike Revision Plan
 
-**Status:** Implemented — ADR accepted; PR reviewer confirmation pending
+**Status:** Reopened — source fixes implemented; corrected evidence and ADR decision pending
 **Purpose:** Turn the existing S0 harness evidence into an applicability-aware, decision-ready persistence architecture handoff.
 
-## Completion
+## Current state
 
-The revision is implemented. The five configuration reports and three retained
-campaigns per provider are summarized in the
-[architecture-mapping handoff](results/comparison/comparison.md). Both candidate
-mappings pass every applicable absolute gate. The accepted
-[persistence ADR](ADR-s0-persistence-architecture.md) selects hybrid local
-SQLite plus provider-native generation-CAS transports. Windows/NTFS,
-macOS/APFS, and Linux filesystem evidence is retained under
-`results/cross-platform/`. The full S0 suite passes.
+The review fixes are implemented in source and deterministic tests. The
+[architecture-mapping handoff](results/comparison/comparison.md) now rejects the
+retained local and provider artifacts because they predate the corrected result
+schema, source/catalog/applicability/config identity, structured `N/A`,
+provider-safety, queue, teardown, fault, and performance semantics.
+
+No mapping is currently eligible or selected. The persistence ADR is reopened.
+Local, provider, performance, and cross-platform campaigns must be regenerated
+before the plan can return to completed status.
 
 ## Problem
 
@@ -111,14 +112,14 @@ The report must not recommend a mapping while no mapping is eligible. Once eligi
 
 ## Superseded evidence
 
-The following pre-revision results were historical inputs only. The accepted
-decision uses newly generated applicability-aware campaigns rather than these
-counts as current evidence.
+The following pre-revision results are historical inputs only. No current
+decision may use these counts; all affected configurations require newly
+generated applicability-aware campaigns.
 
 Historical evidence included:
 
-- Local envelope: 38 applicable absolute passes in the current Windows run.
-- Local SQLite: 37 applicable absolute passes plus approved `N/A` for the external stale-lock-file form of `S0-REC-002`.
+- Local envelope: 38 reported absolute passes in the superseded Windows run.
+- Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`.
 - OneDrive: nine provider gates passed.
 - Azure DevOps: nine provider gates passed.
 - GitHub: nine provider gates passed.
@@ -177,9 +178,9 @@ Both local engines must be exercised with independent OS processes and prove:
 - Lock or journal recovery according to the engine's actual ownership model.
 - No unreviewed provider-only gate is used to disqualify a local engine.
 
-Windows/NTFS, macOS/APFS, and Linux filesystem evidence now exists for both
-local candidates. Each native run records its detected filesystem and result
-instead of inheriting a Windows outcome.
+Historical Windows/NTFS, macOS/APFS, and Linux artifacts exist for both local
+candidates, but the shared contract and harness revisions changed. They require
+rerun and are not current eligibility evidence.
 
 ### Provider requirements
 
@@ -235,8 +236,10 @@ Every local and provider run must prove:
 
 ## Performance and operability investigation
 
-Relative measurements may be considered because both architecture mappings are
-eligible. They do not override correctness, safety, or recovery gates.
+Relative measurements may not currently select an architecture because no
+mapping is eligible. `PER-001` and `PER-003` are explicitly incomplete until
+fresh-process populated-store startup/enumeration, memory, and storage-layer
+bytes-written measurements exist.
 
 Use one common documented method across every applicable configuration:
 
@@ -347,8 +350,10 @@ Add tests that prove:
 
 1. Run catalog, eligibility, result-writer, comparison, and isolation unit tests.
 2. Run the full credential-free harness and detection-power suites.
-3. Regenerate local outcomes with the repeated performance method.
-4. Import and validate the existing three live provider outcomes into the new applicability model.
+3. Regenerate local outcomes; keep `PER-001` and `PER-003` incomplete until the
+   corrected fresh-process/memory/bytes-written method exists.
+4. Run three new live provider campaigns per provider; do not import the
+   superseded outcomes as current evidence.
 5. Run the new provider performance suite.
 6. Run the two-client-process collaboration suite on OneDrive, ADO, and GitHub.
 7. Run the separate OneDrive synced-folder compatibility probe.
@@ -362,7 +367,8 @@ S0 is decision-ready when:
 
 - The comparison includes all five configurations and both candidate mappings.
 - Every absolute gate is correctly classified by applicability.
-- Every applicable absolute gate is `Pass` or approved `N/A` for at least one complete mapping.
+- Every applicable absolute gate is `Pass` or an `N/A` with approver identity,
+  approval date, and reference for at least one complete mapping.
 - Multi-user collaboration evidence exists independently for OneDrive, ADO, and GitHub.
 - Performance and operability evidence follows one repeated, documented method.
 - Relative evidence is used only after mapping eligibility exists.

@@ -5,6 +5,45 @@
 
 import { applicableScenarioIds } from "./applicability.mjs";
 
+export function naApprovalErrors(result) {
+  if (result?.status !== "N/A") return [];
+  const approval = result.approval;
+  const errors = [];
+  const rationale = result.contractRationale;
+  if (!rationale || typeof rationale !== "object" ||
+      rationale.scenarioId !== result.scenarioId ||
+      typeof rationale.rationale !== "string" ||
+      !rationale.rationale.trim()) {
+    errors.push("scenario-specific contract rationale is required");
+  }
+  if (!approval || typeof approval !== "object") {
+    errors.push("structured independent approval");
+    return errors;
+  }
+  if (typeof approval.approver !== "string" || !approval.approver.trim()) {
+    errors.push("approver identity is required");
+  }
+  if (typeof approval.approvedAt !== "string" ||
+      !Number.isFinite(Date.parse(approval.approvedAt))) {
+    errors.push("approval date is required");
+  }
+  if (typeof approval.reference !== "string" || !approval.reference.trim()) {
+    errors.push("approval reference is required");
+  }
+  return errors;
+}
+
+export function effectiveResult(result) {
+  const errors = naApprovalErrors(result);
+  if (!errors.length) return result;
+  return {
+    ...result,
+    originalStatus: result.status,
+    status: "Incomplete",
+    reason: `Invalid N/A evidence: ${errors.join("; ")}`,
+  };
+}
+
 export function gateSummary(run) {
   const applicable = new Set(
     run.applicableScenarioIds ||
@@ -19,10 +58,12 @@ export function gateSummary(run) {
   const passed = [];
   const missing = [];
   const na = [];
+  const invalidNa = [];
   const notApplicable = [];
 
   for (const scenario of applicableCatalog) {
-    const result = byId.get(scenario.id);
+    const rawResult = byId.get(scenario.id);
+    const result = rawResult ? effectiveResult(rawResult) : null;
     if (!result) {
       missing.push(scenario);
     } else if (result.status === "Fail") {
@@ -30,11 +71,9 @@ export function gateSummary(run) {
     } else if (result.status === "Pass") {
       passed.push(result);
     } else if (result.status === "N/A") {
-      // A reviewer-approved contract-level exception is distinct from a gate
-      // assigned to another configuration by the applicability matrix.
       na.push(result);
     } else {
-      // Incomplete or Blocked.
+      if (result.originalStatus === "N/A") invalidNa.push(result);
       unresolved.push(result);
     }
   }
@@ -53,6 +92,7 @@ export function gateSummary(run) {
     passed,
     missing,
     na,
+    invalidNa,
     notApplicable,
     eligible,
   };

@@ -24,7 +24,11 @@ import {
   deepClone,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
+import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
+import { providerTargetHash } from "../preflight.mjs";
+import { resolveProviderIdentity } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
@@ -44,6 +48,15 @@ export class OneDriveGraphStore {
     getToken,
     configurationId = "CFG-ONEDRIVE",
     fetchImpl,
+    storeRoot,
+    safetyBudget = null,
+    signal = null,
+    identityResolver = null,
+    preflightApproval = null,
+    effectiveTargetHash = null,
+    enforcePreflight = false,
+    ownershipMarker,
+    cleanupManifestId = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.driveId = driveId || process.env.S0_ONEDRIVE_DRIVE_ID || null;
@@ -55,14 +68,27 @@ export class OneDriveGraphStore {
       || (process.env.S0_ONEDRIVE_TOKEN ? async () => process.env.S0_ONEDRIVE_TOKEN : null);
     this.configurationId = configurationId;
     this.fetchImpl = fetchImpl || globalThis.fetch;
+    this.safetyBudget = safetyBudget;
+    this.signal = signal;
+    this.identityResolver = identityResolver;
+    this.resolvedIdentity = null;
+    this.preflightApproval = preflightApproval;
+    this.effectiveTargetHash = effectiveTargetHash;
+    this.enforcePreflight = enforcePreflight === true;
+    this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
+    this.cleanupManifestId = cleanupManifestId;
     this.operations = [];
     this.liveProviderCalls = 0;
-    this.telemetry = new ProviderTelemetry();
+    this.telemetry = new ProviderTelemetry({ safetyBudget });
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this.etags = new Map();
     this._fault = null;
     this.offline = false;
-    this.pending = [];
+    this.pendingQueue = new PersistentPendingQueue({
+      storeRoot,
+      provider: "onedrive",
+      runId: this.runId,
+    });
     this.initialized = false;
   }
 
@@ -72,6 +98,46 @@ export class OneDriveGraphStore {
   // write lands but the client never sees the acknowledgement).
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  async resolveCredentialIdentity() {
+    if (this.resolvedIdentity) return this.resolvedIdentity;
+    this.resolvedIdentity = await resolveProviderIdentity({
+      provider: "onedrive",
+      getToken: this._getToken,
+      fetchImpl: this.fetchImpl,
+      signal: this.signal,
+      identityResolver: this.identityResolver,
+      beforeAttempt: async () => {
+        await this.telemetry.recordRequest();
+        this.liveProviderCalls++;
+      },
+      wrapResponse: (response) => this.telemetry.wrapResponse(response),
+    });
+    return this.resolvedIdentity;
+  }
+
+  async assertEffectiveTargetApproved() {
+    if (this.dryRun || !this.enforcePreflight) return;
+    const identity = await this.resolveCredentialIdentity();
+    const targetHash = providerTargetHash({
+      provider: "onedrive",
+      identity,
+      coordinates: { driveId: this.driveId, folder: this.baseFolder },
+      namespace: `tippani-s0/${this.runId}`,
+    });
+    const approval = this.preflightApproval || {};
+    if (!targetHash ||
+        targetHash !== this.effectiveTargetHash ||
+        approval.targetHash !== targetHash ||
+        typeof approval.approver !== "string" || !approval.approver.trim() ||
+        typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        typeof approval.reference !== "string" || !approval.reference.trim()) {
+      throw new WorkspaceStoreError(
+        "Effective OneDrive target is not covered by a structured preflight approval",
+        "preflight_required",
+      );
+    }
   }
 
   record(op, detail = {}) {
@@ -86,20 +152,27 @@ export class OneDriveGraphStore {
     if (this.dryRun) throw new Error("graph() must not be called in dry-run");
     if (!this._getToken) throw new WorkspaceStoreError("No Graph token supplied", "no_token");
     if (!this.driveId || !this.baseFolder) throw new WorkspaceStoreError("driveId and folder are required for a live run", "no_coordinates");
-    this.liveProviderCalls++;
-    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
+      await this.telemetry.recordRequest(body);
+      this.liveProviderCalls++;
       this._fault = null;
       if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), json: async () => ({}), text: async () => "throttled" });
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, json: async () => ({}), text: async () => "unauthorized" });
+      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, json: async () => ({}), text: async () => "forbidden" });
+      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, json: async () => ({}), text: async () => "quota exceeded" });
       if (fault.kind === "outage") {
         this.telemetry.recordFailure("outage");
         throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
       }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
-        await this.fetchImpl(`${GRAPH}${path}`, { method, headers: { Authorization: `Bearer ${token0}`, ...headers }, body });
+        await this.fetchImpl(`${GRAPH}${path}`, {
+          method,
+          headers: { Authorization: `Bearer ${token0}`, ...headers },
+          body,
+          signal: this.signal,
+        });
         this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
@@ -111,10 +184,13 @@ export class OneDriveGraphStore {
     );
     for (let attempt = 0; ; attempt++) {
       try {
+        await this.telemetry.recordRequest(body);
+        this.liveProviderCalls++;
         const resp = await this.fetchImpl(`${GRAPH}${resolvedPath}`, {
           method,
           headers: { Authorization: `Bearer ${token}`, ...headers },
           body,
+          signal: this.signal,
         });
         return this.telemetry.wrapResponse(resp);
       } catch (error) {
@@ -132,6 +208,7 @@ export class OneDriveGraphStore {
     const parts = `tippani-s0/${this.runId}`.split("/");
     let parent = this.baseFolder;
     for (const part of parts) {
+      await this.safetyBudget?.recordObjects(1);
       const listUrl = `/drives/${this.driveId}/root:/${encodePath(parent)}:/children`;
       const resp = await this.graph("POST", listUrl, {
         headers: { "Content-Type": "application/json" },
@@ -145,6 +222,7 @@ export class OneDriveGraphStore {
   }
 
   async initialize() {
+    await this.assertEffectiveTargetApproved();
     this.record("ensure-folder", { path: `${this.baseFolder ?? "<folder>"}/tippani-s0/${this.runId}` });
     if (this.dryRun) {
       await this.model.initialize();
@@ -163,6 +241,7 @@ export class OneDriveGraphStore {
   async createWorkspace(workspace) {
     this.ensureInitialized();
     validateWorkspaceRecord(workspace);
+    await this.safetyBudget?.recordObjects(1);
     this.record("put-content", { precondition: "conflictBehavior=fail", item: `${workspace.workspaceId}.json` });
     if (this.dryRun) return this.model.createWorkspace(workspace);
 
@@ -284,6 +363,7 @@ export class OneDriveGraphStore {
     }
     for (const workspace of snapshot.workspaces) {
       validateWorkspaceRecord(workspace);
+      await this.safetyBudget?.recordObjects(1);
       const url = `/drives/${this.driveId}/root:/${encodePath(this.itemPath(workspace.workspaceId))}:/content?@microsoft.graph.conflictBehavior=replace`;
       const resp = await this.graph("PUT", url, {
         headers: { "Content-Type": "application/json" },
@@ -295,25 +375,85 @@ export class OneDriveGraphStore {
   }
 
   // Delete only this run's subfolder. Used by cleanup; never touches siblings.
-  async cleanup() {
+  cleanupResource() {
+    return {
+      kind: "onedrive-folder",
+      id: this.subfolder,
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      coordinatesHash: cleanupCoordinatesHash("onedrive", {
+        driveId: this.driveId,
+        folder: this.baseFolder,
+      }),
+      effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+    };
+  }
+
+  async prepareCleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
     if (this.dryRun) {
-      this.record("delete-folder", { path: this.subfolder });
+      manifest.bindCondition(resource, { expectedItemId: "<folder-id>", expectedETag: "<folder-etag>" });
+      return resource.condition;
+    }
+    const meta = await this.graph(
+      "GET",
+      `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}?$select=id,eTag`,
+    );
+    if (meta.status === 404) {
+      manifest.bindCondition(resource, { absent: true });
+      return resource.condition;
+    }
+    if (!meta.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${meta.status}`, "provider_error");
+    const { id, eTag } = await meta.json();
+    if (!id || !eTag) {
+      throw new WorkspaceStoreError("cleanup precondition unavailable", "cleanup_precondition_unavailable");
+    }
+    manifest.bindCondition(resource, { expectedItemId: id, expectedETag: eTag });
+    return resource.condition;
+  }
+
+  async cleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
+    if (!resource.condition) {
+      throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
+    }
+    if (this.dryRun) {
+      this.record("delete-folder", {
+        path: this.subfolder,
+        precondition: "If-Match:<folder-etag>",
+      });
+      manifest.markCleaned(resource);
       return { deleted: this.subfolder, dryRun: true };
     }
-    const url = `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}`;
-    const resp = await this.graph("DELETE", url);
+    if (resource.condition.absent === true) {
+      manifest.markCleaned(resource);
+      return { deleted: this.subfolder, absent: true };
+    }
+    const meta = await this.graph(
+      "GET",
+      `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}?$select=id,eTag`,
+    );
+    if (meta.status === 404) throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
+    if (!meta.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${meta.status}`, "provider_error");
+    const { id, eTag } = await meta.json();
+    if (id !== resource.condition.expectedItemId ||
+        eTag !== resource.condition.expectedETag) {
+      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
+    const resp = await this.graph("DELETE", `/drives/${this.driveId}/items/${id}`, {
+      headers: { "If-Match": resource.condition.expectedETag },
+    });
+    if (resp.status === 412) {
+      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
     if (!resp.ok && resp.status !== 404) {
       throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
     }
-    // Remove the shared tippani-s0 namespace folder too, but only if this was
-    // the last run left in it (never disturbs a concurrent run's subfolder).
-    try {
-      const nsPath = `${this.baseFolder}/tippani-s0`;
-      const list = await this.graph("GET", `/drives/${this.driveId}/root:/${encodePath(nsPath)}:/children?$select=name`);
-      if (list.ok && ((await list.json()).value || []).length === 0) {
-        await this.graph("DELETE", `/drives/${this.driveId}/root:/${encodePath(nsPath)}`);
-      }
-    } catch { /* best effort */ }
+    manifest.markCleaned(resource);
     return { deleted: this.subfolder };
   }
 
@@ -358,31 +498,57 @@ export class OneDriveGraphStore {
   // CAS. It is never labelled shared and never silently overwrites newer state.
   goOffline() { this.offline = true; }
 
-  stageOffline(request) {
+  async stageOffline(request) {
     if (!this.offline) throw new WorkspaceStoreError("stageOffline requires offline mode", "not_offline");
-    this.pending.push(request);
-    return { status: "pending", pendingCount: this.pending.length };
+    await this.pendingQueue.append(request);
+    return { status: "pending", pendingCount: await this.pendingQueue.count() };
   }
 
   async reconnect() {
     this.offline = false;
     const applied = [];
     const conflicts = [];
-    const queued = this.pending;
-    this.pending = [];
-    for (const request of queued) {
-      try {
-        const next = await this.compareAndSwap(request);
-        applied.push({ workspaceId: request.workspaceId, generation: next.generation });
-      } catch (error) {
-        if (error instanceof WorkspaceConflictError) {
-          conflicts.push({ workspaceId: request.workspaceId, expected: error.expectedGeneration, actual: error.actualGeneration });
-        } else {
-          throw error;
+    const retained = [];
+    for (;;) {
+      const outcome = await this.pendingQueue.processHead(async (entry) => {
+        const request = entry.request;
+        try {
+          const next = await this.compareAndSwap(request);
+          return {
+            remove: true,
+            kind: "applied",
+            value: { workspaceId: request.workspaceId, generation: next.generation },
+          };
+        } catch (error) {
+          if (error instanceof WorkspaceConflictError) {
+            return {
+              remove: false,
+              kind: "conflict",
+              value: {
+                workspaceId: request.workspaceId,
+                expected: error.expectedGeneration,
+                actual: error.actualGeneration,
+              },
+            };
+          }
+          return {
+            remove: false,
+            kind: "retained",
+            value: { workspaceId: request.workspaceId, code: error?.code || "provider_error" },
+          };
         }
-      }
+      });
+      if (outcome.empty) break;
+      if (outcome.kind === "applied") applied.push(outcome.value);
+      if (outcome.kind === "conflict") conflicts.push(outcome.value);
+      if (outcome.kind === "retained") retained.push(outcome.value);
+      if (outcome.remove !== true) break;
     }
-    return { applied, conflicts };
+    return { applied, conflicts, retained, pendingCount: await this.pendingQueue.count() };
+  }
+
+  async pendingCount() {
+    return this.pendingQueue.count();
   }
 
   providerOperationManifest() {

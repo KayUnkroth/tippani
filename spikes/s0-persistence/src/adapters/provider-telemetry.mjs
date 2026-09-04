@@ -5,7 +5,8 @@ function bytes(value) {
 }
 
 export class ProviderTelemetry {
-  constructor() {
+  constructor({ safetyBudget = null } = {}) {
+    this.safetyBudget = safetyBudget;
     this.requests = 0;
     this.requestBytes = 0;
     this.responseBytes = 0;
@@ -16,7 +17,8 @@ export class ProviderTelemetry {
     this.failures = {};
   }
 
-  recordRequest(body) {
+  async recordRequest(body) {
+    await this.safetyBudget?.recordRequest(body);
     this.requests++;
     this.requestBytes += bytes(body);
   }
@@ -46,8 +48,9 @@ export class ProviderTelemetry {
       this.recordRetryAfter(response.headers?.get?.("retry-after"));
     }
     let bodyCounted = false;
-    const countBody = (value) => {
+    const countBody = async (value) => {
       if (!bodyCounted) {
+        await this.safetyBudget?.recordResponse(value);
         this.responseBytes += bytes(value);
         bodyCounted = true;
       }
@@ -56,10 +59,10 @@ export class ProviderTelemetry {
     return new Proxy(response, {
       get: (target, property) => {
         if (property === "json" && typeof target.json === "function") {
-          return async (...args) => countBody(await target.json(...args));
+          return async (...args) => await countBody(await target.json(...args));
         }
         if (property === "text" && typeof target.text === "function") {
-          return async (...args) => countBody(await target.text(...args));
+          return async (...args) => await countBody(await target.text(...args));
         }
         return Reflect.get(target, property, target);
       },

@@ -1,51 +1,182 @@
 #!/usr/bin/env node
-// Runs the five engine/backing-path configurations, evaluates only applicable
-// gates, then rolls component eligibility into candidate architecture mappings.
-// Relative evidence is never ranked while every mapping remains incomplete.
 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   ARCHITECTURE_MAPPINGS,
+  applicableScenarioIds,
+  applicabilityProfile,
   configurationDefinition,
   validateApplicability,
 } from "./applicability.mjs";
-import { gateSummary } from "./eligibility.mjs";
+import {
+  buildEvidenceIdentity,
+  sha256,
+  stableJson,
+} from "./evidence-identity.mjs";
+import {
+  effectiveResult,
+  gateSummary,
+  naApprovalErrors,
+} from "./eligibility.mjs";
 import { runHarness } from "./runner.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const args = process.argv.slice(2);
-const defaultConfigs = [
-  "local-sqlite.json",
-  "local-cas.json",
-  "provider-onedrive-live.json",
-  "provider-ado-live.json",
-  "provider-github-live.json",
-].map((name) => path.join(root, "config", name));
-const configPaths = args.filter((arg) => arg.startsWith("--config="))
-  .map((arg) => path.resolve(arg.slice("--config=".length)));
-const selected = configPaths.length ? configPaths : defaultConfigs;
-const outputDir = path.resolve(
-  (args.find((arg) => arg.startsWith("--output="))?.slice("--output=".length)) ||
-  path.join(root, "results", "comparison"),
-);
-const useExisting = args.includes("--use-existing");
+const RESULT_STATUSES = new Set(["Pass", "Fail", "Blocked", "Incomplete", "N/A"]);
 
-validateApplicability(SCENARIOS);
+function currentCatalog() {
+  return SCENARIOS.map((scenario) => ({
+    id: scenario.id,
+    criterionType: scenario.criterionType,
+    title: scenario.title,
+    section: scenario.section,
+  }));
+}
+
+function verifyLinkedArtifact(baseDirectory, relativePath, expectedDigest) {
+  if (typeof relativePath !== "string" || !relativePath ||
+      typeof expectedDigest !== "string" || !expectedDigest.startsWith("sha256:")) {
+    return "artifact path/digest is missing";
+  }
+  const resolved = path.resolve(baseDirectory, relativePath);
+  const relative = path.relative(baseDirectory, resolved);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    return "artifact path escapes the configuration result directory";
+  }
+  if (!fs.existsSync(resolved)) return `artifact is missing: ${relativePath}`;
+  const actual = `sha256:${sha256(fs.readFileSync(resolved))}`;
+  return actual === expectedDigest ? null : `artifact digest mismatch: ${relativePath}`;
+}
+
+export function validateExistingRun(run, config, { artifactPath = null } = {}) {
+  const errors = [];
+  const expectedIdentity = buildEvidenceIdentity(config);
+  const expectedApplicable = applicableScenarioIds(config);
+  const expectedCatalog = currentCatalog();
+  if (run?.schemaVersion !== 2) errors.push("unsupported or missing result schemaVersion");
+  for (const [name, expected] of Object.entries(expectedIdentity)) {
+    if (run?.evidenceIdentity?.[name] !== expected) errors.push(`${name} is stale or missing`);
+  }
+  if (run?.configuration?.configurationId !== config.configurationId) {
+    errors.push("configurationId does not match the selected config");
+  }
+  if (run?.configuration?.adapter !== config.adapter ||
+      run?.configuration?.backingPath !== config.backingPath ||
+      run?.configuration?.applicabilityProfile !== applicabilityProfile(config)) {
+    errors.push("adapter/backing-path/applicability identity does not match");
+  }
+  if (stableJson(run?.catalog) !== stableJson(expectedCatalog)) {
+    errors.push("catalog snapshot does not match the current catalog");
+  }
+  if (stableJson(run?.applicableScenarioIds) !== stableJson(expectedApplicable)) {
+    errors.push("applicable scenario set does not match the current profile");
+  }
+  const results = Array.isArray(run?.results) ? run.results : [];
+  const ids = results.map((result) => result.scenarioId);
+  const duplicate = ids.find((id, index) => ids.indexOf(id) !== index);
+  if (duplicate) errors.push(`duplicate result for ${duplicate}`);
+  const missing = expectedApplicable.filter((id) => !ids.includes(id));
+  const unexpected = ids.filter((id) => !expectedApplicable.includes(id));
+  if (missing.length) errors.push(`missing expected results: ${missing.join(", ")}`);
+  if (unexpected.length) errors.push(`unexpected results: ${unexpected.join(", ")}`);
+  for (const result of results) {
+    if (!RESULT_STATUSES.has(result.status)) errors.push(`unknown status for ${result.scenarioId}`);
+    const approvalErrors = naApprovalErrors(result);
+    if (approvalErrors.length) {
+      errors.push(`${result.scenarioId} N/A lacks ${approvalErrors.join(", ")}`);
+    }
+  }
+  if (["onedrive", "ado", "github"].includes(config.backingPath) && config.dryRun === false) {
+    if (run?.configuration?.campaignCount !== 3 || run?.campaigns?.length !== 3) {
+      errors.push("provider aggregate must contain exactly three retained campaigns");
+    }
+    const campaigns = run?.campaigns || [];
+    const unique = (values) => new Set(values).size === values.length;
+    if (!unique(campaigns.map((item) => item.name)) ||
+        !unique(campaigns.map((item) => item.runId)) ||
+        !unique(campaigns.map((item) => item.raw)) ||
+        !unique(campaigns.map((item) => item.rawSha256)) ||
+        !unique(campaigns.map((item) => item.report)) ||
+        !unique(campaigns.map((item) => item.reportSha256))) {
+      errors.push("provider campaigns must have distinct names, run IDs, and artifact paths/digests");
+    }
+    if (artifactPath) {
+      const baseDirectory = path.dirname(artifactPath);
+      for (const campaign of campaigns) {
+        for (const issue of [
+          verifyLinkedArtifact(baseDirectory, campaign.raw, campaign.rawSha256),
+          verifyLinkedArtifact(baseDirectory, campaign.report, campaign.reportSha256),
+        ].filter(Boolean)) {
+          errors.push(`${campaign.name || "campaign"} ${issue}`);
+        }
+      }
+    }
+    if (run?.campaignApprovals?.length !== 3 ||
+        run.campaignApprovals.some((item) =>
+          !item.effectiveTargetHash ||
+          item.approval?.targetHash !== item.effectiveTargetHash ||
+          typeof item.approval?.approver !== "string" || !item.approval.approver.trim() ||
+          typeof item.approval?.approvedAt !== "string" ||
+          !Number.isFinite(Date.parse(item.approval.approvedAt)) ||
+          typeof item.approval?.reference !== "string" || !item.approval.reference.trim())) {
+      errors.push("provider campaigns lack structured approvals for their effective target hashes");
+    }
+    for (const result of results) {
+      if (result.scenarioId === "S0-BCK-006") continue;
+      if (Object.keys(result.evidence?.campaigns || {}).length !== 3) {
+        errors.push(`${result.scenarioId} does not contain all three campaign positions`);
+      }
+    }
+  }
+  return errors;
+}
+
+function invalidRun(config, errors) {
+  const applicable = applicableScenarioIds(config);
+  return {
+    schemaVersion: 2,
+    syntheticData: true,
+    harnessRevision: "invalid-existing-evidence",
+    evidenceIdentity: buildEvidenceIdentity(config),
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    configuration: {
+      configurationId: config.configurationId,
+      adapter: config.adapter,
+      backingPath: config.backingPath,
+      platform: config.platform,
+      scale: config.scale,
+      runId: config.runId,
+      host: "not executed",
+      applicabilityProfile: applicabilityProfile(config),
+    },
+    preflight: {
+      sandbox: {},
+      budgets: config.budgets || {},
+    },
+    applicableScenarioIds: applicable,
+    catalog: currentCatalog(),
+    results: [],
+    validationErrors: errors,
+  };
+}
 
 function resultFor(run, scenarioId) {
-  return run.results.find((result) => result.scenarioId === scenarioId) || null;
+  const result = run.results.find((item) => item.scenarioId === scenarioId);
+  return result ? effectiveResult(result) : null;
 }
 
 function metric(run, scenarioId, name) {
-  const value = resultFor(run, scenarioId)?.measurements?.[name];
+  const result = resultFor(run, scenarioId);
+  const value = result?.status === "Pass" ? result.measurements?.[name] : null;
   return typeof value === "number" ? value.toFixed(3) : "—";
 }
 
 function evidence(run, scenarioId, name) {
-  const value = resultFor(run, scenarioId)?.evidence?.[name];
+  const result = resultFor(run, scenarioId);
+  const value = result?.status === "Pass" ? result.evidence?.[name] : null;
   return value === undefined || value === null ? "—" : String(value);
 }
 
@@ -88,7 +219,20 @@ function mappingStatus(mapping, byConfiguration) {
   return "Eligible";
 }
 
-function unresolvedItems(item) {
+export function deriveDecision(mappings, selectedMappingId = null) {
+  const eligible = mappings.filter((mapping) => mapping.status === "Eligible");
+  const selected = selectedMappingId
+    ? eligible.find((mapping) => mapping.id === selectedMappingId) || null
+    : eligible.length === 1 ? eligible[0] : null;
+  return {
+    status: selected ? "Eligible" : eligible.length ? "Selection required" : "Incomplete",
+    mapping: selected?.id || null,
+    eligibleMappings: eligible.map((mapping) => mapping.id),
+    approval: "Pending",
+  };
+}
+
+function openEvidenceItems(item) {
   return [
     ...item.gates.failed,
     ...item.gates.unresolved,
@@ -97,275 +241,313 @@ function unresolvedItems(item) {
       status: "Not executed",
       reason: scenario.title,
     })),
-  ];
-}
-
-function openEvidenceItems(item) {
-  const applicable = new Set(item.run.applicableScenarioIds);
-  const byId = new Map(item.run.results.map((result) => [result.scenarioId, result]));
-  const open = item.run.results.filter((result) =>
-    applicable.has(result.scenarioId) && ["Fail", "Blocked", "Incomplete"].includes(result.status));
-  for (const scenario of item.run.catalog) {
-    if (applicable.has(scenario.id) && !byId.has(scenario.id)) {
-      open.push({ scenarioId: scenario.id, status: "Not executed", reason: scenario.title });
-    }
-  }
-  return open;
-}
-
-const runs = [];
-for (const configPath of selected) {
-  const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-  const existingPath = path.join(root, "results", config.configurationId, "raw-results.json");
-  let run;
-  if (useExisting && fs.existsSync(existingPath)) {
-    process.stdout.write(`Loading ${config.configurationId} (${config.adapter})...\n`);
-    run = JSON.parse(fs.readFileSync(existingPath, "utf8"));
-  } else {
-    process.stdout.write(`Running ${config.configurationId} (${config.adapter})...\n`);
-    ({ run } = await runHarness({
-      config,
-      outputDir: path.join(root, "results", config.configurationId),
-    }));
-  }
-  const gates = gateSummary(run);
-  const definition = configurationDefinition(config.configurationId) || {
-    configurationId: config.configurationId,
-    label: config.configurationId,
-    engine: config.adapter,
-    backingPath: config.backingPath,
-  };
-  runs.push({ run, gates, definition });
-  process.stdout.write(
-    `  applicable absolute gates: ${gates.passed.length} passed, ` +
-    `${gates.failed.length} failed, ${gates.unresolved.length} unresolved, ` +
-    `${gates.na.length} n/a, ${gates.missing.length} not executed — eligible: ${gates.eligible}\n`,
-  );
-}
-
-const byConfiguration = new Map(runs.map((item) => [item.run.configuration.configurationId, item]));
-const mappings = ARCHITECTURE_MAPPINGS.map((mapping) => ({
-  ...mapping,
-  status: mappingStatus(mapping, byConfiguration),
-}));
-const eligibleMappings = mappings.filter((mapping) => mapping.status === "Eligible");
-const anyEligibleMapping = eligibleMappings.length > 0;
-const preferredMapping = eligibleMappings.find((mapping) => mapping.id === "MAP-HYBRID-SQLITE") ||
-  (eligibleMappings.length === 1 ? eligibleMappings[0] : null);
-const generatedAt = new Date().toISOString();
-
-const lines = [
-  "# S0 architecture-mapping handoff",
-  "",
-  `**Generated:** ${generatedAt}`,
-  `**Host:** ${runs[0]?.run.configuration.host || "unknown"}`,
-  `**Final ADR status:** ${anyEligibleMapping ? "Accepted" : "Incomplete"}`,
-  "**ADR decision:** Approved by Kay Unkroth on 2026-08-31.",
-  "**Recommended architecture shape:** Hybrid — one local engine plus provider-native CAS transports behind `IWorkspaceStore`.",
-  "**Concrete mapping recommendation:** " + (preferredMapping
-    ? `${preferredMapping.label}; see [ADR](../../ADR-s0-persistence-architecture.md).`
-    : eligibleMappings.length > 1
-      ? "Select among the eligible mappings using the relative evidence below."
-      : "Deferred until at least one complete mapping passes every applicable absolute gate."),
-  "",
-  "Eligibility is evaluated per engine/backing-path configuration and then rolled up into",
-  "candidate mappings. Gates assigned to another configuration are **Not applicable**, not",
-  "missing. `N/A` is reserved for a reviewer-approved contract-level exception inside an",
-  "applicable configuration. `Blocked`, `Incomplete`, and `Not executed` remain distinct.",
-  "",
-  anyEligibleMapping
-    ? "Relative metrics may compare eligible mappings; they do not override an absolute gate."
-    : "**Relative metrics are provisional diagnostics only. No ranking is produced because no architecture mapping is eligible.**",
-  "",
-  "## Applicability-aware configuration matrix",
-  "",
-  "| Configuration | Engine | Backing path | Applicable absolute | Pass | Fail | Blocked / incomplete | N/A | Not executed | Not applicable (absolute) | Eligibility | Evidence |",
-  "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
-];
-
-for (const { run, gates, definition } of runs) {
-  const blocked = gates.unresolved.length;
-  lines.push(
-    `| ${definition.label} | ${definition.engine} | ${definition.backingPath} | ` +
-    `${gates.applicable.length} | ${gates.passed.length} | ${gates.failed.length} | ${blocked} | ` +
-    `${gates.na.length} | ${gates.missing.length} | ${gates.notApplicable.length} | ` +
-    `${gates.eligible} | [report](${reportPath(run.configuration.configurationId)}) · ` +
-    `[raw](${rawPath(run.configuration.configurationId)}) |`,
-  );
-}
-
-lines.push(
-  "",
-  "## Configuration evidence matrix",
-  "",
-  "| Configuration | Correctness | Collaboration | Recovery | Performance | Complexity | Recommendation | Conditions |",
-  "|---|---|---|---|---|---|---|---|",
-);
-
-for (const { run, gates, definition } of runs) {
-  const id = run.configuration.configurationId;
-  const correctness = statusesFor(run, ["S0-ATM-", "S0-CON-", "S0-JRN-", "S0-BCK-", "S0-COR-", "S0-HYD-", "S0-SEC-"]);
-  const collaboration = statusesFor(run, ["S0-COL-"]);
-  const recovery = statusesFor(run, ["S0-CRS-", "S0-MIG-", "S0-IMP-", "S0-BKP-", "S0-REC-"]);
-  const performance = statusesFor(run, ["S0-PER-"]);
-  const complexity = evidence(run, "S0-PER-005", "total");
-  const recommendation = gates.eligible === "Yes" ? "Component eligible" : gates.eligible === "No" ? "Reject component" : "Incomplete";
-  const conditions = openEvidenceItems({ run, gates }).map((item) => `\`${item.scenarioId}\``).join(", ") || "None";
-  lines.push(
-    `| [${definition.label}](${reportPath(id)}) | ${linked(id, correctness)} | ` +
-    `${linked(id, collaboration)} | ${linked(id, recovery)} | ${linked(id, performance)} | ` +
-    `${linked(id, complexity === "—" ? "Not executed" : `${complexity}/40`)} | ` +
-    `${linked(id, recommendation)} | ${linked(id, conditions)} |`,
-  );
-}
-
-lines.push(
-  "",
-  "## Candidate architecture mappings",
-  "",
-  "| Mapping | Components | Absolute status | Recommendation | Conditions |",
-  "|---|---|---|---|---|",
-);
-for (const mapping of mappings) {
-  const incomplete = mapping.components.flatMap((id) => {
-    const item = byConfiguration.get(id);
-    return item?.gates.eligible === "Yes" ? [] : [item?.definition.label || id];
+  ].filter((result) => {
+    const scenario = item.run.catalog.find((candidate) => candidate.id === result.scenarioId);
+    return scenario?.criterionType === "absolute";
   });
-  const recommendation = mapping.status === "Eligible"
-    ? "Candidate for ADR selection"
-    : mapping.status === "Rejected"
-      ? "Do not proceed"
-      : "Proceed with conditions only";
-  lines.push(
-    `| ${mapping.label} | ${mapping.components.join(" + ")} | ${mapping.status} | ` +
-    `${recommendation} | ${incomplete.length ? `Close applicable gates for ${incomplete.join(", ")}` : "None"} |`,
-  );
 }
 
-lines.push(
-  "",
-  "## Exact open gates and evidence requirements",
-  "",
-  "| Configuration | Gate | State | Owner | Evidence required | Component report |",
-  "|---|---|---|---|---|---|",
-);
-let openCount = 0;
-for (const item of runs) {
-  const id = item.run.configuration.configurationId;
-  for (const result of openEvidenceItems(item)) {
-    openCount++;
-    const scenario = item.run.catalog.find((entry) => entry.id === result.scenarioId);
-    const blocker = String(result.reason || result.error?.message || result.status).replace(/[.]+$/, "");
+function renderComparison({ runs, mappings, decision, generatedAt, validationFailures }) {
+  const byConfiguration = new Map(runs.map((item) => [item.run.configuration.configurationId, item]));
+  const selectedMapping = mappings.find((mapping) => mapping.id === decision.mapping);
+  const lines = [
+    "# S0 architecture-mapping handoff",
+    "",
+    `**Generated:** ${generatedAt}`,
+    `**Host:** ${runs[0]?.run.configuration.host || "unknown"}`,
+    `**Final ADR readiness:** ${decision.status}`,
+    "**ADR approval:** Pending; this generated comparison does not record human acceptance.",
+    "**Concrete mapping recommendation:** " + (
+      selectedMapping
+        ? `${selectedMapping.label}, pending independent review and ADR approval.`
+        : decision.status === "Selection required"
+          ? "No mapping selected; pass `--mapping=<eligible-id>` only after reviewing relative evidence."
+          : "Deferred until a selected mapping passes every applicable absolute gate."
+    ),
+    "",
+    "Eligibility is evaluated per engine/backing-path configuration and then rolled up into",
+    "candidate mappings. `N/A` requires approver identity, approval date, and a reference.",
+    "Stale, identity-mismatched, or incomplete artifacts are rejected as incomplete evidence.",
+    "",
+    "**Known structural finding:** SQLite fails the current absolute `S0-CON-003` criterion",
+    "because `BEGIN IMMEDIATE` serializes writers database-wide. A rerun alone cannot close",
+    "that condition; closure requires revising the criterion or an independently approved,",
+    "scenario-specific rationale-backed `N/A`.",
+    "",
+    decision.mapping
+      ? "Relative metrics may support the selected eligible mapping; they do not override an absolute gate."
+      : "**Relative metrics are provisional diagnostics only. No ranking or architecture decision is produced.**",
+    "",
+  ];
+
+  if (validationFailures.length) {
     lines.push(
-      `| ${item.definition.label} | \`${result.scenarioId}\` | ${result.status} | ` +
-      `${ownerFor(result.scenarioId)} | Execute: ${scenario?.title}. ` +
-      `Blocker/result: ${blocker}. | ` +
-      `[report](${reportPath(id)}) · [raw](${rawPath(id)}) |`,
+      "## Rejected existing evidence",
+      "",
+      "| Configuration | Validation errors |",
+      "|---|---|",
+      ...validationFailures.map(({ configurationId, errors }) =>
+        `| ${configurationId} | ${errors.join("; ").replaceAll("|", "\\|")} |`),
+      "",
+      "These artifacts must be regenerated from the current source. Provider artifacts require new",
+      "live campaigns with effective target identity/coordinates bound to an approved target hash.",
+      "",
     );
   }
+
+  lines.push(
+    "## Applicability-aware configuration matrix",
+    "",
+    "| Configuration | Engine | Backing path | Applicable absolute | Pass | Fail | Blocked / incomplete | N/A | Not executed | Not applicable (absolute) | Eligibility | Evidence |",
+    "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|",
+  );
+  for (const { run, gates, definition } of runs) {
+    lines.push(
+      `| ${definition.label} | ${definition.engine} | ${definition.backingPath} | ` +
+      `${gates.applicable.length} | ${gates.passed.length} | ${gates.failed.length} | ${gates.unresolved.length} | ` +
+      `${gates.na.length} | ${gates.missing.length} | ${gates.notApplicable.length} | ` +
+      `${gates.eligible} | [report](${reportPath(run.configuration.configurationId)}) · ` +
+      `[raw](${rawPath(run.configuration.configurationId)}) |`,
+    );
+  }
+
+  lines.push(
+    "",
+    "## Configuration evidence matrix",
+    "",
+    "| Configuration | Correctness | Collaboration | Recovery | Performance | Complexity | Recommendation | Conditions |",
+    "|---|---|---|---|---|---|---|---|",
+  );
+  for (const { run, gates, definition } of runs) {
+    const id = run.configuration.configurationId;
+    const correctness = statusesFor(run, ["S0-ATM-", "S0-CON-", "S0-JRN-", "S0-BCK-", "S0-COR-", "S0-HYD-", "S0-SEC-"]);
+    const collaboration = statusesFor(run, ["S0-COL-"]);
+    const recovery = statusesFor(run, ["S0-CRS-", "S0-MIG-", "S0-IMP-", "S0-BKP-", "S0-REC-"]);
+    const performance = statusesFor(run, ["S0-PER-"]);
+    const complexity = evidence(run, "S0-PER-005", "total");
+    const recommendation = gates.eligible === "Yes" ? "Component eligible" : gates.eligible === "No" ? "Reject component" : "Incomplete";
+    const conditions = openEvidenceItems({ run, gates }).map((item) => `\`${item.scenarioId}\``).join(", ") || "None";
+    lines.push(
+      `| [${definition.label}](${reportPath(id)}) | ${linked(id, correctness)} | ` +
+      `${linked(id, collaboration)} | ${linked(id, recovery)} | ${linked(id, performance)} | ` +
+      `${linked(id, complexity === "—" ? "Not executed" : `${complexity}/40`)} | ` +
+      `${linked(id, recommendation)} | ${linked(id, conditions)} |`,
+    );
+  }
+
+  lines.push(
+    "",
+    "## Candidate architecture mappings",
+    "",
+    "| Mapping | Components | Absolute status | Recommendation | Conditions |",
+    "|---|---|---|---|---|",
+  );
+  for (const mapping of mappings) {
+    const incomplete = mapping.components.flatMap((id) => {
+      const item = byConfiguration.get(id);
+      return item?.gates.eligible === "Yes" ? [] : [item?.definition.label || id];
+    });
+    lines.push(
+      `| ${mapping.label} | ${mapping.components.join(" + ")} | ${mapping.status} | ` +
+      `${mapping.id === decision.mapping ? "Selected for review" : mapping.status === "Eligible" ? "Eligible, not selected" : "Do not select"} | ` +
+      `${incomplete.length ? `Close applicable gates for ${incomplete.join(", ")}` : "None"} |`,
+    );
+  }
+
+  lines.push(
+    "",
+    "## Exact open gates and evidence requirements",
+    "",
+    "| Configuration | Gate | State | Owner | Evidence required | Component report |",
+    "|---|---|---|---|---|---|",
+  );
+  let openCount = 0;
+  for (const item of runs) {
+    const id = item.run.configuration.configurationId;
+    for (const result of openEvidenceItems(item)) {
+      openCount++;
+      const scenario = item.run.catalog.find((entry) => entry.id === result.scenarioId);
+      const blocker = String(result.reason || result.error?.message || result.status).replace(/[.]+$/, "");
+      lines.push(
+        `| ${item.definition.label} | \`${result.scenarioId}\` | ${result.status} | ` +
+        `${ownerFor(result.scenarioId)} | Execute: ${scenario?.title}. Blocker/result: ${blocker}. | ` +
+        `[report](${reportPath(id)}) · [raw](${rawPath(id)}) |`,
+      );
+    }
+  }
+  if (!openCount) lines.push("| — | — | None | — | — | — |");
+
+  const measurementRows = [
+    ["Cold initialize p50, small (ms)", "S0-PER-001", "initializedP50Ms_small", "metric"],
+    ["Open by alias p50, small (ms)", "S0-PER-002", "openByAliasP50Ms_small", "metric"],
+    ["Mutation p50, small (ms)", "S0-PER-002", "mutationP50Ms_small", "metric"],
+    ["Backup p50, small (ms)", "S0-PER-003", "backupP50Ms_small", "metric"],
+    ["Fresh-process memory, small (bytes)", "S0-PER-003", "memoryP50Bytes_small", "metric"],
+    ["Write amplification p50, small", "S0-PER-003", "writeAmplificationP50Ratio_small", "metric"],
+    ["Remote CAS p50, small (ms)", "S0-PER-004", "remoteCasP50Ms_small", "metric"],
+    ["Collaborator discovery p50, small (ms)", "S0-PER-004", "collaboratorDiscoveryP50Ms_small", "metric"],
+    ["Provider requests per mutation, small", "S0-PER-004", "requestsPerMutation_small", "evidence"],
+    ["Common complexity burden (of 40)", "S0-PER-005", "total", "evidence"],
+  ].filter(([, scenarioId]) =>
+    runs.some(({ run }) => resultFor(run, scenarioId)?.status === "Pass"));
+
+  lines.push(
+    "",
+    "## Relative measurements",
+    "",
+    decision.mapping
+      ? "Only complete, currently validated measurements are shown."
+      : "These values are provisional and are not used for architecture selection.",
+    "",
+  );
+  if (measurementRows.length) {
+    lines.push(
+      "| Metric | " + runs.map((item) => item.definition.label).join(" | ") + " |",
+      "|---|" + runs.map(() => "---:").join("|") + "|",
+    );
+    for (const [label, scenarioId, name, kind] of measurementRows) {
+      const values = runs.map(({ run }) =>
+        kind === "metric" ? metric(run, scenarioId, name) : evidence(run, scenarioId, name));
+      lines.push(`| ${label} | ${values.join(" | ")} |`);
+    }
+  } else {
+    lines.push("No current decision-grade performance measurement is eligible for comparison.");
+  }
+
+  lines.push(
+    "",
+    "## Decision conditions and evidence",
+    "",
+    "| Condition | Owner | Evidence required |",
+    "|---|---|---|",
+    "| Current local evidence | S0 implementation owner | Regenerate local CAS. SQLite `S0-CON-003` is a structural fail; close it only by revising the criterion or approving a scenario-specific rationale-backed `N/A`. |",
+    "| Current provider evidence | S0 provider test owner | Three complete live campaigns per provider with approved target hash, persistent offline queue, full fault coverage, authorized conditional cleanup, and enforced budgets. |",
+    "| Performance evidence | Performance investigator | Fresh-process populated-store startup/enumeration, memory, and storage-layer write-amplification measurements. |",
+    "| Architecture decision | Independent reviewer / ADR approver | Select an eligible mapping, review conditions, and record dated approval separately from generated evidence. |",
+    "",
+    "## Sign-off",
+    "",
+    "| Role | Person | Date | Decision / comments |",
+    "|---|---|---|---|",
+    "| S0 implementation owner | | | |",
+    "| Provider test owner | | | |",
+    "| Cross-platform test owner | | | |",
+    "| Independent reviewer | | | |",
+    "| ADR approver | | | Pending |",
+    "",
+  );
+  return lines.join("\n");
 }
-if (!openCount) lines.push("| — | — | None | — | — | — |");
 
-lines.push(
-  "",
-  "## Evidence ownership",
-  "",
-  "| Evidence | Owner |",
-  "|---|---|",
-  "| Local correctness, recovery, and performance | S0 implementation owner |",
-  "| Provider correctness, collaboration, recovery, and performance | S0 provider test owner |",
-  "| Synced-folder compatibility | Windows sync-client test owner |",
-  "| macOS and Linux portability | Cross-platform test owner |",
-  "| Architecture selection | S0 decision owner |",
-);
-
-lines.push(
-  "",
-  "## Relative measurements",
-  "",
-  anyEligibleMapping
-    ? "Only configurations inside eligible mappings are candidates for comparison."
-    : "These values are retained as provisional diagnostics and are not ranked.",
-  "",
-  "| Metric | " + runs.map((item) => item.definition.label).join(" | ") + " |",
-  "|---|" + runs.map(() => "---:").join("|") + "|",
-);
-
-const measurementRows = [
-  ["Cold initialize p50, small (ms)", "S0-PER-001", "initializedP50Ms_small", "metric"],
-  ["Cold initialize variability, small (stddev ms)", "S0-PER-001", "initializedStdDevMs_small", "metric"],
-  ["Open by alias p50, small (ms)", "S0-PER-002", "openByAliasP50Ms_small", "metric"],
-  ["Mutation p50, small (ms)", "S0-PER-002", "mutationP50Ms_small", "metric"],
-  ["Mutation p95, small (ms)", "S0-PER-002", "mutationP95Ms_small", "metric"],
-  ["Mutation variability, small (stddev ms)", "S0-PER-002", "mutationStdDevMs_small", "metric"],
-  ["Backup p50, small (ms)", "S0-PER-003", "backupP50Ms_small", "metric"],
-  ["Restore p50, small (ms)", "S0-PER-003", "restoreP50Ms_small", "metric"],
-  ["Store size p50, small (bytes)", "S0-PER-003", "storeP50Bytes_small", "metric"],
-  ["Write amplification p50, small", "S0-PER-003", "writeAmplificationP50Ratio_small", "metric"],
-  ["Remote CAS p50, small (ms)", "S0-PER-004", "remoteCasP50Ms_small", "metric"],
-  ["Remote CAS p95, small (ms)", "S0-PER-004", "remoteCasP95Ms_small", "metric"],
-  ["Collaborator discovery p50, small (ms)", "S0-PER-004", "collaboratorDiscoveryP50Ms_small", "metric"],
-  ["Provider requests per mutation, small", "S0-PER-004", "requestsPerMutation_small", "evidence"],
-  ["Provider bytes per mutation, small", "S0-PER-004", "bytesPerMutation_small", "evidence"],
-  ["Throttle behavior", "S0-PER-004", "throttleBehavior", "evidence"],
-  ["Common complexity burden (of 40)", "S0-PER-005", "total", "evidence"],
-];
-for (const [label, scenarioId, name, kind] of measurementRows) {
-  const values = runs.map(({ run }) => kind === "metric" ? metric(run, scenarioId, name) : evidence(run, scenarioId, name));
-  lines.push(`| ${label} | ${values.join(" | ")} |`);
-}
-
-lines.push(
-  "",
-  "### Measurement method",
-  "",
-  "- Timer: `performance.now()` monotonic elapsed time.",
-  "- Local cold-start, backup, restore, size, and amplification: one discarded warm-up run plus five measured runs per scale.",
-  "- Local operation latency: three warm-up operations; 40 small, 20 medium, and 8 stress repetitions.",
-  "- Provider operation latency: three warm-up reads; 6 small, 4 medium, and 2 stress repetitions.",
-  "- Statistics: minimum, p50, p95, maximum, mean, standard deviation, with raw samples in each configuration JSON.",
-  "- Provider bytes count UTF-8 application payload bytes submitted or consumed; HTTP/TLS header overhead is excluded.",
-  "- Network characteristics and provider region are recorded from `S0_NETWORK_DESCRIPTION` and `S0_PROVIDER_REGION` when supplied.",
-  "",
-  "## Decision conditions and evidence",
-  "",
-  "| Condition | Owner | Evidence required |",
-  "|---|---|---|",
-  "| macOS/APFS local and cache execution | Cross-platform test owner | [Completed workflow evidence](../cross-platform/workflow-run.json) and two macOS reports |",
-  "| Linux local and cache execution | Cross-platform test owner | [Completed workflow evidence](../cross-platform/workflow-run.json) and two Linux reports |",
-  "| OneDrive synced-folder compatibility (`S0-BCK-006`) | Windows sync-client test owner | [Separate compatibility result](../CFG-ONEDRIVE-SYNC/outcome.md); true second-device sync remains a documented limitation |",
-  "| Architecture decision | Kay Unkroth | [Approved ADR](../../ADR-s0-persistence-architecture.md) selecting the hybrid SQLite mapping |",
-  "",
-  "## Sign-off",
-  "",
-  "| Role | Person | Date | Decision / comments |",
-  "|---|---|---|---|",
-  "| S0 implementation owner | | | |",
-  "| Provider test owner | | | |",
-  "| Cross-platform test owner | | | |",
-  "| Independent reviewer | | | |",
-  "| ADR approver | Kay Unkroth | 2026-08-31 | Approved |",
-  "",
-);
-
-fs.mkdirSync(outputDir, { recursive: true });
-const reportPathOut = path.join(outputDir, "comparison.md");
-fs.writeFileSync(reportPathOut, lines.join("\n"), "utf8");
-fs.writeFileSync(
-  path.join(outputDir, "comparison.json"),
-  JSON.stringify({
-    schemaVersion: 2,
-    generatedAt,
-    decision: {
-      status: "Accepted",
-      mapping: "MAP-HYBRID-SQLITE",
-      approver: "Kay Unkroth",
-      date: "2026-08-31",
-    },
+export async function buildComparison({
+  selectedConfigs,
+  useExisting = false,
+  selectedMappingId = null,
+} = {}) {
+  validateApplicability(SCENARIOS);
+  const runs = [];
+  const validationFailures = [];
+  for (const configPath of selectedConfigs) {
+    const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    const existingPath = path.join(root, "results", config.configurationId, "raw-results.json");
+    let run;
+    let validationErrors = [];
+    if (useExisting) {
+      if (!fs.existsSync(existingPath)) {
+        validationErrors = ["raw-results.json is missing"];
+      } else {
+        try {
+          run = JSON.parse(fs.readFileSync(existingPath, "utf8"));
+          validationErrors = validateExistingRun(run, config, { artifactPath: existingPath });
+        } catch (error) {
+          validationErrors = [`raw-results.json is unreadable: ${error.message}`];
+        }
+      }
+      if (validationErrors.length) {
+        validationFailures.push({ configurationId: config.configurationId, errors: validationErrors });
+        run = invalidRun(config, validationErrors);
+      }
+    } else {
+      ({ run } = await runHarness({
+        config,
+        outputDir: path.join(root, "results", config.configurationId),
+      }));
+      validationErrors = validateExistingRun(run, config, { artifactPath: existingPath });
+      if (validationErrors.length) {
+        validationFailures.push({ configurationId: config.configurationId, errors: validationErrors });
+        run = invalidRun(config, validationErrors);
+      }
+    }
+    const gates = gateSummary(run);
+    const definition = configurationDefinition(config.configurationId) || {
+      configurationId: config.configurationId,
+      label: config.configurationId,
+      engine: config.adapter,
+      backingPath: config.backingPath,
+    };
+    runs.push({ run, gates, definition });
+  }
+  const byConfiguration = new Map(runs.map((item) => [item.run.configuration.configurationId, item]));
+  const mappings = ARCHITECTURE_MAPPINGS.map((mapping) => ({
+    ...mapping,
+    status: mappingStatus(mapping, byConfiguration),
+  }));
+  if (selectedMappingId && !ARCHITECTURE_MAPPINGS.some((mapping) => mapping.id === selectedMappingId)) {
+    throw new Error(`Unknown architecture mapping: ${selectedMappingId}`);
+  }
+  const decision = deriveDecision(mappings, selectedMappingId);
+  const generatedAt = new Date().toISOString();
+  return {
+    runs,
     mappings,
-    runs: runs.map(({ run }) => run),
-  }, null, 2) + "\n",
-  "utf8",
-);
-process.stdout.write(`\nComparison: ${reportPathOut}\n`);
-if (runs.some(({ gates }) => gates.failed.length)) process.exit(1);
+    decision,
+    generatedAt,
+    validationFailures,
+    markdown: renderComparison({ runs, mappings, decision, generatedAt, validationFailures }),
+  };
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+  const defaultConfigs = [
+    "local-sqlite.json",
+    "local-cas.json",
+    "provider-onedrive-live.json",
+    "provider-ado-live.json",
+    "provider-github-live.json",
+  ].map((name) => path.join(root, "config", name));
+  const configPaths = args.filter((arg) => arg.startsWith("--config="))
+    .map((arg) => path.resolve(arg.slice("--config=".length)));
+  const selectedConfigs = configPaths.length ? configPaths : defaultConfigs;
+  const outputDir = path.resolve(
+    args.find((arg) => arg.startsWith("--output="))?.slice("--output=".length) ||
+    path.join(root, "results", "comparison"),
+  );
+  const selectedMappingId = args.find((arg) => arg.startsWith("--mapping="))
+    ?.slice("--mapping=".length) || null;
+  const comparison = await buildComparison({
+    selectedConfigs,
+    useExisting: args.includes("--use-existing"),
+    selectedMappingId,
+  });
+  fs.mkdirSync(outputDir, { recursive: true });
+  const reportPathOut = path.join(outputDir, "comparison.md");
+  fs.writeFileSync(reportPathOut, comparison.markdown, "utf8");
+  fs.writeFileSync(path.join(outputDir, "comparison.json"), JSON.stringify({
+    schemaVersion: 3,
+    generatedAt: comparison.generatedAt,
+    decision: comparison.decision,
+    mappings: comparison.mappings,
+    validationFailures: comparison.validationFailures,
+    runs: comparison.runs.map(({ run }) => run),
+  }, null, 2) + "\n", "utf8");
+  process.stdout.write(`Comparison: ${reportPathOut}\n`);
+  if (!comparison.decision.mapping || comparison.validationFailures.length) process.exitCode = 1;
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(error?.stack || error);
+    process.exitCode = 1;
+  });
+}

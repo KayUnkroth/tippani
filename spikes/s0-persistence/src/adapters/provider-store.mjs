@@ -83,10 +83,10 @@ export class BackingPathStore {
     }
   }
 
-  async initialize() {
+  async initialize(options) {
     if (this.isProvider) this.assertSandboxReady();
     this.gate("connect");
-    return this.inner.initialize();
+    return this.inner.initialize(options);
   }
 
   async createWorkspace(workspace) {
@@ -130,6 +130,7 @@ export class BackingPathStore {
 
   // Engine test hooks pass straight through; they are not backing-path calls.
   injectCorruption(...args) { return this.inner.injectCorruption?.(...args); }
+  injectIdentitySubstitution(...args) { return this.inner.injectIdentitySubstitution?.(...args); }
   injectReadFault(...args) { return this.inner.injectReadFault?.(...args); }
   seedLegacy(...args) { return this.inner.seedLegacy?.(...args); }
   migrate(...args) { return this.inner.migrate?.(...args); }

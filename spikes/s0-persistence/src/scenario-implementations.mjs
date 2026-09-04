@@ -15,6 +15,7 @@ import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "./onedrive-gates.mjs";
 import { telemetryDelta } from "./adapters/provider-telemetry.mjs";
 import { complexityAssessment } from "./complexity-rubric.mjs";
 import { BLOCKED_REASONS } from "./provider-gates.mjs";
+import { OperationBudget, SafetyBudgetError } from "./operation-budget.mjs";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -28,9 +29,7 @@ const PER_SCALES = ["small", "medium", "stress"];
 // Repetition is reduced at larger scales so the stress sweep stays within the
 // run-duration budget; each scale still reports comparable p50/p95 statistics.
 const PER_LATENCY_ITERATIONS = { small: 40, medium: 20, stress: 8 };
-const PER_FOOTPRINT_COMMITS = { small: 25, medium: 10, stress: 4 };
 const PER_WARMUP_ITERATIONS = 3;
-const PER_RUN_REPETITIONS = 5;
 const PROVIDER_PER_ITERATIONS = { small: 6, medium: 4, stress: 2 };
 
 async function openStore(context, seed = context.config.runId, scale = context.config.scale || "small") {
@@ -163,6 +162,13 @@ async function oneWinner(context, writers) {
 }
 
 async function independentWorkspaces(context) {
+  if (context.adapter === "local-sqlite") {
+    throw new WorkspaceStoreError(
+      "SQLite BEGIN IMMEDIATE takes a database-wide write lock, so independent " +
+        "workspace writers are globally serialized and cannot satisfy S0-CON-003.",
+      "global_write_serialization",
+    );
+  }
   const store = context.createStore();
   await store.initialize();
   try {
@@ -277,6 +283,8 @@ async function danglingJournalRejected(context) {
         operation: {
           planJournal: {
             journalId: `syn-journal-invalid-${context.config.runId}`,
+            workspaceId: workspace.workspaceId,
+            generation: workspace.generation,
             status: "planned",
             intentTuples: [{
               intentId: "syn-intent-missing",
@@ -374,50 +382,76 @@ async function aliasCrash(context) {
   return { evidence: { partialAliasVisible: false, killedProcess: true, mechanism: "process-kill" } };
 }
 
-async function restoreCrash(context) {
+async function migrationCrash(context) {
   if (!context.durable) {
-    const { store, workspace } = await openStore(context);
+    return {
+      skip: "A real process-kill point during backup or migration is unavailable for a non-durable adapter.",
+    };
+  }
+
+  const store = context.createStore();
+  await store.initialize();
+  const legacy = createLegacyWorkspaceV0({ seed: `${context.config.runId}-crs003` });
+  store.seedLegacy(legacy);
+  await close(store);
+  const crashed = await runWorker(workerArgs(context, legacy.workspaceId, [
+    "--mode=migration-crash",
+    "--crash-at=before-migration-commit",
+  ]));
+  assert.equal(crashed.code, 9, "Worker must have been killed during migration");
+  const durable = await withVerifier(context, async (verifier) => {
+    const resumed = await verifier.migrate();
+    return {
+      resumed,
+      workspace: await verifier.readWorkspace(legacy.workspaceId),
+    };
+  });
+  assert.equal(durable.resumed.pending, 0, "Interrupted migration must resume unambiguously");
+  assert.equal(durable.workspace.workspaceId, legacy.workspaceId);
+  assert.equal(durable.workspace.generation, legacy.generation);
+  return {
+    evidence: {
+      operation: "migration",
+      killedProcess: true,
+      killPoint: "before-migration-commit",
+      resumedUnambiguously: true,
+      mechanism: "process-kill",
+    },
+  };
+}
+
+async function corruptStateDetected(context) {
+  const modes = ["truncated", "valid-json-tamper"];
+  for (const mode of modes) {
+    const store = context.createStore({ fresh: true });
+    await store.initialize();
+    const workspace = createSyntheticWorkspace({
+      seed: `${context.config.runId}-${mode}`,
+      scale: context.config.scale || "small",
+    });
     try {
-      const snapshot = await store.backup();
-      snapshot.workspaces[0].generation = 10;
+      await store.createWorkspace(workspace);
+      store.injectCorruption(workspace.workspaceId, mode);
       await assert.rejects(
-        store.restore(snapshot, {
-          faultInjector: new FaultInjector(["before-restore-commit"]),
-        }),
-        InjectedFaultError,
+        store.readWorkspace(workspace.workspaceId),
+        CorruptWorkspaceStoreError,
       );
-      assert.equal((await store.readWorkspace(workspace.workspaceId)).generation, 0);
-      return { evidence: { previousGenerationPreserved: true, mechanism: "in-process" } };
+      assert(
+        (await store.listWorkspaces()).includes(workspace.workspaceId),
+        "Damaged state must be preserved for diagnosis rather than treated as absent",
+      );
     } finally {
       await close(store);
     }
   }
-
-  const { store, workspace } = await openStore(context);
-  await close(store);
-  const crashed = await runWorker(workerArgs(context, workspace.workspaceId, [
-    "--mode=restore-crash",
-    "--crash-at=before-restore-commit",
-  ]));
-  assert.equal(crashed.code, 9, "Worker must have been killed during restore");
-  const durable = await withVerifier(context, (verifier) =>
-    verifier.readWorkspace(workspace.workspaceId));
-  assert.equal(durable.generation, 0, "A killed restore must leave the previous generation intact");
-  return { evidence: { previousGenerationPreserved: true, killedProcess: true, mechanism: "process-kill" } };
-}
-
-async function corruptStateDetected(context) {
-  const { store, workspace } = await openStore(context);
-  try {
-    store.injectCorruption(workspace.workspaceId);
-    await assert.rejects(
-      store.readWorkspace(workspace.workspaceId),
-      CorruptWorkspaceStoreError,
-    );
-    return { evidence: { typedCorruptionFailure: true } };
-  } finally {
-    await close(store);
-  }
+  return {
+    evidence: {
+      typedCorruptionFailure: true,
+      truncatedJsonRejected: true,
+      validJsonChecksumTamperRejected: true,
+      damagedStatePreserved: true,
+    },
+  };
 }
 
 async function duplicateAliasRestoreRejected(context) {
@@ -554,55 +588,11 @@ async function syntheticOnly(context) {
 }
 
 async function startupMeasurement(context) {
-  const measurements = {};
-  const evidence = {
-    scales: PER_SCALES.join(","),
-    discardedWarmupRuns: 1,
-    repetitions: PER_RUN_REPETITIONS,
-    timingMethod: "performance.now monotonic elapsed time",
-    reportedStatistics: "min,p50,p95,max,mean,stddev",
-    rawSamples: {},
+  return {
+    skip: "S0-PER-001 is incomplete: the current harness initializes an empty store " +
+      "inside the measuring process instead of reopening and fully enumerating a populated " +
+      "multi-workspace scale fixture in a fresh process.",
   };
-  for (const scale of PER_SCALES) {
-    const initializeSamples = [];
-    const createSamples = [];
-    const enumerateSamples = [];
-    for (let repetition = -1; repetition < PER_RUN_REPETITIONS; repetition++) {
-      const store = context.createStore({ fresh: true });
-      const started = performance.now();
-      await store.initialize();
-      const initializedMs = performance.now() - started;
-      try {
-        const workspace = createSyntheticWorkspace({
-          seed: `${context.config.runId}-${scale}-${repetition}`,
-          scale,
-        });
-        const createStarted = performance.now();
-        await store.createWorkspace(workspace);
-        const createMs = performance.now() - createStarted;
-        const enumerateStarted = performance.now();
-        const workspaces = await store.listWorkspaces();
-        const enumerateMs = performance.now() - enumerateStarted;
-        assert.equal(workspaces.length, 1);
-        if (repetition >= 0) {
-          initializeSamples.push(initializedMs);
-          createSamples.push(createMs);
-          enumerateSamples.push(enumerateMs);
-        }
-      } finally {
-        await close(store);
-      }
-    }
-    recordDistribution(measurements, "initialized", scale, initializeSamples);
-    recordDistribution(measurements, "create", scale, createSamples);
-    recordDistribution(measurements, "enumerate", scale, enumerateSamples);
-    evidence.rawSamples[scale] = {
-      initializedMs: initializeSamples,
-      createMs: createSamples,
-      enumerateMs: enumerateSamples,
-    };
-  }
-  return { evidence, measurements };
 }
 
 // --- Durable-adapter scenarios ---------------------------------------------
@@ -734,15 +724,9 @@ async function restartRecovery(context) {
 async function staleLockRecovery(context) {
   if (!context.durable) return { skip: NOT_DURABLE };
   if (context.adapter === "local-sqlite") {
-    // Reviewer-approved N/A: the invariant is real, but the scenario is written
-    // around an external lock file. SQLite owns locking internally and recovers
-    // a killed writer through its own journal on open, so external stale-lock
-    // reclamation does not apply to its contract rather than being missing
-    // evidence.
     return {
-      na: "SQLite owns locking internally and recovers a killed writer through " +
-        "its own journal on open, so the external stale-lock-file recovery " +
-        "scenario does not apply to its contract (reviewer-approved).",
+      skip: "SQLite owns locking internally; treating the external stale-lock-file " +
+        "scenario as N/A requires a structured independent approval that has not been recorded.",
     };
   }
   if (context.adapter !== "local-cas") {
@@ -855,23 +839,6 @@ function recordDistribution(measurements, name, scale, samples, unit = "Ms") {
   measurements[`${name}StdDev${unit}_${scale}`] = standardDeviation(samples);
 }
 
-function directorySizeBytes(root) {
-  let total = 0;
-  const walk = (current) => {
-    let entries = [];
-    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { return; }
-    for (const entry of entries) {
-      const full = path.join(current, entry.name);
-      if (entry.isDirectory()) walk(full);
-      else {
-        try { total += fs.statSync(full).size; } catch { /* raced with cleanup */ }
-      }
-    }
-  };
-  walk(root);
-  return total;
-}
-
 async function latencyProfile(context) {
   const measurements = {};
   const evidence = {
@@ -938,81 +905,11 @@ async function latencyProfile(context) {
 }
 
 async function footprintProfile(context) {
-  const measurements = {};
-  const evidence = {
-    scales: PER_SCALES.join(","),
-    discardedWarmupRuns: 1,
-    repetitions: PER_RUN_REPETITIONS,
-    timingMethod: "performance.now monotonic elapsed time",
-    reportedStatistics: "min,p50,p95,max,mean,stddev",
-    rawSamples: {},
+  return {
+    skip: "S0-PER-003 is incomplete: memory was not measured and store-size divided " +
+      "by backup payload size is not write amplification. The gate requires storage-layer " +
+      "bytes written plus fresh-process memory, backup, restore, and footprint measurements.",
   };
-  for (const scale of PER_SCALES) {
-    const commits = PER_FOOTPRINT_COMMITS[scale];
-    const backupSamples = [];
-    const restoreSamples = [];
-    const storeByteSamples = [];
-    const payloadByteSamples = [];
-    const amplificationSamples = [];
-    for (let repetition = -1; repetition < PER_RUN_REPETITIONS; repetition++) {
-      const store = context.createStore({ fresh: true });
-      await store.initialize();
-      try {
-        const workspace = createSyntheticWorkspace({
-          seed: `${context.config.runId}-fp-${scale}-${repetition}`,
-          scale,
-        });
-        await store.createWorkspace(workspace);
-        for (let generation = 0; generation < commits; generation++) {
-          await store.compareAndSwap({
-            workspaceId: workspace.workspaceId,
-            expectedGeneration: generation,
-            operation: { auditEvent: { actor: "Synthetic Actor", action: `footprint-${generation}` } },
-          });
-        }
-
-        let started = performance.now();
-        const snapshot = await store.backup();
-        const backupMs = performance.now() - started;
-
-        const target = context.createStore({ fresh: true });
-        await target.initialize();
-        started = performance.now();
-        await target.restore(snapshot);
-        const restoreMs = performance.now() - started;
-        assert.equal(
-          (await target.readWorkspace(workspace.workspaceId)).generation,
-          commits,
-        );
-        await close(target);
-
-        if (repetition >= 0) {
-          const storeBytes = context.durable ? directorySizeBytes(store.root) : 0;
-          const payloadBytes = Buffer.byteLength(JSON.stringify(snapshot));
-          backupSamples.push(backupMs);
-          restoreSamples.push(restoreMs);
-          storeByteSamples.push(storeBytes);
-          payloadByteSamples.push(payloadBytes);
-          amplificationSamples.push(payloadBytes ? storeBytes / payloadBytes : 0);
-        }
-      } finally {
-        await close(store);
-      }
-    }
-    recordDistribution(measurements, "backup", scale, backupSamples);
-    recordDistribution(measurements, "restore", scale, restoreSamples);
-    recordDistribution(measurements, "store", scale, storeByteSamples, "Bytes");
-    recordDistribution(measurements, "payload", scale, payloadByteSamples, "Bytes");
-    recordDistribution(measurements, "writeAmplification", scale, amplificationSamples, "Ratio");
-    evidence.rawSamples[scale] = {
-      backupMs: backupSamples,
-      restoreMs: restoreSamples,
-      storeBytes: storeByteSamples,
-      payloadBytes: payloadByteSamples,
-      writeAmplification: amplificationSamples,
-    };
-  }
-  return { evidence, measurements };
 }
 
 async function providerPerformance(context) {
@@ -1087,6 +984,11 @@ async function providerPerformance(context) {
           transferredBytes: writerDelta.transferredBytes + observerDelta.transferredBytes,
           throttleResponses: writerDelta.throttleResponses + observerDelta.throttleResponses,
           retries: writerDelta.retries + observerDelta.retries,
+          retryAfterSeconds: [
+            ...writerDelta.retryAfterSeconds,
+            ...observerDelta.retryAfterSeconds,
+          ],
+          backoffMs: writerDelta.backoffMs + observerDelta.backoffMs,
         });
       }
 
@@ -1117,6 +1019,9 @@ async function providerPerformance(context) {
         requestBytesPerMutation: deltas.map((item) => item.requestBytes),
         responseBytesPerMutation: deltas.map((item) => item.responseBytes),
         retriesPerMutation: deltas.map((item) => item.retries),
+        throttleResponsesPerMutation: deltas.map((item) => item.throttleResponses),
+        retryAfterSeconds: deltas.flatMap((item) => item.retryAfterSeconds),
+        backoffMsPerMutation: deltas.map((item) => item.backoffMs),
       };
     } finally {
       const cleanupStarted = performance.now();
@@ -1210,7 +1115,7 @@ async function syncedFolderCompatibility(context) {
 
 async function complexityRubric(context) {
   if (context.config.adapter === "reference-memory") {
-    return { na: "The reference-memory adapter validates the harness and is not an architecture candidate." };
+    return { skip: "The reference-memory adapter validates the harness and is not an architecture candidate." };
   }
   const assessment = complexityAssessment(context.config);
   return {
@@ -1552,8 +1457,48 @@ async function budgetsStopUnsafeRuns(context) {
       `A zero ${field} budget must be rejected`,
     );
   }
-  assert.ok(base.budgets.maxOperations > 0 && base.budgets.maxDurationMs > 0);
-  return { evidence: { nonPositiveBudgetsRejected: true } };
+  const operationBudget = new OperationBudget({
+    limits: { maxOperations: 1, maxObjects: 10, maxBytes: 100, maxDurationMs: 1000 },
+  });
+  operationBudget.recordRequest("x");
+  assert.throws(() => operationBudget.recordRequest("y"), SafetyBudgetError);
+
+  const objectBudget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 1, maxBytes: 100, maxDurationMs: 1000 },
+  });
+  assert.throws(() => objectBudget.recordObjects(2), SafetyBudgetError);
+
+  const byteBudget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 10, maxBytes: 1, maxDurationMs: 1000 },
+  });
+  assert.throws(() => byteBudget.recordRequest("xx"), SafetyBudgetError);
+
+  let now = 0;
+  const deadlineBudget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 10, maxBytes: 100, maxDurationMs: 1 },
+    deadlineAt: 1,
+    clock: () => now,
+  });
+  now = 2;
+  assert.throws(() => deadlineBudget.assertActive(), SafetyBudgetError);
+
+  const abortController = new AbortController();
+  const abortedBudget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 10, maxBytes: 100, maxDurationMs: 1000 },
+    signal: abortController.signal,
+  });
+  abortController.abort();
+  assert.throws(() => abortedBudget.assertActive(), SafetyBudgetError);
+  return {
+    evidence: {
+      nonPositiveBudgetsRejected: true,
+      operationLimitEnforced: true,
+      objectLimitEnforced: true,
+      byteLimitEnforced: true,
+      deadlineEnforced: true,
+      abortSignalEnforced: true,
+    },
+  };
 }
 
 export const SCENARIO_IMPLEMENTATIONS = Object.freeze({
@@ -1573,7 +1518,7 @@ export const SCENARIO_IMPLEMENTATIONS = Object.freeze({
   "S0-CRS-001": (context) =>
     (context.durable ? crashProcessBoundaries(context) : crashBoundaries(context)),
   "S0-CRS-002": aliasCrash,
-  "S0-CRS-003": restoreCrash,
+  "S0-CRS-003": migrationCrash,
   "S0-COL-001": (context) =>
     (context.durable ? crossProcessRace(context, 3) : oneWinner(context, 2)),
   "S0-BCK-001": atomicReplaceDurability,
@@ -1611,4 +1556,3 @@ export const SCENARIO_IMPLEMENTATIONS = Object.freeze({
 // Scenarios that no implementation can honestly claim yet. They must report
 // Incomplete rather than borrow a weaker proof.
 export const PENDING_REASONS = Object.freeze({});
-

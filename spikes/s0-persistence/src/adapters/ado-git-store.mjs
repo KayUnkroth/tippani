@@ -23,7 +23,11 @@ import {
   deepClone,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
+import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
+import { providerTargetHash } from "../preflight.mjs";
+import { resolveProviderIdentity } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,6 +46,15 @@ export class AdoGitStore {
     getToken,
     configurationId = "CFG-ADO",
     fetchImpl,
+    storeRoot,
+    safetyBudget = null,
+    signal = null,
+    identityResolver = null,
+    preflightApproval = null,
+    effectiveTargetHash = null,
+    enforcePreflight = false,
+    ownershipMarker,
+    cleanupManifestId = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.org = org || process.env.S0_ADO_ORG || null;
@@ -54,18 +67,75 @@ export class AdoGitStore {
       || (process.env.S0_ADO_TOKEN ? async () => process.env.S0_ADO_TOKEN : null);
     this.configurationId = configurationId;
     this.fetchImpl = fetchImpl || globalThis.fetch;
+    this.safetyBudget = safetyBudget;
+    this.signal = signal;
+    this.identityResolver = identityResolver;
+    this.resolvedIdentity = null;
+    this.preflightApproval = preflightApproval;
+    this.effectiveTargetHash = effectiveTargetHash;
+    this.enforcePreflight = enforcePreflight === true;
+    this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
+    this.cleanupManifestId = cleanupManifestId;
     this.operations = [];
     this.liveProviderCalls = 0;
-    this.telemetry = new ProviderTelemetry();
+    this.telemetry = new ProviderTelemetry({ safetyBudget });
     this.model = new ReferenceMemoryWorkspaceStore({ configurationId });
     this._fault = null;
     this.offline = false;
-    this.pending = [];
+    this.pendingQueue = new PersistentPendingQueue({
+      storeRoot,
+      provider: "ado",
+      runId: this.runId,
+    });
     this.initialized = false;
   }
 
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  async resolveCredentialIdentity() {
+    if (this.resolvedIdentity) return this.resolvedIdentity;
+    this.resolvedIdentity = await resolveProviderIdentity({
+      provider: "ado",
+      getToken: this._getToken,
+      fetchImpl: this.fetchImpl,
+      signal: this.signal,
+      identityResolver: this.identityResolver,
+      beforeAttempt: async () => {
+        await this.telemetry.recordRequest();
+        this.liveProviderCalls++;
+      },
+      wrapResponse: (response) => this.telemetry.wrapResponse(response),
+    });
+    return this.resolvedIdentity;
+  }
+
+  async assertEffectiveTargetApproved() {
+    if (this.dryRun || !this.enforcePreflight) return;
+    const identity = await this.resolveCredentialIdentity();
+    const targetHash = providerTargetHash({
+      provider: "ado",
+      identity,
+      coordinates: {
+        organization: this.org,
+        project: this.project,
+        repository: this.repo,
+      },
+      namespace: `tippani-s0/${this.runId}`,
+    });
+    const approval = this.preflightApproval || {};
+    if (!targetHash ||
+        targetHash !== this.effectiveTargetHash ||
+        approval.targetHash !== targetHash ||
+        typeof approval.approver !== "string" || !approval.approver.trim() ||
+        typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        typeof approval.reference !== "string" || !approval.reference.trim()) {
+      throw new WorkspaceStoreError(
+        "Effective ADO target is not covered by a structured preflight approval",
+        "preflight_required",
+      );
+    }
   }
 
   record(op, detail = {}) {
@@ -84,20 +154,27 @@ export class AdoGitStore {
     if (this.dryRun) throw new Error("ado() must not be called in dry-run");
     if (!this._getToken) throw new WorkspaceStoreError("No ADO token supplied", "no_token");
     if (!this.org || !this.project || !this.repo) throw new WorkspaceStoreError("org/project/repo required for a live run", "no_coordinates");
-    this.liveProviderCalls++;
-    this.telemetry.recordRequest(body);
     const fault = this._fault;
     if (fault && method !== "GET") {
+      await this.telemetry.recordRequest(body);
+      this.liveProviderCalls++;
       this._fault = null;
       if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) });
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) });
+      if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) });
+      if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) });
       if (fault.kind === "outage") {
         this.telemetry.recordFailure("outage");
         throw new WorkspaceStoreError("network outage (injected)", "provider_unreachable");
       }
       if (fault.kind === "lost-response") {
         const token0 = await this._getToken();
-        await this.fetchImpl(url, { method, headers: { Authorization: `Bearer ${token0}`, ...headers }, body });
+        await this.fetchImpl(url, {
+          method,
+          headers: { Authorization: `Bearer ${token0}`, ...headers },
+          body,
+          signal: this.signal,
+        });
         this.telemetry.recordFailure("lost-response");
         throw new WorkspaceStoreError("response lost (injected)", "provider_response_lost");
       }
@@ -105,7 +182,14 @@ export class AdoGitStore {
     const token = await this._getToken();
     for (let attempt = 0; ; attempt++) {
       try {
-        return this.telemetry.wrapResponse(await this.fetchImpl(url, { method, headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers }, body }));
+        await this.telemetry.recordRequest(body);
+        this.liveProviderCalls++;
+        return this.telemetry.wrapResponse(await this.fetchImpl(url, {
+          method,
+          headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers },
+          body,
+          signal: this.signal,
+        }));
       } catch (error) {
         if (method !== "GET" || attempt >= 2 || !(error instanceof TypeError)) throw error;
         const delayMs = 250 * (attempt + 1);
@@ -156,6 +240,7 @@ export class AdoGitStore {
   }
 
   async initialize() {
+    await this.assertEffectiveTargetApproved();
     this.record("connect");
     if (this.dryRun) { await this.model.initialize(); this.initialized = true; return { backingPath: "ado", dryRun: true, branch: this.branch }; }
     this.initialized = true;
@@ -169,6 +254,7 @@ export class AdoGitStore {
   async createWorkspace(workspace) {
     this.ensureInitialized();
     validateWorkspaceRecord(workspace);
+    await this.safetyBudget?.recordObjects(1);
     this.record("push", { changeType: "add", item: `${workspace.workspaceId}.json`, precondition: "oldObjectId=tip" });
     if (this.dryRun) return this.model.createWorkspace(workspace);
     const tip = await this.getTip();
@@ -269,6 +355,7 @@ export class AdoGitStore {
         newContent: { content: JSON.stringify(workspace), contentType: "rawtext" },
       };
     });
+    await this.safetyBudget?.recordObjects(snapshot.workspaces.length);
     const body = JSON.stringify({
       refUpdates: [{ name: this.refName(), oldObjectId: tip ?? ZERO_OID }],
       commits: [{ comment: "s0 restore", changes }],
@@ -298,31 +385,57 @@ export class AdoGitStore {
 
   goOffline() { this.offline = true; }
 
-  stageOffline(request) {
+  async stageOffline(request) {
     if (!this.offline) throw new WorkspaceStoreError("stageOffline requires offline mode", "not_offline");
-    this.pending.push(request);
-    return { status: "pending", pendingCount: this.pending.length };
+    await this.pendingQueue.append(request);
+    return { status: "pending", pendingCount: await this.pendingQueue.count() };
   }
 
   async reconnect() {
     this.offline = false;
     const applied = [];
     const conflicts = [];
-    const queued = this.pending;
-    this.pending = [];
-    for (const request of queued) {
-      try {
-        const next = await this.compareAndSwap(request);
-        applied.push({ workspaceId: request.workspaceId, generation: next.generation });
-      } catch (error) {
-        if (error instanceof WorkspaceConflictError) {
-          conflicts.push({ workspaceId: request.workspaceId, expected: error.expectedGeneration, actual: error.actualGeneration });
-        } else {
-          throw error;
+    const retained = [];
+    for (;;) {
+      const outcome = await this.pendingQueue.processHead(async (entry) => {
+        const request = entry.request;
+        try {
+          const next = await this.compareAndSwap(request);
+          return {
+            remove: true,
+            kind: "applied",
+            value: { workspaceId: request.workspaceId, generation: next.generation },
+          };
+        } catch (error) {
+          if (error instanceof WorkspaceConflictError) {
+            return {
+              remove: false,
+              kind: "conflict",
+              value: {
+                workspaceId: request.workspaceId,
+                expected: error.expectedGeneration,
+                actual: error.actualGeneration,
+              },
+            };
+          }
+          return {
+            remove: false,
+            kind: "retained",
+            value: { workspaceId: request.workspaceId, code: error?.code || "provider_error" },
+          };
         }
-      }
+      });
+      if (outcome.empty) break;
+      if (outcome.kind === "applied") applied.push(outcome.value);
+      if (outcome.kind === "conflict") conflicts.push(outcome.value);
+      if (outcome.kind === "retained") retained.push(outcome.value);
+      if (outcome.remove !== true) break;
     }
-    return { applied, conflicts };
+    return { applied, conflicts, retained, pendingCount: await this.pendingQueue.count() };
+  }
+
+  async pendingCount() {
+    return this.pendingQueue.count();
   }
 
   async deleteWorkspace(workspaceId) {
@@ -338,13 +451,67 @@ export class AdoGitStore {
   }
 
   // Delete the per-run branch; never touches the default branch.
-  async cleanup() {
-    if (this.dryRun) { this.record("delete-ref", { ref: this.refName() }); return { deleted: this.branch, dryRun: true }; }
+  cleanupResource() {
+    return {
+      kind: "ado-ref",
+      id: this.refName(),
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      coordinatesHash: cleanupCoordinatesHash("ado", {
+        organization: this.org,
+        project: this.project,
+        repository: this.repo,
+      }),
+      effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+    };
+  }
+
+  async prepareCleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
+    if (this.dryRun) {
+      manifest.bindCondition(resource, { expectedObjectId: "<tip>" });
+      return resource.condition;
+    }
     const tip = await this.getTip();
-    if (!tip) return { deleted: this.branch };
-    const body = JSON.stringify([{ name: this.refName(), oldObjectId: tip, newObjectId: ZERO_OID }]);
+    manifest.bindCondition(resource, tip ? { expectedObjectId: tip } : { absent: true });
+    return resource.condition;
+  }
+
+  async cleanup({ manifest, resource } = {}) {
+    await this.assertEffectiveTargetApproved();
+    const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
+    assertCleanupAuthorized(manifest, resource, expected);
+    if (!resource.condition) {
+      throw new WorkspaceStoreError("cleanup condition was not prepared", "cleanup_precondition_unavailable");
+    }
+    if (this.dryRun) {
+      this.record("delete-ref", { ref: this.refName(), precondition: "oldObjectId=<tip>" });
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, dryRun: true };
+    }
+    if (resource.condition.absent === true) {
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, absent: true };
+    }
+    const tip = await this.getTip();
+    if (tip !== resource.condition.expectedObjectId) {
+      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
+    const body = JSON.stringify([{
+      name: this.refName(),
+      oldObjectId: resource.condition.expectedObjectId,
+      newObjectId: ZERO_OID,
+    }]);
     const resp = await this.ado("POST", `${this.base()}/refs?${API}`, { headers: { "Content-Type": "application/json" }, body });
     if (!resp.ok) throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
+    const outcome = await resp.json();
+    const update = Array.isArray(outcome) ? outcome[0] : outcome.value?.[0];
+    if (update?.success !== true) {
+      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
+    manifest.markCleaned(resource);
     return { deleted: this.branch };
   }
 

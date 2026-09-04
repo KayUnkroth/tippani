@@ -6,25 +6,88 @@
 //   S0_ONEDRIVE_TOKEN    - Graph bearer token (delegated Files.ReadWrite)
 //   S0_ONEDRIVE_DRIVE_ID  - target drive id
 //   S0_ONEDRIVE_FOLDER    - base folder (server-relative path within the drive)
+//   S0_ONEDRIVE_IDENTITY and S0_PREFLIGHT_* - approved effective-target receipt
+//   S0_RUN_ID              - pre-approved unique run id (`s0-...`)
 //
 // The token is read from the environment and never printed.
 
 import { OneDriveGraphStore } from "./adapters/onedrive-store.mjs";
+import { createCleanupAuthorization } from "./cleanup-manifest.mjs";
+import { OperationBudget } from "./operation-budget.mjs";
+import {
+  assertPreflight,
+  resolveEffectiveProviderConfig,
+  withResolvedProviderIdentity,
+} from "./preflight.mjs";
+import { resolveProviderIdentityForConfig } from "./provider-identity.mjs";
 import { createSyntheticWorkspace } from "./synthetic-fixtures.mjs";
 import { WorkspaceConflictError } from "./workspace-contract.mjs";
 
 const token = process.env.S0_ONEDRIVE_TOKEN;
 const driveId = process.env.S0_ONEDRIVE_DRIVE_ID;
 const folder = process.env.S0_ONEDRIVE_FOLDER;
+const runId = process.env.S0_RUN_ID;
 
-if (!token || !driveId || !folder) {
-  console.error("Missing S0_ONEDRIVE_TOKEN / S0_ONEDRIVE_DRIVE_ID / S0_ONEDRIVE_FOLDER");
+if (!token || !driveId || !folder || !runId) {
+  console.error("Missing S0_ONEDRIVE_TOKEN / S0_ONEDRIVE_DRIVE_ID / S0_ONEDRIVE_FOLDER / S0_RUN_ID");
   process.exit(2);
 }
 
-const runId = `smoke-${Date.now()}`;
-const makeStore = () => new OneDriveGraphStore({
-  dryRun: false, driveId, folderPath: folder, runId, graphToken: token,
+let config = resolveEffectiveProviderConfig({
+  configurationId: "CFG-ONEDRIVE-SMOKE",
+  adapter: "onedrive",
+  backingPath: "onedrive",
+  runId,
+  syntheticDataOnly: true,
+  dryRun: false,
+  budgets: {
+    maxOperations: 100,
+    maxDurationMs: 300000,
+    maxObjects: 100,
+    maxBytes: 10485760,
+  },
+  sandbox: {
+    kind: "provider-live",
+    approved: true,
+    allowListed: true,
+    identityLabel: "Runtime-approved OneDrive smoke identity",
+    identityVerified: true,
+    corporateFallbackDisabled: true,
+    defaultBranchExcluded: true,
+    ownershipMarker: `tippani-s0:${runId}`,
+    namespace: `tippani-s0/${runId}`,
+    coordinates: { driveId, folder },
+    dryRunOperations: ["ensure-folder", "put-content", "get-content", "delete-folder"],
+    cleanup: { manifestId: `syn-cleanup-${runId}`, retentionHours: 1 },
+  },
+});
+config = withResolvedProviderIdentity(
+  config,
+  await resolveProviderIdentityForConfig(config),
+);
+assertPreflight(config);
+const abortController = new AbortController();
+const deadlineTimer = setTimeout(
+  () => abortController.abort(),
+  config.budgets.maxDurationMs,
+);
+const safetyBudget = new OperationBudget({
+  limits: config.budgets,
+  signal: abortController.signal,
+});
+const makeStore = ({ budgeted = true } = {}) => new OneDriveGraphStore({
+  dryRun: false,
+  driveId,
+  folderPath: folder,
+  runId,
+  graphToken: token,
+  effectiveTargetHash: config.sandbox.effectiveTargetHash,
+  preflightApproval: config.sandbox.approval,
+  enforcePreflight: true,
+  ownershipMarker: config.sandbox.ownershipMarker,
+  cleanupManifestId: config.sandbox.cleanup.manifestId,
+  safetyBudget: budgeted ? safetyBudget : null,
+  signal: budgeted ? abortController.signal : null,
 });
 
 let pass = 0;
@@ -76,11 +139,15 @@ try {
   console.log(`  FAIL  unexpected error: ${error?.code || ""} ${error?.message || error}`);
 } finally {
   try {
-    const result = await store.cleanup();
+    const cleanupStore = makeStore({ budgeted: false });
+    const authorization = createCleanupAuthorization(config, cleanupStore);
+    await cleanupStore.prepareCleanup(authorization);
+    const result = await cleanupStore.cleanup(authorization);
     console.log(`cleanup: deleted ${result.deleted}`);
   } catch (error) {
     console.log(`cleanup FAILED (manual delete may be needed): ${error?.message || error}`);
   }
+  clearTimeout(deadlineTimer);
 }
 
 console.log(`\nlive OneDrive smoke: ${pass} passed, ${failn} failed`);

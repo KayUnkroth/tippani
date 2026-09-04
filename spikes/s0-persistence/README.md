@@ -11,7 +11,7 @@ The harness provides:
 - A machine-readable catalog matching every stable scenario ID in the S0 spec.
 - A common Draft Workspace store contract with generation-CAS semantics.
 - Deterministic, synthetic-only workspace fixtures at small, medium, and stress scales.
-- Named fault injection for commit and restore boundaries.
+- Named fault injection for commit, migration, and restore boundaries.
 - Five candidate engine/backing-path configurations plus a reference in-memory
   adapter for harness validation: local `local-cas`, local `local-sqlite`, and
   the `onedrive`, `ado`, and `github` provider transports.
@@ -22,7 +22,7 @@ The harness provides:
   any live call.
 - Real cross-process evidence: writers run as separate OS processes released
   from a common barrier, and kill tests hard-exit a child mid-commit, mid
-  alias-update, mid atomic-replace, and mid-restore.
+  alias-update, mid atomic-replace, and during an actual migration transaction.
 - Sandbox preflight checks that reject embedded credentials, corporate-account
   fallback, mismatched ownership markers, and incomplete provider safeguards.
 - An ownership-checked cleanup manifest.
@@ -43,8 +43,9 @@ candidates only after all applicable absolute gates pass.
   SQLite, the local generation-CAS envelope, the OneDrive envelope, the ADO
   envelope, and the GitHub envelope. Results are then rolled up into candidate
   architecture mappings. A gate owned by another configuration is `Not
-  applicable`; `N/A` is reserved for a reviewer-approved contract exception;
-  `Blocked`, `Incomplete`, and `Not executed` remain distinct states.
+  applicable`; `N/A` is reserved for a contract exception with approver
+  identity, approval date, and reference; `Blocked`, `Incomplete`, and `Not
+  executed` remain distinct states.
 - **Isolation and repeatability:** Each local scenario receives an isolated
   temporary store root. Fixtures are generated deterministically at the
   configured small, medium, or stress scale. Provider runs use a per-run
@@ -52,7 +53,7 @@ candidates only after all applicable absolute gates pass.
 - **Concurrency and recovery:** Contending writers run as separate OS child
   processes, wait at a common barrier, and then race the same generation.
   Named fault injection and hard process exits exercise commit, alias-update,
-  atomic-replace, and restore boundaries.
+  atomic-replace, and migration boundaries.
 - **Two-client collaboration:** Two client processes act as user 1 and user 2
   while authenticating through the same provider account. `COL-002` races the
   processes, `COL-003` reconnects a stale client after the other commits, and
@@ -68,14 +69,11 @@ candidates only after all applicable absolute gates pass.
 - **Detection power:** Deliberately broken mutant stores must fail the scenario
   that owns the violated invariant. Mutants are enabled only for the dedicated
   detection-power suites and cannot produce reported candidate results.
-- **Performance method:** Cold-start, backup, restore, footprint, and write
-  amplification discard one warm-up run and retain five measured runs per
-  scale. Local operation latency uses three warm-ups and 40/20/8 measured
-  iterations at small/medium/stress scale. Provider latency uses three warm-ups
-  and 6/4/2 measured iterations. Reports include minimum, p50, p95, maximum,
-  mean, standard deviation, environment details, provider request/application-
-  payload byte counts, throttling behavior, collaborator-discovery latency, and
-  the same eight-dimension complexity/operability rubric for every candidate.
+- **Performance method:** The intended protocol uses populated stores, fresh
+  processes, repeated raw samples, memory measurement, and storage-layer bytes
+  written. The checked-in `PER-001` and `PER-003` evidence did not meet that
+  protocol and is now `Incomplete`; it is excluded from architecture rationale
+  until rerun correctly.
 - **Evidence and reporting:** Each scenario records its status, duration,
   evidence, optional measurements, and raw samples. Reports expose missing
   absolute-gate evidence rather than presenting unexecuted coverage as a pass.
@@ -101,10 +99,11 @@ still fail closed and only dry-run.
 
 ## Comparison and decision handoff
 
-`spike:s0:compare` regenerates all five configuration reports and the
-[architecture-mapping handoff](results/comparison/comparison.md). The generated
-handoff is the only source of result counts and recommendations; this README
-does not duplicate pass totals that can become stale. It contains:
+`spike:s0:compare` can execute configurations, while `compare.mjs
+--use-existing` only validates retained artifacts and never silently reruns a
+provider. The current [architecture-mapping handoff](results/comparison/comparison.md)
+rejects the checked-in campaigns as stale/incomplete after the review fixes.
+It is the only source of current result counts and contains:
 
 - The applicability-aware five-configuration matrix.
 - Per-configuration correctness, collaboration, recovery, performance, and
@@ -120,7 +119,11 @@ does not duplicate pass totals that can become stale. It contains:
 The README intentionally makes no historical live-result claim. Wiping or
 regenerating `results/` cannot leave a contradictory summary here.
 
-## Spike action checklist
+## Superseded campaign checklist
+
+The checked boxes below describe the pre-review campaign and are retained only
+as history. They are not current evidence and do not make either architecture
+mapping eligible.
 
 ### Pull-request review acceptance
 
@@ -328,29 +331,63 @@ regenerating `results/` cannot leave a contradictory summary here.
   remaining condition and owner, and prepare implementer, independent-reviewer,
   cross-platform, provider-test, and ADR-approver sign-off.
 
+## Current rerun checklist
+
+- [x] Implement the source-level review fixes and deterministic negative tests.
+- [x] Regenerate the comparison in fail-closed mode so stale evidence is
+  explicitly rejected and no mapping is selected.
+- [ ] Regenerate local CAS and SQLite results from the current source. SQLite is
+  not eligible under the current absolute `S0-CON-003` criterion because
+  `BEGIN IMMEDIATE` serializes writers database-wide.
+- [ ] Run three new live campaigns for OneDrive, ADO, and GitHub with effective
+  identity and coordinates bound to a dated approved target hash.
+- [ ] Rerun native cross-platform evidence because the shared contract,
+  checksum, locking, migration, and result schema changed.
+- [ ] Implement the corrected fresh-process startup/enumeration, memory, and
+  storage-layer write-amplification protocol.
+- [ ] Select an eligible mapping and obtain independent-review and ADR approval.
+
 ## Commands
 
 ```powershell
 npm run spike:s0:test        # harness, detection-power, durable-detection, provider-dryrun, onedrive, and provider-gate (onedrive/ado/github) suites
 npm run spike:s0:selftest    # reference adapter self-test
 npm run spike:s0:compare     # run all five configurations and emit the mapping handoff
-npm run spike:s0:aggregate   # combine three retained campaigns per provider
-node spikes\s0-persistence\src\compare.mjs --use-existing  # rebuild the handoff from reviewed aggregates
+npm run spike:s0:aggregate   # combine only three complete, revision-compatible campaigns
+node spikes\s0-persistence\src\compare.mjs --use-existing  # validate retained evidence; currently exits nonzero/incomplete
+node spikes\s0-persistence\src\compare.mjs --use-existing --mapping=MAP-ENVELOPE  # only after this mapping is eligible
 npm run spike:s0:preflight   # emit the provider preflight sheet + dry-run manifest
 node spikes\s0-persistence\src\cli.mjs --list
 node spikes\s0-persistence\src\cli.mjs --config spikes\s0-persistence\config\local-cas.json --dry-run
 ```
 
-Generated results go under `spikes\s0-persistence\results\` and are ignored by
-default, but the reviewed reports on this branch are force-added as PR evidence.
-Publish regenerated reports only after confirming that they contain synthetic
-data and no credentials.
+Generated results go under `spikes\s0-persistence\results\`. The checked-in
+provider campaigns are historical and currently rejected by the comparison
+validator. Publish replacements only after confirming that they are complete,
+synthetic, credential-free, revision-compatible, and produced under an approved
+effective-target receipt.
 
 Identity tokens for live provider runs are supplied externally at runtime and
 never stored in configuration or reports. Other runtime inputs, including
 provider coordinates and optional performance-environment details, follow the
 same external-supply rule. Missing runtime inputs produce `Blocked` evidence
-rather than a false failure.
+when a campaign can be recorded safely; an unresolved or mismatched approved
+target prevents the live run before any provider call.
+
+The live environment is:
+
+| Scope | Required variables |
+|---|---|
+| Every provider | `S0_PREFLIGHT_APPROVER`, `S0_PREFLIGHT_APPROVED_AT`, `S0_PREFLIGHT_APPROVAL_REFERENCE`, `S0_PREFLIGHT_TARGET_HASH` |
+| OneDrive | `S0_ONEDRIVE_TOKEN`, `S0_ONEDRIVE_DRIVE_ID`, `S0_ONEDRIVE_FOLDER` |
+| Azure DevOps | `S0_ADO_TOKEN`, `S0_ADO_ORG`, `S0_ADO_PROJECT`, `S0_ADO_REPO` |
+| GitHub | `S0_GITHUB_TOKEN`, `S0_GITHUB_OWNER`, `S0_GITHUB_REPO` |
+
+The provider identity is resolved from the supplied credential; there is no
+caller-provided identity variable. Generate the target hash from the live
+preflight sheet, then supply the four shared approval variables. Changing the
+credential identity, any coordinate, run ID, or namespace requires a new
+approval. `onedrive-live-smoke.mjs` additionally requires `S0_RUN_ID`.
 
 ## Detection power
 
@@ -360,6 +397,7 @@ the owning scenario to fail each one: no generation CAS, partial commit,
 empty-on-corrupt, lost acknowledged commit, lossy restore, dangling journal
 tuple, alias leak, cleared newer intent revision, unlocked cross-process write,
 torn in-place write, and a commit that is acknowledged but never persisted.
+`S0-CRS-003` now kills a real migration rather than relabeling restore evidence.
 
 Broken adapters are registered only when `S0_ENABLE_TEST_MUTANTS=1`, so no
 reported S0 result can be produced by one.
