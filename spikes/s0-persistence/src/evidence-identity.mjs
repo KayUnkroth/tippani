@@ -79,7 +79,8 @@ export function normalizedSyncProfile(profile) {
     requiredClientState: profile.requiredClientState ?? null,
     requireIndependentClients: profile.requireIndependentClients === true,
     retainedEvidenceEnv: profile.retainedEvidenceEnv ?? null,
-    independentClientsEnv: profile.independentClientsEnv ?? null,
+    signerPublicKeyEnv: profile.signerPublicKeyEnv ?? null,
+    trustedSignerFingerprint: profile.trustedSignerFingerprint ?? null,
   };
 }
 

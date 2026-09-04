@@ -266,8 +266,8 @@ mapping eligible.
   `S0-BCK-006` stays `Incomplete` until two independent OneDrive sync clients on
   separate devices produce a signed cross-client evidence artifact (bound to the
   approved `syncTargetHash` and config revision) with distinct immutable client
-  IDs, observed timestamps/operations, a conflict/recovery outcome, and an
-  approval digest.
+  IDs, observed timestamps/operations, a conflict/recovery outcome, and a
+  detached signature from the trusted pinned signer.
 
 ### Azure DevOps provider run
 
@@ -386,7 +386,7 @@ The live environment is:
 |---|---|
 | Every provider | `S0_PREFLIGHT_APPROVER`, `S0_PREFLIGHT_APPROVED_AT`, `S0_PREFLIGHT_APPROVAL_REFERENCE`, `S0_PREFLIGHT_TARGET_HASH` |
 | OneDrive | `S0_ONEDRIVE_TOKEN`, `S0_ONEDRIVE_DRIVE_ID`, `S0_ONEDRIVE_FOLDER` |
-| OneDrive synced-folder sync run (`S0-BCK-006`, separate) | `S0_ONEDRIVE_SYNC_ROOT` (path to the approved running Windows OneDrive sync-client folder), `S0_SYNC_CLIENT_IDENTITY`, `S0_SYNC_CLIENT_STATE` (must equal the approved `verified-signed-in` state), `S0_SYNC_CONFLICT_EVIDENCE` (path to a signed cross-client evidence artifact), the four `S0_PREFLIGHT_*` approval variables, and `S0_RUN_ID` |
+| OneDrive synced-folder sync run (`S0-BCK-006`, separate) | `S0_ONEDRIVE_SYNC_ROOT` (path to the approved running Windows OneDrive sync-client folder), `S0_SYNC_CLIENT_IDENTITY`, `S0_SYNC_CLIENT_STATE` (must equal the approved `verified-signed-in` state), `S0_SYNC_CONFLICT_EVIDENCE` (path to a signed cross-client evidence artifact), `S0_SYNC_SIGNER_PUBLIC_KEY` (PEM/path of the trusted signer whose SPKI fingerprint is pinned in `syncProfile.trustedSignerFingerprint`), the distinct sync-approval record `S0_SYNC_APPROVER`, `S0_SYNC_APPROVED_AT`, `S0_SYNC_APPROVAL_REFERENCE`, `S0_SYNC_TARGET_HASH`, and `S0_RUN_ID` |
 | Azure DevOps | `S0_ADO_TOKEN`, `S0_ADO_ORG`, `S0_ADO_PROJECT`, `S0_ADO_REPO` |
 | GitHub | `S0_GITHUB_TOKEN`, `S0_GITHUB_OWNER`, `S0_GITHUB_REPO` |
 
@@ -400,20 +400,27 @@ additionally requires `S0_RUN_ID`.
 The synced-folder `S0-BCK-006` case runs separately on a Windows host with a
 running OneDrive sync client; it does not use the provider-API CAS token,
 drive, or folder coordinates and never substitutes provider-API CAS evidence
-for synced-folder behavior. Its `S0_ONEDRIVE_SYNC_ROOT` folder, retained raw and
-report artifacts, and evidence identity are stored on the OneDrive aggregate and
-independently re-verified during comparison.
+for synced-folder behavior. It carries a **distinct sync-approval record** whose
+`S0_SYNC_TARGET_HASH` must equal the computed sync target hash and must never be
+the provider-API approval hash. That approval and the sync-root/identity/state
+binding are validated **before** any probe or filesystem write. Its
+`S0_ONEDRIVE_SYNC_ROOT` folder, retained raw and report artifacts, and evidence
+identity are stored on the OneDrive aggregate and independently re-verified during
+comparison.
 
 A synced-folder **Pass cannot come from an environment client count or an
-arbitrary JSON self-report.** The only credible closure is a signed, retained
+arbitrary/self-signed JSON self-report.** The only credible closure is a retained
 cross-client evidence artifact bound to the approved `syncTargetHash` and config
-revision, listing at least two distinct immutable client IDs with observed
-timestamps/operations, a recorded conflict or recovery outcome, and approval
-metadata whose digest matches the artifact body. Absent a valid artifact the
-result is `Incomplete`/`Blocked`, never `Pass`. Until credible automatic proof
-exists, the **required future probe** is two independent OneDrive sync clients on
-separate devices that produce and sign such an artifact; a same-device handle
-probe only measures local compatibility and cannot close the gate.
+revision, listing at least two distinct immutable client IDs with non-future
+observed timestamps/operations, a recorded conflict or recovery outcome, approval
+metadata, and a **detached signature** verified by Node's `crypto` against the
+trusted signer whose SPKI fingerprint is pinned into `syncProfile` (and therefore
+the config revision). An unkeyed SHA is forgeable and is not accepted. If no
+trusted key is configured, `Pass` is unreachable and the result is `Incomplete`.
+Until credible automatic proof exists, the **required future probe** is two
+independent OneDrive sync clients on separate devices that produce and sign such
+an artifact; a same-device handle probe only measures local compatibility and
+cannot close the gate.
 
 ## Detection power
 

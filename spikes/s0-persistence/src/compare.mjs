@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,7 @@ import {
 } from "./applicability.mjs";
 import {
   buildEvidenceIdentity,
+  decisionConfigRevision,
   sha256,
   stableJson,
 } from "./evidence-identity.mjs";
@@ -21,7 +23,8 @@ import {
   naApprovalErrors,
 } from "./eligibility.mjs";
 import { runHarness } from "./runner.mjs";
-import { combineStatuses } from "./aggregate-campaigns.mjs";
+import { combineResults } from "./aggregate-campaigns.mjs";
+import { validateCrossClientEvidence } from "./sync-evidence.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -101,39 +104,61 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
   const baseDirectory = path.dirname(artifactPath);
   const resultsRoot = path.dirname(baseDirectory);
   const campaigns = Array.isArray(run?.campaigns) ? run.campaigns : [];
-  const statusByScenario = new Map();
+  const approvalByName = new Map(
+    (Array.isArray(run?.campaignApprovals) ? run.campaignApprovals : []).map((item) => [item.name, item]),
+  );
+  const linkedCampaigns = [];
+  let recomputable = campaigns.length > 0;
   for (const campaign of campaigns) {
     const label = campaign?.name || "campaign";
     const { run: linked, error } = readLinkedRun(baseDirectory, campaign?.raw, resultsRoot);
-    if (error) { errors.push(`${label} ${error}`); continue; }
-    const { errors: identityErrors, linkedResults } = validateLinkedRunIdentity(linked, config, label);
-    errors.push(...identityErrors);
+    if (error) { errors.push(`${label} ${error}`); recomputable = false; continue; }
+    const { errors: identityErrors } = validateLinkedRunIdentity(linked, config, label);
+    if (identityErrors.length) { errors.push(...identityErrors); recomputable = false; }
     if (linked?.configuration?.runId !== campaign?.runId) {
       errors.push(`${label} linked raw runId does not match the aggregate campaign entry`);
+      recomputable = false;
     }
-    for (const result of linkedResults) {
-      const positions = statusByScenario.get(result.scenarioId) || [];
-      positions.push({ name: campaign?.name, status: effectiveResult(result).status });
-      statusByScenario.set(result.scenarioId, positions);
+    const linkedSandbox = linked?.preflight?.sandbox || {};
+    const claimedApproval = approvalByName.get(campaign?.name);
+    if (!claimedApproval || claimedApproval.effectiveTargetHash !== linkedSandbox.effectiveTargetHash) {
+      errors.push(`${label} approval target hash does not match the linked preflight`);
     }
+    if (stableJson(claimedApproval?.approval) !== stableJson(linkedSandbox.approval)) {
+      errors.push(`${label} approval record does not match the linked preflight`);
+    }
+    linkedCampaigns.push({ name: campaign?.name, run: linked });
   }
-  for (const result of Array.isArray(run?.results) ? run.results : []) {
-    if (result.scenarioId === "S0-BCK-006") continue;
-    const positions = statusByScenario.get(result.scenarioId);
-    if (!campaigns.length || !positions || positions.length !== campaigns.length) {
+  const claimedResults = Array.isArray(run?.results) ? run.results : [];
+  if (!recomputable || linkedCampaigns.length !== campaigns.length) {
+    for (const result of claimedResults) {
+      if (result.scenarioId === "S0-BCK-006") continue;
       errors.push(`${result.scenarioId} is not backed by every linked campaign raw`);
-      continue;
     }
-    const recomputed = combineStatuses(positions.map((position) => position.status));
-    if (recomputed !== result.status) {
-      errors.push(`${result.scenarioId} aggregate status ${result.status} does not match the recomputed ${recomputed} from linked campaign raws`);
+    return errors;
+  }
+  const expectedIds = (Array.isArray(run?.applicableScenarioIds) ? run.applicableScenarioIds : [])
+    .filter((id) => id !== "S0-BCK-006");
+  let recomputed;
+  try {
+    recomputed = combineResults(linkedCampaigns, expectedIds);
+  } catch (error) {
+    errors.push(`linked campaigns could not be recomputed: ${error.message}`);
+    return errors;
+  }
+  const recById = new Map(recomputed.map((result) => [result.scenarioId, result]));
+  for (const result of claimedResults) {
+    if (result.scenarioId === "S0-BCK-006") continue;
+    const rec = recById.get(result.scenarioId);
+    if (!rec) { errors.push(`${result.scenarioId} is not backed by every linked campaign raw`); continue; }
+    if (rec.status !== result.status) {
+      errors.push(`${result.scenarioId} aggregate status ${result.status} does not match the recomputed ${rec.status} from linked campaign raws`);
     }
-    const claimed = result.evidence?.campaigns || {};
-    for (const position of positions) {
-      if (position.name && claimed[position.name] &&
-          claimed[position.name].status !== position.status) {
-        errors.push(`${result.scenarioId} campaign ${position.name} claims ${claimed[position.name].status} but the linked raw recorded ${position.status}`);
-      }
+    if (stableJson(rec.measurements || {}) !== stableJson(result.measurements || {})) {
+      errors.push(`${result.scenarioId} aggregate measurements/distributions do not match the recomputed linked campaign values`);
+    }
+    if (stableJson(rec.evidence?.campaigns || {}) !== stableJson(result.evidence?.campaigns || {})) {
+      errors.push(`${result.scenarioId} aggregate campaign positions/evidence do not match the linked campaign raws`);
     }
   }
   return errors;
@@ -172,11 +197,31 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
       const linkedBck = linkedResults.find((result) => result.scenarioId === "S0-BCK-006");
       if (!linkedBck) {
         errors.push("separate synced-folder linked raw has no S0-BCK-006 result");
-      } else if (aggregateResult &&
-        effectiveResult(linkedBck).status !== effectiveResult(aggregateResult).status) {
-        errors.push(
-          `aggregate S0-BCK-006 status ${effectiveResult(aggregateResult).status} does not match the linked sync run status ${effectiveResult(linkedBck).status}`,
-        );
+      } else {
+        const linkedStatus = effectiveResult(linkedBck).status;
+        if (aggregateResult && linkedStatus !== effectiveResult(aggregateResult).status) {
+          errors.push(
+            `aggregate S0-BCK-006 status ${effectiveResult(aggregateResult).status} does not match the linked sync run status ${linkedStatus}`,
+          );
+        }
+        // A retained S0-BCK-006 Pass must carry a full signed cross-client proof
+        // that re-verifies during comparison with the same validator/signature.
+        if (linkedStatus === "Pass") {
+          const proof = linkedBck.evidence?.crossClientEvidence || null;
+          const pem = linkedBck.evidence?.signerPublicKey || null;
+          let trustedKey = null;
+          try { trustedKey = pem ? crypto.createPublicKey(pem) : null; } catch { trustedKey = null; }
+          const proofErrors = validateCrossClientEvidence(proof, {
+            approvedTargetHash: proof?.syncTargetHash || null,
+            boundTargetHash: proof?.syncTargetHash || null,
+            configRevision: decisionConfigRevision(config),
+            trustedPublicKey: trustedKey,
+            trustedFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
+          });
+          for (const issue of proofErrors) {
+            errors.push(`separate synced-folder proof ${issue}`);
+          }
+        }
       }
     }
   }

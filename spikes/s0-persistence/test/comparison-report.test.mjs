@@ -14,6 +14,7 @@ import {
   verifySeparateSync,
 } from "../src/compare.mjs";
 import { buildEvidenceIdentity, sha256 } from "../src/evidence-identity.mjs";
+import { combineResults } from "../src/aggregate-campaigns.mjs";
 import { SCENARIOS } from "../src/scenario-catalog.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -98,16 +99,21 @@ await check("existing-run validation binds source, catalog, applicability, confi
   assert(validateExistingRun(wrongConfig, config).some((error) => /identity does not match/.test(error)));
 });
 
-await check("comparison resolves and verifies retained campaign artifact digests", () => {
+await check("comparison recomputes complete aggregate claims from linked campaign raws", () => {
   const config = JSON.parse(fs.readFileSync(
     path.join(root, "config", "provider-github-live.json"),
     "utf8",
   ));
   const applicable = applicableScenarioIds(config);
+  const metricScenario = applicable[0];
   const directory = path.join(root, ".test-state", "comparison-artifacts", config.configurationId);
   fs.rmSync(directory, { recursive: true, force: true });
   fs.mkdirSync(directory, { recursive: true });
-  const linkedRun = (index, { statusFor = () => "Pass", evidenceIdentity = buildEvidenceIdentity(config) } = {}) => ({
+  const linkedRun = (index, {
+    statusFor = () => "Pass",
+    latency = 100,
+    evidenceIdentity = buildEvidenceIdentity(config),
+  } = {}) => ({
     schemaVersion: 2,
     evidenceIdentity,
     configuration: {
@@ -117,12 +123,27 @@ await check("comparison resolves and verifies retained campaign artifact digests
       applicabilityProfile: applicabilityProfile(config),
       runId: `s0-run-${index}`,
     },
+    preflight: {
+      sandbox: {
+        effectiveTargetHash: `sha256:target-${index}`,
+        approval: {
+          approver: "Synthetic Reviewer",
+          approvedAt: "2026-09-03T20:00:00.000Z",
+          reference: `syn-${index}`,
+          targetHash: `sha256:target-${index}`,
+        },
+      },
+    },
     catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
     applicableScenarioIds: applicable,
-    results: applicable.map((scenarioId) => ({ scenarioId, status: statusFor(scenarioId) })),
+    results: applicable.map((scenarioId) => ({
+      scenarioId,
+      status: statusFor(scenarioId),
+      durationMs: 1,
+      evidence: {},
+      measurements: scenarioId === metricScenario ? { latencyMs: latency } : {},
+    })),
   });
-  const campaigns = [];
-  const approvals = [];
   const writeCampaign = (index, run) => {
     const name = `campaign-${index}`;
     fs.mkdirSync(path.join(directory, name), { recursive: true });
@@ -141,20 +162,25 @@ await check("comparison resolves and verifies retained campaign artifact digests
       reportSha256: `sha256:${sha256(reportBytes)}`,
     };
   };
+  const linkedCampaigns = [];
+  const campaigns = [];
+  const approvals = [];
   for (let index = 1; index <= 3; index++) {
-    campaigns.push(writeCampaign(index, linkedRun(index)));
-    const targetHash = `sha256:target-${index}`;
+    const linked = linkedRun(index);
+    linkedCampaigns.push({ name: `campaign-${index}`, run: linked });
+    campaigns.push(writeCampaign(index, linked));
     approvals.push({
       name: `campaign-${index}`,
-      effectiveTargetHash: targetHash,
+      effectiveTargetHash: `sha256:target-${index}`,
       approval: {
         approver: "Synthetic Reviewer",
         approvedAt: "2026-09-03T20:00:00.000Z",
         reference: `syn-${index}`,
-        targetHash,
+        targetHash: `sha256:target-${index}`,
       },
     });
   }
+  const aggregateResults = combineResults(linkedCampaigns, applicable);
   const run = {
     schemaVersion: 2,
     evidenceIdentity: buildEvidenceIdentity(config),
@@ -167,21 +193,49 @@ await check("comparison resolves and verifies retained campaign artifact digests
     },
     catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
     applicableScenarioIds: applicable,
-    results: applicable.map((scenarioId) => ({
-      scenarioId,
-      status: "Pass",
-      evidence: {
-        campaigns: Object.fromEntries(campaigns.map((campaign) => [
-          campaign.name,
-          { status: "Pass" },
-        ])),
-      },
-    })),
+    results: aggregateResults,
     campaigns,
     campaignApprovals: approvals,
   };
   const aggregatePath = path.join(directory, "raw-results.json");
   assert.deepEqual(validateExistingRun(run, config, { artifactPath: aggregatePath }), []);
+
+  // A 0ms aggregate measurement against 100ms linked raws must be rejected.
+  const zeroed = structuredClone(run);
+  zeroed.results.find((result) => result.scenarioId === metricScenario).measurements.latencyMs = 0;
+  assert(
+    validateExistingRun(zeroed, config, { artifactPath: aggregatePath })
+      .some((error) => /measurements\/distributions do not match/.test(error)),
+    "a fabricated 0ms measurement must be rejected",
+  );
+
+  // Bogus campaign position keys must be rejected.
+  const bogusKeys = structuredClone(run);
+  const target = bogusKeys.results.find((result) => result.scenarioId === metricScenario);
+  target.evidence.campaigns = { "campaign-forged": { status: "Pass", evidence: {}, measurements: {} } };
+  assert(
+    validateExistingRun(bogusKeys, config, { artifactPath: aggregatePath })
+      .some((error) => /campaign positions\/evidence do not match/.test(error)),
+    "bogus campaign keys must be rejected",
+  );
+
+  // A status not supported by the linked raws must be rejected.
+  const wrongStatus = structuredClone(run);
+  wrongStatus.results.find((result) => result.scenarioId === metricScenario).status = "Fail";
+  assert(
+    validateExistingRun(wrongStatus, config, { artifactPath: aggregatePath })
+      .some((error) => /does not match the recomputed/.test(error)),
+    "an unsupported aggregate status must be rejected",
+  );
+
+  // An approval that does not match the linked preflight must be rejected.
+  const approvalMismatch = structuredClone(run);
+  approvalMismatch.campaignApprovals[0].approval.reference = "syn-forged";
+  assert(
+    validateExistingRun(approvalMismatch, config, { artifactPath: aggregatePath })
+      .some((error) => /approval record does not match the linked preflight/.test(error)),
+    "a campaign approval mismatch must be rejected",
+  );
 
   // A modified linked artifact breaks the byte digest.
   fs.appendFileSync(path.join(directory, campaigns[0].raw), "\n");
@@ -191,22 +245,17 @@ await check("comparison resolves and verifies retained campaign artifact digests
     "a changed linked artifact must be rejected",
   );
 
-  // A valid-schema but unrelated/stale linked raw whose byte digest matches must
-  // still fail semantic binding when the aggregate claims Pass.
+  // A valid-schema but unrelated/stale linked raw (matching byte digest) must
+  // still fail identity binding.
   const staleRun = linkedRun(1, {
     evidenceIdentity: { ...buildEvidenceIdentity(config), sourceRevision: "sha256:stale-unrelated" },
-    statusFor: () => "Fail",
   });
   campaigns[0] = { ...campaigns[0], ...writeCampaign(1, staleRun) };
   run.campaigns = campaigns;
-  const staleErrors = validateExistingRun(run, config, { artifactPath: aggregatePath });
   assert(
-    staleErrors.some((error) => /identity does not match/.test(error)),
+    validateExistingRun(run, config, { artifactPath: aggregatePath })
+      .some((error) => /identity does not match/.test(error)),
     "a stale/unrelated linked raw must be rejected on identity",
-  );
-  assert(
-    staleErrors.some((error) => /does not match the recomputed/.test(error)),
-    "an aggregate Pass claim must not survive a linked Fail result",
   );
 
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
@@ -327,6 +376,32 @@ await check("comparison resolves and verifies the separate synced-folder (S0-BCK
     verifySeparateSync({ results: run.results }, config, { artifactPath: aggregatePath })
       .some((error) => /missing separate OneDrive/.test(error)),
     "a missing separate-sync record must be rejected",
+  );
+
+  // A retained S0-BCK-006 Pass with empty/absent signed proof must be rejected
+  // when the full proof is re-verified during comparison.
+  const passSyncRun = {
+    ...syncRun,
+    results: [{ scenarioId: "S0-BCK-006", status: "Pass", evidence: {} }],
+  };
+  const passRawBytes = Buffer.from(JSON.stringify(passSyncRun));
+  fs.writeFileSync(path.join(syncDir, "raw-results.json"), passRawBytes);
+  const passRun = {
+    results: [{ scenarioId: "S0-BCK-006", status: "Pass" }],
+    separateSync: {
+      configurationId: "CFG-ONEDRIVE-SYNC",
+      scenarioId: "S0-BCK-006",
+      raw: "../CFG-ONEDRIVE-SYNC/raw-results.json",
+      rawSha256: `sha256:${sha256(passRawBytes)}`,
+      report: "../CFG-ONEDRIVE-SYNC/outcome.md",
+      reportSha256: `sha256:${sha256(syncReportBytes)}`,
+      evidenceIdentity: buildEvidenceIdentity(config),
+    },
+  };
+  assert(
+    verifySeparateSync(passRun, config, { artifactPath: aggregatePath })
+      .some((error) => /proof .*no structured retained cross-client evidence/.test(error)),
+    "a claimed sync Pass with empty signed proof must be rejected",
   );
 
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });

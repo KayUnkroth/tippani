@@ -30,7 +30,9 @@
       "clientStateEnv": "S0_SYNC_CLIENT_STATE",
       "requiredClientState": "verified-signed-in",
       "requireIndependentClients": true,
-      "retainedEvidenceEnv": "S0_SYNC_CONFLICT_EVIDENCE"
+      "retainedEvidenceEnv": "S0_SYNC_CONFLICT_EVIDENCE",
+      "signerPublicKeyEnv": "S0_SYNC_SIGNER_PUBLIC_KEY",
+      "trustedSignerFingerprint": "sha256:REPLACE-WITH-APPROVED-SIGNER-SPKI-FINGERPRINT"
     },
     "coordinates": {
       "driveId": "supplied at runtime via S0_ONEDRIVE_DRIVE_ID",

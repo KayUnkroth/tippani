@@ -86,6 +86,12 @@ export function providerTargetHash(target) {
 export const SYNC_ROOT_ENV = "S0_ONEDRIVE_SYNC_ROOT";
 export const SYNC_CLIENT_IDENTITY_ENV = "S0_SYNC_CLIENT_IDENTITY";
 export const SYNC_CLIENT_STATE_ENV = "S0_SYNC_CLIENT_STATE";
+export const SYNC_APPROVAL_ENV = Object.freeze({
+  approver: "S0_SYNC_APPROVER",
+  approvedAt: "S0_SYNC_APPROVED_AT",
+  reference: "S0_SYNC_APPROVAL_REFERENCE",
+  targetHash: "S0_SYNC_TARGET_HASH",
+});
 
 export function resolveSyncTarget(config, env = process.env) {
   const profile = config?.sandbox?.syncProfile;
@@ -121,6 +127,22 @@ export function syncTargetHash(target) {
     requiredClientState: target.requiredClientState,
     namespace: target.namespace,
   })}`;
+}
+
+// The synced-folder approval is a distinct record from the provider-API target
+// approval. Its target hash is supplied out of band (S0_SYNC_TARGET_HASH) and
+// must equal the computed sync target hash; it must never be the provider hash.
+export function resolveSyncApproval(config, env = process.env) {
+  const profile = config?.sandbox?.syncProfile;
+  if (!profile || typeof profile !== "object") return null;
+  const declared = config?.sandbox?.syncApproval || {};
+  return {
+    approver: env[SYNC_APPROVAL_ENV.approver] || declared.approver || null,
+    approvedAt: env[SYNC_APPROVAL_ENV.approvedAt] || declared.approvedAt || null,
+    reference: env[SYNC_APPROVAL_ENV.reference] || declared.reference || null,
+    targetHash: env[SYNC_APPROVAL_ENV.targetHash] || declared.targetHash || null,
+    signerFingerprint: profile.trustedSignerFingerprint || null,
+  };
 }
 
 function approvalFrom(config, env) {
@@ -182,6 +204,7 @@ export function resolveEffectiveProviderConfig(config, env = process.env, {
   if (sync) {
     resolved.sandbox.syncTarget = sync;
     resolved.sandbox.syncTargetHash = syncTargetHash(sync);
+    resolved.sandbox.syncApproval = resolveSyncApproval(resolved, env);
   }
   if (resolvedIdentity) {
     Object.defineProperty(resolved, TRUSTED_IDENTITY, {

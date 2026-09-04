@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -11,7 +12,11 @@ import {
 } from "./synthetic-fixtures.mjs";
 import { CleanupManifest } from "./cleanup-manifest.mjs";
 import { findEmbeddedSecrets, validatePreflight } from "./preflight.mjs";
-import { decisionConfigRevision, sha256, stableJson } from "./evidence-identity.mjs";
+import { decisionConfigRevision } from "./evidence-identity.mjs";
+import {
+  assessSyncPreconditions,
+  assessSyncedFolderEvidence,
+} from "./sync-evidence.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "./onedrive-gates.mjs";
 import { telemetryDelta } from "./adapters/provider-telemetry.mjs";
 import { complexityAssessment } from "./complexity-rubric.mjs";
@@ -1109,151 +1114,16 @@ function loadRetainedCrossClientEvidence(profile, env) {
   }
 }
 
-// The signed digest binds the whole evidence body except the digest field
-// itself, so an arbitrary JSON self-report cannot claim a matching approval.
-export function crossClientEvidenceDigest(artifact) {
-  if (!artifact || typeof artifact !== "object") return null;
-  const { approval, ...body } = artifact;
-  const approvalWithoutDigest = approval && typeof approval === "object"
-    ? Object.fromEntries(Object.entries(approval).filter(([key]) => key !== "digest"))
-    : (approval ?? null);
-  return `sha256:${sha256(stableJson({ ...body, approval: approvalWithoutDigest }))}`;
-}
-
-// A retained cross-client artifact is the only credible synced-folder proof.
-// It must be bound to the approved sync target hash and config revision, list at
-// least two distinct immutable client IDs with observed timestamps/operations,
-// record a conflict or recovery outcome, and carry approval metadata whose digest
-// matches the artifact body. Environment counts and unbound self-reports fail.
-export function validateCrossClientEvidence(artifact, {
-  approvedTargetHash = null,
-  boundTargetHash = null,
-  configRevision = null,
-} = {}) {
-  if (!artifact || typeof artifact !== "object") {
-    return ["no structured retained cross-client evidence artifact was supplied"];
+function resolveTrustedSignerKey(profile, env) {
+  const variable = profile?.signerPublicKeyEnv || "S0_SYNC_SIGNER_PUBLIC_KEY";
+  const value = env[variable];
+  if (!value) return null;
+  try {
+    const pem = fs.existsSync(value) ? fs.readFileSync(value, "utf8") : value;
+    return crypto.createPublicKey(pem);
+  } catch {
+    return null;
   }
-  const errors = [];
-  if (artifact.schemaVersion !== 1) errors.push("unsupported cross-client evidence schemaVersion");
-  if (artifact.kind !== "onedrive-synced-folder-cross-client-evidence") {
-    errors.push("unexpected cross-client evidence kind");
-  }
-  if (!boundTargetHash || artifact.syncTargetHash !== boundTargetHash ||
-      !approvedTargetHash || artifact.syncTargetHash !== approvedTargetHash) {
-    errors.push("evidence is not bound to the approved sync target hash");
-  }
-  if (!configRevision || artifact.configRevision !== configRevision) {
-    errors.push("evidence config revision is stale or unbound");
-  }
-  const clients = Array.isArray(artifact.clients) ? artifact.clients : [];
-  if (clients.length < 2) errors.push("at least two independent sync clients are required");
-  const ids = clients.map((client) => client?.clientId);
-  if (ids.some((id) => typeof id !== "string" || !id.trim()) ||
-      new Set(ids).size !== ids.length) {
-    errors.push("client IDs must be distinct, immutable, non-empty identifiers");
-  }
-  for (const client of clients) {
-    const label = client?.clientId || "<unknown>";
-    if (typeof client?.observedAt !== "string" || !Number.isFinite(Date.parse(client.observedAt))) {
-      errors.push(`client ${label} lacks a valid observed timestamp`);
-    }
-    if (!Array.isArray(client?.operations) || client.operations.length === 0) {
-      errors.push(`client ${label} lacks observed operations`);
-    }
-  }
-  const outcomes = artifact.outcomes || {};
-  if (outcomes.conflict !== true && outcomes.recovery !== true) {
-    errors.push("evidence must record an observed conflict or recovery outcome");
-  }
-  const approval = artifact.approval || {};
-  if (typeof approval.approver !== "string" || !approval.approver.trim() ||
-      typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
-      typeof approval.reference !== "string" || !approval.reference.trim()) {
-    errors.push("evidence approval requires approver, approvedAt, and reference");
-  }
-  if (typeof approval.digest !== "string" || !approval.digest.startsWith("sha256:")) {
-    errors.push("evidence approval digest is required");
-  } else if (crossClientEvidenceDigest(artifact) !== approval.digest) {
-    errors.push("evidence approval digest does not match the artifact body");
-  }
-  return errors;
-}
-
-const FUTURE_SYNC_PROBE = "Required future probe: two independent OneDrive sync clients on " +
-  "separate devices producing a signed cross-client evidence artifact (distinct immutable " +
-  "client IDs, observed timestamps/operations, conflict/recovery outcomes, and an approval " +
-  "digest) bound to the approved syncTargetHash and config revision.";
-
-// Pure evidence gate for the separate synced-folder run. It refuses to turn an
-// arbitrary directory, an unverified/default sync client, an environment-reported
-// client count, or an unbound JSON self-report into a Pass. The only credible
-// closure is a validated, signed retained cross-client evidence artifact;
-// otherwise the honest result is Incomplete/Blocked rather than Pass.
-export function assessSyncedFolderEvidence({
-  approvedTargetHash = null,
-  boundTargetHash = null,
-  requiredClientState = null,
-  observedClientState = null,
-  observedClientIdentity = null,
-  configRevision = null,
-  retainedEvidence = null,
-  probe = {},
-} = {}) {
-  if (!boundTargetHash) {
-    return {
-      blocked: "Blocked — the synced-folder run has no approved sync-root/client-identity binding; " +
-        "an arbitrary directory or unverified client cannot satisfy S0-BCK-006.",
-    };
-  }
-  if (!approvedTargetHash || approvedTargetHash !== boundTargetHash) {
-    return {
-      blocked: "Blocked — the resolved sync root/client identity does not match the approved bound " +
-        "target hash; an arbitrary directory cannot pass S0-BCK-006.",
-    };
-  }
-  if (typeof observedClientIdentity !== "string" || !observedClientIdentity.trim()) {
-    return {
-      blocked: "Blocked — an approved OneDrive sync-client identity is required; none was observed.",
-    };
-  }
-  if (!requiredClientState || observedClientState !== requiredClientState) {
-    return {
-      blocked: `Blocked — synced-folder evidence requires the verified sync-client state ` +
-        `'${requiredClientState || "<approved>"}'; observed '${observedClientState || "unset"}'. ` +
-        "A default 'running' or unverified sync-client state cannot pass.",
-    };
-  }
-  const evidenceErrors = validateCrossClientEvidence(retainedEvidence, {
-    approvedTargetHash,
-    boundTargetHash,
-    configRevision,
-  });
-  if (evidenceErrors.length) {
-    return {
-      skip: "Incomplete — credible cross-client synced-folder evidence is unavailable: " +
-        `${evidenceErrors.join("; ")}. A same-device probe and self-reported client counts cannot ` +
-        `pass. ${FUTURE_SYNC_PROBE} Reporting Incomplete rather than Pass.`,
-    };
-  }
-  return {
-    evidence: {
-      syncClientState: observedClientState,
-      syncClientIdentity: observedClientIdentity,
-      probe: "two independent OneDrive sync clients (retained signed cross-client evidence)",
-      clients: retainedEvidence.clients.map((client) => client.clientId),
-      conflictOutcome: retainedEvidence.outcomes?.conflict === true,
-      recoveryOutcome: retainedEvidence.outcomes?.recovery === true,
-      evidenceDigest: retainedEvidence.approval.digest,
-      approvalReference: retainedEvidence.approval.reference,
-      providerApiCasUsed: false,
-      ...(Number.isFinite(probe.conflictFilesCreated)
-        ? { sameDeviceConflictFiles: probe.conflictFilesCreated }
-        : {}),
-      limitation: "Closure relies on retained, signed cross-device conflict/recovery evidence; " +
-        "provider-API CAS is measured separately.",
-    },
-    measurements: Number.isFinite(probe.createMs) ? { syncedFolderCreateMs: probe.createMs } : {},
-  };
 }
 
 async function syncedFolderCompatibility(context) {
@@ -1267,15 +1137,36 @@ async function syncedFolderCompatibility(context) {
   if (!syncRoot || !fs.existsSync(syncRoot)) {
     return { blocked: BLOCKED_REASONS["S0-BCK-006"] };
   }
+  const boundTargetHash = sandbox.syncTargetHash || null;
+  const syncApproval = sandbox.syncApproval || null;
+  const providerApprovalTargetHash = sandbox.approval?.targetHash || null;
+  const requiredClientState = profile?.requiredClientState || sandbox.syncTarget?.requiredClientState || null;
+  const observedClientState = env[profile?.clientStateEnv || "S0_SYNC_CLIENT_STATE"] || null;
+  const observedClientIdentity = env[profile?.clientIdentityEnv || "S0_SYNC_CLIENT_IDENTITY"] || null;
+  // The distinct synced-folder approval and binding are validated BEFORE any
+  // probe or filesystem write occurs.
+  const precondition = assessSyncPreconditions({
+    boundTargetHash,
+    approvedTargetHash: syncApproval?.targetHash || null,
+    providerApprovalTargetHash,
+    requiredClientState,
+    observedClientState,
+    observedClientIdentity,
+    syncApproval,
+  });
+  if (precondition) return precondition;
   const probe = sameDeviceSyncProbe(syncRoot, context.config.runId);
   return assessSyncedFolderEvidence({
-    approvedTargetHash: sandbox.approval?.targetHash || null,
-    boundTargetHash: sandbox.syncTargetHash || null,
-    requiredClientState: profile?.requiredClientState || sandbox.syncTarget?.requiredClientState || null,
-    observedClientState: env[profile?.clientStateEnv || "S0_SYNC_CLIENT_STATE"] || null,
-    observedClientIdentity: env[profile?.clientIdentityEnv || "S0_SYNC_CLIENT_IDENTITY"] || null,
+    boundTargetHash,
+    syncApproval,
+    providerApprovalTargetHash,
+    requiredClientState,
+    observedClientState,
+    observedClientIdentity,
     configRevision: decisionConfigRevision(context.config),
     retainedEvidence: loadRetainedCrossClientEvidence(profile, env),
+    trustedPublicKey: resolveTrustedSignerKey(profile, env),
+    trustedFingerprint: profile?.trustedSignerFingerprint || null,
     probe,
   });
 }
