@@ -216,11 +216,17 @@ Any missing preflight item is `Blocked`. Convenience, existing access, or a succ
 
 | Platform | Minimum coverage | Status |
 |---|---|---|
-| Windows | Supported Windows release on NTFS; local private workspace, shared-workspace cache, and OneDrive synced-folder compatibility probe | **Complete — NTFS** |
-| macOS | Supported macOS release on APFS; local private workspace and shared-workspace cache | **Complete — APFS** |
-| Linux | Supported Linux distribution on ext4 or the CI/runtime default filesystem; local private workspace and shared-workspace cache | **Complete — runner-reported ext-family filesystem** |
+| Windows | Supported Windows release on NTFS; local private workspace, shared-workspace cache, and OneDrive synced-folder compatibility probe | **Historical — pending rerun (invalidated)** |
+| macOS | Supported macOS release on APFS; local private workspace and shared-workspace cache | **Historical — pending rerun (invalidated)** |
+| Linux | Supported Linux distribution on ext4 or the CI/runtime default filesystem; local private workspace and shared-workspace cache | **Historical — pending rerun (invalidated)** |
 
-The unchanged local harness ran on Windows/NTFS, macOS/APFS, and the Linux runner's detected ext-family filesystem. Each platform result is retained separately; no Windows result is reused as cross-platform evidence.
+These platform results are historical and invalidated: they predate current
+source. The local harness is **not** unchanged — the shared workspace contract,
+checksum, cross-process locking, migration, result schema, and the synced-folder
+(`S0-BCK-006`) evidence gate have all changed since these runs, so each platform
+must be rerun before its result can count. Until then every platform row is
+`Pending rerun`, not a pass, and no Windows result is reused as cross-platform
+evidence.
 
 WSL is not a separate product target for S0. If tested, it is recorded as a Linux compatibility result rather than evidence for native Windows behavior.
 

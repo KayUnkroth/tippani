@@ -24,6 +24,15 @@
     "defaultBranchExcluded": true,
     "ownershipMarker": "tippani-s0:s0-onedrive-live",
     "namespace": "tippani-s0/s0-onedrive-live",
+    "syncProfile": {
+      "syncRootEnv": "S0_ONEDRIVE_SYNC_ROOT",
+      "clientIdentityEnv": "S0_SYNC_CLIENT_IDENTITY",
+      "clientStateEnv": "S0_SYNC_CLIENT_STATE",
+      "requiredClientState": "verified-signed-in",
+      "requireIndependentClients": true,
+      "retainedEvidenceEnv": "S0_SYNC_CONFLICT_EVIDENCE",
+      "independentClientsEnv": "S0_SYNC_INDEPENDENT_CLIENTS"
+    },
     "coordinates": {
       "driveId": "supplied at runtime via S0_ONEDRIVE_DRIVE_ID",
       "folder": "supplied at runtime via S0_ONEDRIVE_FOLDER"

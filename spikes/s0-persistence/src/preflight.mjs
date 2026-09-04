@@ -83,6 +83,46 @@ export function providerTargetHash(target) {
   })}`;
 }
 
+export const SYNC_ROOT_ENV = "S0_ONEDRIVE_SYNC_ROOT";
+export const SYNC_CLIENT_IDENTITY_ENV = "S0_SYNC_CLIENT_IDENTITY";
+export const SYNC_CLIENT_STATE_ENV = "S0_SYNC_CLIENT_STATE";
+
+export function resolveSyncTarget(config, env = process.env) {
+  const profile = config?.sandbox?.syncProfile;
+  if (!profile || typeof profile !== "object") return null;
+  return {
+    provider: config?.backingPath || null,
+    kind: "onedrive-synced-folder",
+    syncRoot: env[profile.syncRootEnv || SYNC_ROOT_ENV] || null,
+    clientIdentity: env[profile.clientIdentityEnv || SYNC_CLIENT_IDENTITY_ENV] || null,
+    requiredClientState: profile.requiredClientState || null,
+    observedClientState: env[profile.clientStateEnv || SYNC_CLIENT_STATE_ENV] || null,
+    namespace: config?.sandbox?.namespace || null,
+  };
+}
+
+// The approved synced-folder binding hashes only the authorised sync root,
+// client identity, required client state, and namespace. It intentionally
+// excludes the observed client state so an unverified/default client can never
+// silently match the approved target.
+export function syncTargetHash(target) {
+  if (!target || typeof target !== "object") return null;
+  if (isRuntimePlaceholder(target.syncRoot) ||
+      isRuntimePlaceholder(target.clientIdentity) ||
+      isRuntimePlaceholder(target.requiredClientState) ||
+      isRuntimePlaceholder(target.namespace)) {
+    return null;
+  }
+  return `sha256:${hashTarget({
+    provider: target.provider,
+    kind: target.kind,
+    syncRoot: target.syncRoot,
+    clientIdentity: target.clientIdentity,
+    requiredClientState: target.requiredClientState,
+    namespace: target.namespace,
+  })}`;
+}
+
 function approvalFrom(config, env) {
   const declared = config?.sandbox?.approval || {};
   return {
@@ -138,6 +178,11 @@ export function resolveEffectiveProviderConfig(config, env = process.env, {
     effectiveTargetHash: providerTargetHash(target),
     approval: approvalFrom(resolved, env),
   };
+  const sync = resolveSyncTarget(resolved, env);
+  if (sync) {
+    resolved.sandbox.syncTarget = sync;
+    resolved.sandbox.syncTargetHash = syncTargetHash(sync);
+  }
   if (resolvedIdentity) {
     Object.defineProperty(resolved, TRUSTED_IDENTITY, {
       configurable: false,

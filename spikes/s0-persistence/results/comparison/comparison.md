@@ -1,6 +1,6 @@
 # S0 architecture-mapping handoff
 
-**Generated:** 2026-09-04T15:35:54.472Z
+**Generated:** 2026-09-04T16:14:57.994Z
 **Host:** not executed
 **Final ADR readiness:** Incomplete
 **ADR approval:** Pending; this generated comparison does not record human acceptance.

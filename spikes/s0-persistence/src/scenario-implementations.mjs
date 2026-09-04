@@ -1064,15 +1064,8 @@ async function providerPerformance(context) {
   return { evidence, measurements };
 }
 
-async function syncedFolderCompatibility(context) {
-  if (process.platform !== "win32") {
-    return { blocked: "Blocked — requires a Windows OneDrive sync-client profile." };
-  }
-  const syncRoot = process.env.S0_ONEDRIVE_SYNC_ROOT;
-  if (!syncRoot || !fs.existsSync(syncRoot)) {
-    return { blocked: BLOCKED_REASONS["S0-BCK-006"] };
-  }
-  const root = path.join(syncRoot, `tippani-s0-sync-${context.config.runId}-${Date.now().toString(36)}`);
+function sameDeviceSyncProbe(syncRoot, runId) {
+  const root = path.join(syncRoot, `tippani-s0-sync-${runId}-${Date.now().toString(36)}`);
   const file = path.join(root, "workspace.json");
   fs.mkdirSync(root, { recursive: true });
   const payload = JSON.stringify({ syntheticData: true, generation: 0 }) + "\n";
@@ -1097,20 +1090,117 @@ async function syncedFolderCompatibility(context) {
     }
     const observed = JSON.parse(fs.readFileSync(file, "utf8"));
     const siblingFiles = fs.readdirSync(root).filter((name) => name !== "workspace.json");
-    return {
-      evidence: {
-        syncClientState: process.env.S0_SYNC_CLIENT_STATE || "running",
-        probe: "same-device simultaneous file handles in a synced folder",
-        observedActor: observed.actor,
-        conflictFilesCreated: siblingFiles.length,
-        providerApiCasUsed: false,
-        limitation: "Compatibility probe only; a second synced device is required for true sync-conflict evidence.",
-      },
-      measurements: { syncedFolderCreateMs: createMs },
-    };
+    return { createMs, observedActor: observed.actor, conflictFilesCreated: siblingFiles.length };
   } finally {
     try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* best effort */ }
-    }
+  }
+}
+
+function loadRetainedConflictEvidence(profile, env) {
+  const variable = profile?.retainedEvidenceEnv || "S0_SYNC_CONFLICT_EVIDENCE";
+  const location = env[variable];
+  if (!location || !fs.existsSync(location)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(location, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Pure evidence gate for the separate synced-folder run. It refuses to turn an
+// arbitrary directory, an unverified/default sync client, or a non-observable
+// same-device probe into a Pass. Credible closure requires two independent sync
+// clients or retained conflict/recovery evidence; otherwise the honest result
+// is Incomplete rather than Pass.
+export function assessSyncedFolderEvidence({
+  approvedTargetHash = null,
+  boundTargetHash = null,
+  requiredClientState = null,
+  observedClientState = null,
+  observedClientIdentity = null,
+  independentClients = 1,
+  retainedConflictEvidence = null,
+  probe = {},
+} = {}) {
+  if (!boundTargetHash) {
+    return {
+      blocked: "Blocked — the synced-folder run has no approved sync-root/client-identity binding; " +
+        "an arbitrary directory or unverified client cannot satisfy S0-BCK-006.",
+    };
+  }
+  if (!approvedTargetHash || approvedTargetHash !== boundTargetHash) {
+    return {
+      blocked: "Blocked — the resolved sync root/client identity does not match the approved bound " +
+        "target hash; an arbitrary directory cannot pass S0-BCK-006.",
+    };
+  }
+  if (typeof observedClientIdentity !== "string" || !observedClientIdentity.trim()) {
+    return {
+      blocked: "Blocked — an approved OneDrive sync-client identity is required; none was observed.",
+    };
+  }
+  if (!requiredClientState || observedClientState !== requiredClientState) {
+    return {
+      blocked: `Blocked — synced-folder evidence requires the verified sync-client state ` +
+        `'${requiredClientState || "<approved>"}'; observed '${observedClientState || "unset"}'. ` +
+        "A default 'running' or unverified sync-client state cannot pass.",
+    };
+  }
+  const credibleClients = Number.isFinite(independentClients) && independentClients >= 2;
+  const credibleRetained = Boolean(retainedConflictEvidence) &&
+    (retainedConflictEvidence.conflict === true || retainedConflictEvidence.recovery === true);
+  if (!credibleClients && !credibleRetained) {
+    return {
+      skip: "Incomplete — a same-device handle probe is not credible synced-folder conflict evidence. " +
+        "Two independent OneDrive sync clients (or retained conflict/recovery evidence) are required; " +
+        "reporting Incomplete rather than Pass.",
+    };
+  }
+  return {
+    evidence: {
+      syncClientState: observedClientState,
+      syncClientIdentity: observedClientIdentity,
+      probe: credibleClients
+        ? "two independent OneDrive sync clients"
+        : "retained OneDrive sync conflict/recovery evidence",
+      ...(credibleClients ? { independentClients } : {}),
+      ...(Number.isFinite(probe.conflictFilesCreated)
+        ? { conflictFilesCreated: probe.conflictFilesCreated }
+        : {}),
+      ...(credibleRetained ? { retainedConflictEvidence } : {}),
+      providerApiCasUsed: false,
+      limitation: credibleClients
+        ? "Two independent sync clients observed; provider-API CAS is measured separately."
+        : "Closure relies on retained cross-device conflict/recovery evidence.",
+    },
+    measurements: Number.isFinite(probe.createMs) ? { syncedFolderCreateMs: probe.createMs } : {},
+  };
+}
+
+async function syncedFolderCompatibility(context) {
+  if (process.platform !== "win32") {
+    return { blocked: "Blocked — requires a Windows OneDrive sync-client profile." };
+  }
+  const env = process.env;
+  const sandbox = context.config?.sandbox || {};
+  const profile = sandbox.syncProfile || null;
+  const syncRoot = env[profile?.syncRootEnv || "S0_ONEDRIVE_SYNC_ROOT"];
+  if (!syncRoot || !fs.existsSync(syncRoot)) {
+    return { blocked: BLOCKED_REASONS["S0-BCK-006"] };
+  }
+  const probe = sameDeviceSyncProbe(syncRoot, context.config.runId);
+  const independentClientsRaw = env[profile?.independentClientsEnv || "S0_SYNC_INDEPENDENT_CLIENTS"];
+  return assessSyncedFolderEvidence({
+    approvedTargetHash: sandbox.approval?.targetHash || null,
+    boundTargetHash: sandbox.syncTargetHash || null,
+    requiredClientState: profile?.requiredClientState || sandbox.syncTarget?.requiredClientState || null,
+    observedClientState: env[profile?.clientStateEnv || "S0_SYNC_CLIENT_STATE"] || null,
+    observedClientIdentity: env[profile?.clientIdentityEnv || "S0_SYNC_CLIENT_IDENTITY"] || null,
+    independentClients: independentClientsRaw ? Number(independentClientsRaw) : 1,
+    retainedConflictEvidence: loadRetainedConflictEvidence(profile, env),
+    probe,
+  });
 }
 
 async function complexityRubric(context) {
