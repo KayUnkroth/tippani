@@ -410,23 +410,24 @@ comparison.
 
 A synced-folder **Pass cannot come from an environment client count or an
 arbitrary/self-signed JSON self-report.** The only credible closure is a retained
-cross-client evidence artifact bound to the approved `syncTargetHash` and config
-revision, listing at least two distinct immutable client IDs with non-future
-observed timestamps/operations, a recorded conflict or recovery outcome, approval
-metadata, and a **detached Ed25519 signature** verified by Node's `crypto` against
-the trusted signer whose SPKI fingerprint is pinned into `syncProfile` (and
-therefore the config revision). RSA/EC keys are rejected before verification, and
-an unkeyed SHA is forgeable and is not accepted. If no trusted key is configured,
-`Pass` is unreachable and the result is `Incomplete`. The run retains an
-independent authorization context — its own `syncTargetHash`, the full structured
-`syncApproval`, config revision, signer fingerprint, and the pre-write validation
-time — in both the raw run and the aggregate `separateSync` record. Comparison
-revalidates the signed proof against those retained independent values (not the
-proof's own fields) and reuses the retained validation time, so waiting can never
-make future-dated evidence valid. Until credible automatic proof exists, the
-**required future probe** is two independent OneDrive sync clients on separate
-devices that produce and sign such an artifact; a same-device handle probe only
-measures local compatibility and cannot close the gate.
+cross-client evidence artifact whose **detached Ed25519 signature covers the whole
+authorization context** — `syncTargetHash`, config revision, signer fingerprint,
+the sync approval (`targetHash`/approver/date/reference), the `validatedAt` time,
+and the clients/outcomes — verified by Node's `crypto` against the trusted signer
+whose SPKI fingerprint is pinned into `syncProfile` (and therefore the config
+revision). RSA/EC keys are rejected before verification, and an unkeyed SHA is
+forgeable and is not accepted. If no trusted key is configured, `Pass` is
+unreachable and the result is `Incomplete`. The signed authorization is retained
+**canonically identically** on both the raw run and the aggregate `separateSync`
+record; comparison requires the two copies to match, requires the retained
+authorization to be derived from (bound to) the signed proof, and rejects any
+`validatedAt` after the linked run's `completedAt` or the current time. Because the
+temporal bounds use the signed `validatedAt` capped by the current clock, waiting
+can never make future-dated (e.g. a 2099 proof with a fabricated 2100 receipt)
+evidence valid. Until credible automatic proof exists, the **required future
+probe** is two independent OneDrive sync clients on separate devices that produce
+and sign such an artifact; a same-device handle probe only measures local
+compatibility and cannot close the gate.
 
 ## Detection power
 

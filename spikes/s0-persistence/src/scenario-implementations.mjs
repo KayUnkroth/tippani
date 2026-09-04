@@ -1171,7 +1171,6 @@ async function syncedFolderCompatibility(context) {
     trustedPublicKey: resolveTrustedSignerKey(profile, env),
     trustedFingerprint: profile?.trustedSignerFingerprint || null,
     now: validationTime,
-    validatedAt: new Date(validationTime).toISOString(),
     probe,
   });
 }

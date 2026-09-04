@@ -152,6 +152,9 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
     linkedCampaigns.push({ name: campaign?.name, run: linked });
   }
   const claimedResults = Array.isArray(run?.results) ? run.results : [];
+  if (!run || !("campaignVariability" in run)) {
+    errors.push("aggregate is missing campaignVariability");
+  }
   if (!recomputable || linkedCampaigns.length !== campaigns.length) {
     for (const result of claimedResults) {
       if (result.scenarioId === "S0-BCK-006") continue;
@@ -177,11 +180,12 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
       errors.push(`${result.scenarioId} aggregate result does not match the recomputed linked-campaign result`);
     }
   }
-  if ("campaignVariability" in (run || {})) {
-    const recomputedVariability = campaignVariability(linkedCampaigns);
-    if (stableJson(run.campaignVariability || {}) !== stableJson(recomputedVariability)) {
-      errors.push("aggregate campaignVariability does not match the recomputed linked-campaign variability");
-    }
+  // campaignVariability is always required and canonically compared; an absent
+  // aggregate value recomputes to an explicit empty object.
+  const recomputedVariability = campaignVariability(linkedCampaigns) || {};
+  if (("campaignVariability" in (run || {})) &&
+      stableJson(run.campaignVariability || {}) !== stableJson(recomputedVariability)) {
+    errors.push("aggregate campaignVariability does not match the recomputed linked-campaign variability");
   }
   return errors;
 }
@@ -231,13 +235,10 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
         // re-verifies against the independent retained authorization context and
         // the original validation time (never the proof's own fields).
         if (linkedStatus === "Pass") {
-          const authorization = sync.syncAuthorization ||
-            linkedBck.evidence?.syncAuthorization || null;
-          const proof = sync.crossClientEvidence ||
-            linkedBck.evidence?.crossClientEvidence || null;
           const proofErrors = verifyRetainedSyncProof({
-            proof,
-            authorization,
+            linkedResult: linkedBck,
+            separateRecord: sync,
+            linkedCompletedAt: linked?.completedAt || null,
             expectedConfigRevision: decisionConfigRevision(config),
             expectedSignerFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
           });

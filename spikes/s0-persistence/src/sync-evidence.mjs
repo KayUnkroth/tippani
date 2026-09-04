@@ -90,12 +90,21 @@ export function validateCrossClientEvidence(artifact, {
       new Set(ids).size !== ids.length) {
     errors.push("client IDs must be distinct, immutable, non-empty identifiers");
   }
+  // validatedAt is part of the signed payload and bounds every observed/approval
+  // timestamp. It must not be in the future relative to the caller's clock.
+  const validatedAt = Date.parse(artifact.validatedAt);
+  if (typeof artifact.validatedAt !== "string" || !Number.isFinite(validatedAt)) {
+    errors.push("evidence validatedAt is missing or invalid");
+  } else if (validatedAt > now) {
+    errors.push("evidence validatedAt is in the future");
+  }
+  const upperBound = Number.isFinite(validatedAt) ? Math.min(validatedAt, now) : now;
   for (const client of clients) {
     const label = client?.clientId || "<unknown>";
     const observed = Date.parse(client?.observedAt);
     if (typeof client?.observedAt !== "string" || !Number.isFinite(observed)) {
       errors.push(`client ${label} lacks a valid observed timestamp`);
-    } else if (observed > now) {
+    } else if (observed > upperBound) {
       errors.push(`client ${label} has an observed timestamp in the future`);
     }
     if (!Array.isArray(client?.operations) || client.operations.length === 0) {
@@ -112,8 +121,11 @@ export function validateCrossClientEvidence(artifact, {
       typeof approval.approvedAt !== "string" || !Number.isFinite(approvedAt) ||
       typeof approval.reference !== "string" || !approval.reference.trim()) {
     errors.push("evidence approval requires approver, approvedAt, and reference");
-  } else if (approvedAt > now) {
+  } else if (approvedAt > upperBound) {
     errors.push("evidence approval date is in the future");
+  }
+  if (!approval.targetHash || approval.targetHash !== boundTargetHash) {
+    errors.push("evidence approval is not bound to the sync target hash");
   }
   if (!trustedFingerprint) {
     errors.push("no trusted signer fingerprint is configured; a signed cross-client artifact cannot be verified");
@@ -212,7 +224,6 @@ export function assessSyncedFolderEvidence({
   trustedPublicKey = null,
   trustedFingerprint = null,
   now = Date.now(),
-  validatedAt = new Date(now).toISOString(),
   probe = {},
 } = {}) {
   const approvedTargetHash = syncApproval?.targetHash || null;
@@ -243,18 +254,19 @@ export function assessSyncedFolderEvidence({
     };
   }
   const signerPublicKey = toPublicKey(trustedPublicKey);
-  // The independent pre-write authorization context is retained alongside the
-  // proof so comparison revalidates against these values (not the proof's own
-  // fields) and reuses the original validation time.
+  // The authorization context is DERIVED from the signed artifact (its approval
+  // and validatedAt are inside the signature), plus the trusted public key so the
+  // proof can be re-verified offline. It is retained identically on the raw run
+  // and the aggregate separateSync record.
   const authorization = {
-    syncTargetHash: boundTargetHash,
-    syncApproval: { ...syncApproval },
-    configRevision,
-    signerFingerprint: trustedFingerprint,
+    syncTargetHash: retainedEvidence.syncTargetHash,
+    syncApproval: { ...retainedEvidence.approval },
+    configRevision: retainedEvidence.configRevision,
+    signerFingerprint: retainedEvidence.signerFingerprint,
     signerPublicKey: signerPublicKey
       ? signerPublicKey.export({ type: "spki", format: "pem" })
       : null,
-    validatedAt,
+    validatedAt: retainedEvidence.validatedAt,
   };
   return {
     evidence: {
@@ -285,65 +297,87 @@ export function assessSyncedFolderEvidence({
 // Comparison-side revalidation of a retained synced-folder proof. It uses the
 // independent retained authorization (its own syncTargetHash, full syncApproval,
 // config revision, signer fingerprint) and the original validation time — never
-// the proof's own fields — so waiting cannot make future evidence valid.
+// Comparison-side revalidation of a retained synced-folder proof. It requires the
+// linked-raw and separateSync copies to be canonically identical, requires the
+// retained authorization to be bound to (derived from) the signed proof, rejects a
+// validatedAt after the linked run completion or the current time, and rejects
+// future observed/approval timestamps independent of the caller-supplied clock.
 export function verifyRetainedSyncProof({
-  proof = null,
-  authorization = null,
+  linkedResult = null,
+  separateRecord = null,
+  linkedCompletedAt = null,
   expectedConfigRevision = null,
   expectedSignerFingerprint = null,
   providerApprovalTargetHash = null,
+  now = Date.now(),
 } = {}) {
   const errors = [];
+  const proofLinked = linkedResult?.evidence?.crossClientEvidence || null;
+  const authLinked = linkedResult?.evidence?.syncAuthorization || null;
+  const proofSeparate = separateRecord?.crossClientEvidence || null;
+  const authSeparate = separateRecord?.syncAuthorization || null;
+  if (stableJson(proofLinked) !== stableJson(proofSeparate)) {
+    errors.push("linked and separate synced-folder proof copies are not canonically identical");
+  }
+  if (stableJson(authLinked) !== stableJson(authSeparate)) {
+    errors.push("linked and separate synced-folder authorization copies are not canonically identical");
+  }
+  const proof = proofLinked;
+  const authorization = authLinked;
+  if (!proof || typeof proof !== "object") {
+    errors.push("retained synced-folder proof is missing");
+    return errors;
+  }
   if (!authorization || typeof authorization !== "object") {
     errors.push("retained sync authorization context is missing");
     return errors;
   }
-  const {
-    syncTargetHash = null,
-    syncApproval = null,
-    configRevision = null,
-    signerFingerprint = null,
-    signerPublicKey = null,
-    validatedAt = null,
-  } = authorization;
-  if (!syncTargetHash) errors.push("retained sync authorization has no independent sync target hash");
-  if (expectedConfigRevision && configRevision !== expectedConfigRevision) {
+  // The retained authorization must be derived from the signed proof, so it
+  // cannot be altered without breaking the signature.
+  const derived = {
+    syncTargetHash: proof.syncTargetHash ?? null,
+    syncApproval: proof.approval ?? null,
+    configRevision: proof.configRevision ?? null,
+    signerFingerprint: proof.signerFingerprint ?? null,
+    validatedAt: proof.validatedAt ?? null,
+  };
+  const authorizationCore = {
+    syncTargetHash: authorization.syncTargetHash ?? null,
+    syncApproval: authorization.syncApproval ?? null,
+    configRevision: authorization.configRevision ?? null,
+    signerFingerprint: authorization.signerFingerprint ?? null,
+    validatedAt: authorization.validatedAt ?? null,
+  };
+  if (stableJson(derived) !== stableJson(authorizationCore)) {
+    errors.push("retained sync authorization is not bound to the signed proof");
+  }
+  if (expectedConfigRevision && authorization.configRevision !== expectedConfigRevision) {
     errors.push("retained sync authorization config revision is stale");
   }
-  if (expectedSignerFingerprint && signerFingerprint !== expectedSignerFingerprint) {
+  if (expectedSignerFingerprint && authorization.signerFingerprint !== expectedSignerFingerprint) {
     errors.push("retained sync authorization signer fingerprint does not match the trusted signer");
   }
-  const validationTime = Date.parse(validatedAt);
-  if (typeof validatedAt !== "string" || !Number.isFinite(validationTime)) {
+  if (providerApprovalTargetHash && proof.approval?.targetHash === providerApprovalTargetHash) {
+    errors.push("retained sync approval reuses the provider-API target hash");
+  }
+  const validationTime = Date.parse(authorization.validatedAt);
+  const completed = linkedCompletedAt ? Date.parse(linkedCompletedAt) : NaN;
+  if (typeof authorization.validatedAt !== "string" || !Number.isFinite(validationTime)) {
     errors.push("retained sync authorization has no valid validation time");
-  }
-  // Approval-record checks, independent of the (non-retained) client state.
-  if (!syncApproval || typeof syncApproval !== "object" || !syncApproval.targetHash) {
-    errors.push("retained sync approval record is missing an approval target hash");
   } else {
-    if (providerApprovalTargetHash && syncApproval.targetHash === providerApprovalTargetHash) {
-      errors.push("retained sync approval reuses the provider-API target hash");
-    }
-    if (syncTargetHash && syncApproval.targetHash !== syncTargetHash) {
-      errors.push("retained sync approval target hash does not match the retained sync target");
-    }
-    const approvedAt = Date.parse(syncApproval.approvedAt);
-    if (typeof syncApproval.approver !== "string" || !syncApproval.approver.trim() ||
-        typeof syncApproval.approvedAt !== "string" || !Number.isFinite(approvedAt) ||
-        typeof syncApproval.reference !== "string" || !syncApproval.reference.trim()) {
-      errors.push("retained sync approval requires approver, approval date, and reference");
-    } else if (Number.isFinite(validationTime) && approvedAt > validationTime) {
-      errors.push("retained sync approval date is after the validation time");
+    if (validationTime > now) errors.push("retained validatedAt is after the current time");
+    if (Number.isFinite(completed) && validationTime > completed) {
+      errors.push("retained validatedAt is after the linked run completedAt");
     }
   }
-  const trustedKey = toPublicKey(signerPublicKey);
+  const trustedKey = toPublicKey(authorization.signerPublicKey);
   const evidenceErrors = validateCrossClientEvidence(proof, {
-    approvedTargetHash: syncTargetHash,
-    boundTargetHash: syncTargetHash,
-    configRevision,
+    approvedTargetHash: authorization.syncTargetHash,
+    boundTargetHash: authorization.syncTargetHash,
+    configRevision: authorization.configRevision,
     trustedPublicKey: trustedKey,
-    trustedFingerprint: signerFingerprint,
-    now: Number.isFinite(validationTime) ? validationTime : Date.now(),
+    trustedFingerprint: authorization.signerFingerprint,
+    now,
   });
   errors.push(...evidenceErrors);
   return errors;

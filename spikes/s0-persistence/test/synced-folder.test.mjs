@@ -13,6 +13,7 @@ import {
   EVIDENCE_KIND,
   assessSyncedFolderEvidence,
   validateCrossClientEvidence,
+  verifyRetainedSyncProof,
   evidenceSigningPayload,
   publicKeyFingerprint,
   verifyEvidenceSignature,
@@ -59,12 +60,14 @@ function signedArtifact(overrides = {}) {
     syncTargetHash: approvedHash,
     configRevision,
     signerFingerprint,
+    validatedAt: new Date(now - 30000).toISOString(),
     clients: [
       { clientId: "device-A-9f2c", observedAt: new Date(now - 120000).toISOString(), operations: ["create", "edit"] },
       { clientId: "device-B-1a77", observedAt: new Date(now - 60000).toISOString(), operations: ["edit"] },
     ],
     outcomes: { conflict: true, recovery: true, conflictArtifacts: ["workspace-device-B.json"] },
     approval: {
+      targetHash: approvedHash,
       approver: "Windows sync-client test owner",
       approvedAt: new Date(now - 120000).toISOString(),
       reference: "syn-sync-001",
@@ -310,32 +313,148 @@ await check("an EC trusted key is rejected before signature verification", () =>
   assert.match(detail.skip, /must be an Ed25519 key/);
 });
 
-await check("a valid Pass retains an independent authorization context and validation time", () => {
+await check("a valid Pass retains an authorization context derived from the signed proof", () => {
   const base = Date.parse("2026-09-04T00:00:00.000Z");
-  const validatedAt = new Date(base).toISOString();
+  const validatedAt = new Date(base - 30000).toISOString();
+  const approval = {
+    targetHash: approvedHash,
+    approver: "Windows sync-client test owner",
+    approvedAt: new Date(base - 120000).toISOString(),
+    reference: "syn-sync-001",
+  };
   const artifact = signedArtifact({
+    validatedAt,
+    approval,
     clients: [
       { clientId: "device-A", observedAt: new Date(base - 120000).toISOString(), operations: ["create"] },
       { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
     ],
-    approval: {
-      approver: "Windows sync-client test owner",
-      approvedAt: new Date(base - 120000).toISOString(),
-      reference: "syn-sync-001",
-    },
   });
-  const detail = assessSyncedFolderEvidence(baseInput({
-    retainedEvidence: artifact,
-    now: base,
-    validatedAt,
-  }));
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact, now: base }));
   assert.ok(detail.evidence);
   const authorization = detail.evidence.syncAuthorization;
   assert.equal(authorization.syncTargetHash, approvedHash);
   assert.equal(authorization.validatedAt, validatedAt);
   assert.equal(authorization.configRevision, configRevision);
   assert.equal(authorization.signerFingerprint, signerFingerprint);
-  assert.deepEqual(authorization.syncApproval, syncApproval);
+  assert.deepEqual(authorization.syncApproval, approval);
+});
+
+const pem = publicKey.export({ type: "spki", format: "pem" });
+function retainedPair({ base = Date.now(), artifactOverrides = {} } = {}) {
+  const artifact = signedArtifact({
+    validatedAt: new Date(base - 30000).toISOString(),
+    clients: [
+      { clientId: "device-A", observedAt: new Date(base - 120000).toISOString(), operations: ["create"] },
+      { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
+    ],
+    approval: {
+      targetHash: approvedHash,
+      approver: "S0 sync approver",
+      approvedAt: new Date(base - 120000).toISOString(),
+      reference: "syn-retained-1",
+    },
+    ...artifactOverrides,
+  });
+  const authorization = {
+    syncTargetHash: artifact.syncTargetHash,
+    syncApproval: artifact.approval,
+    configRevision: artifact.configRevision,
+    signerFingerprint: artifact.signerFingerprint,
+    signerPublicKey: pem,
+    validatedAt: artifact.validatedAt,
+  };
+  const linkedResult = {
+    scenarioId: "S0-BCK-006",
+    status: "Pass",
+    evidence: { crossClientEvidence: artifact, syncAuthorization: authorization },
+  };
+  const separateRecord = { crossClientEvidence: artifact, syncAuthorization: authorization };
+  return { artifact, authorization, linkedResult, separateRecord };
+}
+
+await check("retained sync proof re-verifies against a valid current signed receipt", () => {
+  const base = Date.now();
+  const { linkedResult, separateRecord } = retainedPair({ base });
+  assert.deepEqual(
+    verifyRetainedSyncProof({
+      linkedResult,
+      separateRecord,
+      linkedCompletedAt: new Date(base + 1000).toISOString(),
+      expectedConfigRevision: configRevision,
+      expectedSignerFingerprint: signerFingerprint,
+    }),
+    [],
+  );
+});
+
+await check("a 2099 proof with a fabricated 2100 validatedAt is rejected today", () => {
+  const base2099 = Date.parse("2099-01-01T00:00:00.000Z");
+  const validatedAt = "2100-01-01T00:00:00.000Z";
+  const artifact = signedArtifact({
+    validatedAt,
+    clients: [
+      { clientId: "A", observedAt: new Date(base2099).toISOString(), operations: ["edit"] },
+      { clientId: "B", observedAt: new Date(base2099 + 1000).toISOString(), operations: ["edit"] },
+    ],
+    approval: { targetHash: approvedHash, approver: "R", approvedAt: new Date(base2099).toISOString(), reference: "r" },
+  });
+  const authorization = {
+    syncTargetHash: artifact.syncTargetHash,
+    syncApproval: artifact.approval,
+    configRevision: artifact.configRevision,
+    signerFingerprint: artifact.signerFingerprint,
+    signerPublicKey: pem,
+    validatedAt,
+  };
+  const linkedResult = { scenarioId: "S0-BCK-006", status: "Pass", evidence: { crossClientEvidence: artifact, syncAuthorization: authorization } };
+  const separateRecord = { crossClientEvidence: artifact, syncAuthorization: authorization };
+  const errors = verifyRetainedSyncProof({
+    linkedResult,
+    separateRecord,
+    linkedCompletedAt: new Date(base2099 + 2000).toISOString(),
+    expectedConfigRevision: configRevision,
+    expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /validatedAt is after the current time/.test(error)));
+  assert(errors.some((error) => /validatedAt is in the future/.test(error)));
+});
+
+await check("an altered retained approval breaks the binding to the signed proof", () => {
+  const { linkedResult, separateRecord } = retainedPair({});
+  const forge = (record) => {
+    record.syncAuthorization = structuredClone(record.syncAuthorization);
+    record.syncAuthorization.syncApproval = { ...record.syncAuthorization.syncApproval, reference: "forged" };
+  };
+  forge(linkedResult.evidence);
+  forge(separateRecord);
+  const errors = verifyRetainedSyncProof({
+    linkedResult, separateRecord,
+    expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /authorization is not bound to the signed proof/.test(error)));
+});
+
+await check("an altered retained validatedAt breaks the binding to the signed proof", () => {
+  const { linkedResult, separateRecord } = retainedPair({});
+  const altered = "2026-09-04T09:00:00.000Z";
+  linkedResult.evidence.syncAuthorization = { ...linkedResult.evidence.syncAuthorization, validatedAt: altered };
+  separateRecord.syncAuthorization = { ...separateRecord.syncAuthorization, validatedAt: altered };
+  const errors = verifyRetainedSyncProof({
+    linkedResult, separateRecord,
+    expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /authorization is not bound to the signed proof/.test(error)));
+});
+
+await check("linked and separate retained copies must be canonically identical", () => {
+  const { linkedResult, separateRecord } = retainedPair({});
+  separateRecord.syncAuthorization = { ...separateRecord.syncAuthorization, validatedAt: "2026-09-04T09:00:00.000Z" };
+  const errors = verifyRetainedSyncProof({
+    linkedResult, separateRecord,
+    expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /not canonically identical/.test(error)));
 });
 
 console.log(`s0-synced-folder: ${pass} passed, ${fail} failed`);

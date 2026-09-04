@@ -275,6 +275,15 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     "a mutated campaignVariability must be rejected",
   );
 
+  // A missing campaignVariability field must be rejected.
+  const variabilityMissing = structuredClone(run);
+  delete variabilityMissing.campaignVariability;
+  assert(
+    validateExistingRun(variabilityMissing, config, { artifactPath: aggregatePath })
+      .some((error) => /aggregate is missing campaignVariability/.test(error)),
+    "a missing campaignVariability field must be rejected",
+  );
+
   // An approval that does not match the linked preflight must be rejected.
   const approvalMismatch = structuredClone(run);
   approvalMismatch.campaignApprovals[0].approval.reference = "syn-forged";
@@ -447,7 +456,7 @@ await check("comparison resolves and verifies the separate synced-folder (S0-BCK
   };
   assert(
     verifySeparateSync(passRun, config, { artifactPath: aggregatePath })
-      .some((error) => /proof .*(authorization context is missing|no structured retained cross-client evidence)/.test(error)),
+      .some((error) => /proof .*(proof is missing|authorization context is missing)/.test(error)),
     "a claimed sync Pass with empty signed proof/authorization must be rejected",
   );
 
@@ -468,37 +477,34 @@ await check("separate sync comparison verifies the complete signed proof, approv
   const targetHash = "sha256:sync-target-hash-test";
   const base = Date.parse("2026-09-04T00:00:00.000Z");
   const validatedAt = new Date(base).toISOString();
-  const syncApproval = {
-    targetHash,
-    approver: "S0 sync approver",
-    approvedAt: new Date(base - 600000).toISOString(),
-    reference: "syn-approval-1",
-  };
   const proof = {
     schemaVersion: 1,
     kind: EVIDENCE_KIND,
     syncTargetHash: targetHash,
     configRevision,
     signerFingerprint: fingerprint,
+    validatedAt,
     clients: [
       { clientId: "device-A", observedAt: new Date(base - 120000).toISOString(), operations: ["create"] },
       { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
     ],
     outcomes: { conflict: true },
     approval: {
+      targetHash,
       approver: "Windows sync-client test owner",
       approvedAt: new Date(base - 120000).toISOString(),
       reference: "syn-proof-1",
     },
   };
   proof.signature = crypto.sign(null, evidenceSigningPayload(proof), privateKey).toString("base64");
+  // The authorization is derived from the signed proof.
   const authorization = {
-    syncTargetHash: targetHash,
-    syncApproval,
-    configRevision,
-    signerFingerprint: fingerprint,
+    syncTargetHash: proof.syncTargetHash,
+    syncApproval: proof.approval,
+    configRevision: proof.configRevision,
+    signerFingerprint: proof.signerFingerprint,
     signerPublicKey: pem,
-    validatedAt,
+    validatedAt: proof.validatedAt,
   };
   const bckEvidence = {
     crossClientEvidence: proof,
@@ -517,6 +523,7 @@ await check("separate sync comparison verifies the complete signed proof, approv
   const syncRun = {
     schemaVersion: 2,
     evidenceIdentity: identity,
+    completedAt: new Date(base + 1000).toISOString(),
     configuration: {
       configurationId: config.configurationId,
       adapter: config.adapter,
@@ -557,14 +564,21 @@ await check("separate sync comparison verifies the complete signed proof, approv
   };
   assert.deepEqual(verifySeparateSync(run, config, { artifactPath: aggregatePath }), []);
 
-  // Mutating the retained sync approval must fail revalidation.
+  // Mutating the retained sync approval in both copies breaks the signed binding.
   const badApproval = structuredClone(run);
-  badApproval.separateSync.syncAuthorization.syncApproval.reference = "";
+  badApproval.separateSync.syncAuthorization.syncApproval = {
+    ...badApproval.separateSync.syncAuthorization.syncApproval, reference: "forged",
+  };
+  const badLinked = JSON.parse(fs.readFileSync(path.join(syncDir, "raw-results.json"), "utf8"));
+  badLinked.results[0].evidence.syncAuthorization.syncApproval.reference = "forged";
+  fs.writeFileSync(path.join(syncDir, "raw-results.json"), Buffer.from(JSON.stringify(badLinked)));
+  badApproval.separateSync.rawSha256 = `sha256:${sha256(fs.readFileSync(path.join(syncDir, "raw-results.json")))}`;
   assert(
     verifySeparateSync(badApproval, config, { artifactPath: aggregatePath })
-      .some((error) => /approval requires approver, approval date, and reference/.test(error)),
-    "a mutated sync approval must be rejected",
+      .some((error) => /authorization is not bound to the signed proof/.test(error)),
+    "a mutated retained sync approval must be rejected",
   );
+  fs.writeFileSync(path.join(syncDir, "raw-results.json"), syncRawBytes);
 
   // Mutating the complete aggregate result must fail the full-result comparison.
   const badResult = structuredClone(run);
