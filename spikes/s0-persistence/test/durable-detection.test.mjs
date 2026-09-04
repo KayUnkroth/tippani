@@ -8,9 +8,16 @@
 process.env.S0_ENABLE_TEST_MUTANTS = "1";
 
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 // Imported dynamically: a static import is hoisted above the assignment above,
 // which would evaluate the adapter registry before mutants are enabled.
 const { runHarness } = await import("../src/runner.mjs");
+const { raceWorkers } = await import("../src/process-runner.mjs");
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const spikeRoot = path.dirname(here);
 
 let pass = 0;
 let fail = 0;
@@ -108,6 +115,35 @@ await check("healthy candidates still pass the same durable scenarios", async ()
         `${adapter} failed ${scenarioId}: ${result.error?.message || result.reason}`,
       );
     }
+  }
+});
+
+await check("worker initialization failures surface barrier diagnostics", async () => {
+  const directory = path.join(spikeRoot, ".test-state", "barrier-initialize-error");
+  fs.rmSync(directory, { recursive: true, force: true });
+  fs.mkdirSync(directory, { recursive: true });
+  const invalidRoot = path.join(directory, "not-a-directory");
+  fs.writeFileSync(invalidRoot, "synthetic blocker");
+  try {
+    await assert.rejects(
+      raceWorkers([[
+        "--mode=write",
+        "--adapter=local-cas",
+        `--root=${invalidRoot}`,
+        "--workspace=syn-ws-barrier-initialize-error",
+        "--expected=0",
+      ]], { timeoutMs: 5_000 }),
+      (error) => {
+        assert.equal(error.code, "worker_barrier_failed");
+        assert.equal(error.worker?.report?.status, "error");
+        assert.equal(error.worker?.report?.phase, "initialize");
+        assert.match(error.message, /Worker exited before reaching the barrier/);
+        assert.match(error.message, /ENOTDIR|not a directory/i);
+        return true;
+      },
+    );
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 

@@ -13,9 +13,12 @@ import {
   WorkspaceConflictError,
   WorkspaceNotFoundError,
   WorkspaceStoreError,
+  DURABLE_IDENTITY_CHECKSUM_VERSION,
+  LEGACY_WORKSPACE_CHECKSUM_VERSION,
   applyWorkspaceOperation,
   assertReconcilable,
   checksumWorkspace,
+  checksumWorkspaceV1,
   deepClone,
   needsReconciliation,
   validateWorkspaceRecord,
@@ -55,7 +58,8 @@ export class LocalSqliteWorkspaceStore {
         schema_version INTEGER NOT NULL,
         generation     INTEGER NOT NULL,
         payload        TEXT NOT NULL,
-        checksum       TEXT NOT NULL
+        checksum       TEXT NOT NULL,
+        checksum_version INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS aliases (
         alias        TEXT PRIMARY KEY,
@@ -77,14 +81,19 @@ export class LocalSqliteWorkspaceStore {
       if (!workspaceColumns.some((column) => column.name === "checksum")) {
         this.db.exec("ALTER TABLE workspaces ADD COLUMN checksum TEXT");
       }
+      if (!workspaceColumns.some((column) => column.name === "checksum_version")) {
+        this.db.exec("ALTER TABLE workspaces ADD COLUMN checksum_version INTEGER");
+      }
       const legacyRows = this.db.prepare(`
-        SELECT workspace_id, payload
+        SELECT workspace_id, payload, checksum, checksum_version
         FROM workspaces
         WHERE checksum IS NULL OR checksum = ''
+           OR checksum_version IS NULL
+           OR checksum_version != ${DURABLE_IDENTITY_CHECKSUM_VERSION}
         ORDER BY workspace_id
       `).all();
       const updateChecksum = this.db.prepare(
-        "UPDATE workspaces SET checksum = ? WHERE workspace_id = ?",
+        "UPDATE workspaces SET checksum = ?, checksum_version = ? WHERE workspace_id = ?",
       );
       for (const row of legacyRows) {
         let parsed;
@@ -101,8 +110,38 @@ export class LocalSqliteWorkspaceStore {
             `Workspace ${row.workspace_id} cannot be upgraded because its payload identity differs`,
           );
         }
+        const identityChecksum = checksumWorkspace(parsed, row.workspace_id);
+        const legacyChecksum = checksumWorkspaceV1(parsed);
+        if (row.checksum_version === LEGACY_WORKSPACE_CHECKSUM_VERSION &&
+            row.checksum !== legacyChecksum) {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} failed legacy checksum validation`,
+          );
+        }
+        if (row.checksum_version === DURABLE_IDENTITY_CHECKSUM_VERSION &&
+            row.checksum !== identityChecksum) {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} failed durable-identity checksum validation`,
+          );
+        }
+        if (row.checksum_version === null && row.checksum &&
+            row.checksum !== legacyChecksum && row.checksum !== identityChecksum) {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} has an invalid unversioned checksum`,
+          );
+        }
+        if (row.checksum_version !== null &&
+            ![
+              LEGACY_WORKSPACE_CHECKSUM_VERSION,
+              DURABLE_IDENTITY_CHECKSUM_VERSION,
+            ].includes(row.checksum_version)) {
+          throw new CorruptWorkspaceStoreError(
+            `Workspace ${row.workspace_id} has an unsupported checksum version`,
+          );
+        }
         updateChecksum.run(
-          checksumWorkspace(parsed, row.workspace_id),
+          identityChecksum,
+          DURABLE_IDENTITY_CHECKSUM_VERSION,
           row.workspace_id,
         );
         faultInjector?.hit("during-checksum-backfill");
@@ -111,6 +150,8 @@ export class LocalSqliteWorkspaceStore {
         SELECT COUNT(*) AS n
         FROM workspaces
         WHERE checksum IS NULL OR checksum = ''
+           OR checksum_version IS NULL
+           OR checksum_version != ${DURABLE_IDENTITY_CHECKSUM_VERSION}
       `).get().n;
       if (remaining !== 0) {
         throw new CorruptWorkspaceStoreError("Checksum backfill left incomplete rows");
@@ -143,7 +184,7 @@ export class LocalSqliteWorkspaceStore {
     }
     const row = this.db
       .prepare(`
-        SELECT payload, schema_version, generation, checksum
+        SELECT payload, schema_version, generation, checksum, checksum_version
         FROM workspaces
         WHERE workspace_id = ?
       `)
@@ -168,6 +209,11 @@ export class LocalSqliteWorkspaceStore {
         `Workspace ${workspaceId} generation columns disagree`,
       );
     }
+    if (row.checksum_version !== DURABLE_IDENTITY_CHECKSUM_VERSION) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} has an unsupported checksum version`,
+      );
+    }
     if (row.checksum !== checksumWorkspace(parsed, workspaceId)) {
       throw new CorruptWorkspaceStoreError(
         `Workspace ${workspaceId} failed checksum validation`,
@@ -185,12 +231,15 @@ export class LocalSqliteWorkspaceStore {
   writeRows(workspace) {
     this.db
       .prepare(`
-        INSERT INTO workspaces (workspace_id, schema_version, generation, payload, checksum)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO workspaces (
+          workspace_id, schema_version, generation, payload, checksum, checksum_version
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(workspace_id) DO UPDATE SET schema_version = excluded.schema_version,
                                                 generation = excluded.generation,
                                                 payload = excluded.payload,
-                                                checksum = excluded.checksum
+                                                checksum = excluded.checksum,
+                                                checksum_version = excluded.checksum_version
       `)
       .run(
         workspace.workspaceId,
@@ -198,6 +247,7 @@ export class LocalSqliteWorkspaceStore {
         workspace.generation,
         JSON.stringify(workspace),
         checksumWorkspace(workspace, workspace.workspaceId),
+        DURABLE_IDENTITY_CHECKSUM_VERSION,
       );
     this.db.prepare("DELETE FROM aliases WHERE workspace_id = ?").run(workspace.workspaceId);
     const insert = this.db.prepare("INSERT INTO aliases (alias, workspace_id) VALUES (?, ?)");

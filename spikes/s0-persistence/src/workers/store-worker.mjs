@@ -10,9 +10,12 @@
 //   observe       - poll until a target generation is visible
 //   crash         - hard-exit at a named commit boundary during a mutation
 //   migration-crash - hard-exit at a named boundary during a migration
+//   checksum-backfill-crash - hard-exit while upgrading checksum metadata
+//   lock-reclaim-crash - hard-exit while reclaiming a stale filesystem lock
 //   read          - reopen the store and report durable state
 
 import { createStore } from "../adapters/registry.mjs";
+import { acquireLock } from "../adapters/fs-atomic.mjs";
 import { IpcOperationBudget, OperationBudget } from "../operation-budget.mjs";
 
 function argOf(name, fallback = null) {
@@ -35,6 +38,7 @@ const crashAt = argOf("crash-at", "before-commit");
 const op = argOf("op", "audit");
 const alias = argOf("alias", `syn-alias-crash-${process.pid}`);
 const deadlineMs = Number(argOf("deadline-ms", "30000"));
+const deferInitialize = argOf("defer-initialize", "false") === "true";
 const abortController = new AbortController();
 const deadlineTimer = providerLive
   ? setTimeout(() => abortController.abort(), deadlineMs)
@@ -75,14 +79,55 @@ function crashOperation() {
   return { auditEvent: { actor, action: "crash-write" } };
 }
 
+async function waitForInitializationSignal() {
+  if (!deferInitialize || !process.send) return;
+  await new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message !== "init") return;
+      process.off("disconnect", onDisconnect);
+      process.off("message", onMessage);
+      resolve();
+    };
+    const onDisconnect = () => {
+      process.off("message", onMessage);
+      reject(new Error("Parent disconnected before initializing the worker"));
+    };
+    process.on("message", onMessage);
+    process.once("disconnect", onDisconnect);
+    process.send({ booted: true });
+  });
+}
+
 async function waitForRelease() {
   if (!process.send) return;
-  process.send({ ready: true });
-  await new Promise((resolve) => {
-    process.on("message", (message) => {
-      if (message === "go") resolve();
-    });
+  await new Promise((resolve, reject) => {
+    const onMessage = (message) => {
+      if (message !== "go") return;
+      process.off("disconnect", onDisconnect);
+      process.off("message", onMessage);
+      resolve();
+    };
+    const onDisconnect = () => {
+      process.off("message", onMessage);
+      reject(new Error("Parent disconnected before releasing the worker barrier"));
+    };
+    process.on("message", onMessage);
+    process.once("disconnect", onDisconnect);
+    process.send({ ready: true });
   });
+}
+
+try {
+  await waitForInitializationSignal();
+} catch (error) {
+  report({
+    status: "error",
+    phase: "initialize",
+    name: error?.name,
+    code: error?.code,
+    message: error?.message,
+  });
+  process.exit(1);
 }
 
 if (mode === "budget-probe") {
@@ -92,29 +137,67 @@ if (mode === "budget-probe") {
     report({ status: "budget-consumed" });
     process.exit(0);
   } catch (error) {
-    report({ status: "error", code: error?.code, message: error?.message });
+    report({ status: "error", phase: "operation", code: error?.code, message: error?.message });
     process.exit(1);
   }
 }
 
-const store = createStore(adapter, {
-  storeRoot,
-  runId,
-  ...(providerLive ? {
-    dryRun: false,
-    enforcePreflight: true,
-    safetyBudget,
-    signal: abortController.signal,
-  } : {}),
-});
-
-if (mode === "checksum-backfill-crash") {
-  await store.initialize({ faultInjector: crashInjector() });
-  report({ status: "backfilled-unexpectedly" });
-  process.exit(0);
+if (mode === "lock-reclaim-crash") {
+  const lockPath = argOf("lock-path");
+  try {
+    const lock = await acquireLock(lockPath, {
+      timeoutMs: Number(argOf("lock-timeout-ms", "1000")),
+      pollMs: 1,
+      onBeforeReapDelete() {
+        report({ status: "crashing", phase: "lock-reclamation" });
+        process.exit(9);
+      },
+    });
+    lock.release();
+    report({ status: "reclaimed-unexpectedly" });
+    process.exit(0);
+  } catch (error) {
+    report({
+      status: "error",
+      phase: "lock-reclamation",
+      name: error?.name,
+      code: error?.code,
+      message: error?.message,
+    });
+    process.exit(1);
+  }
 }
 
-await store.initialize();
+let store;
+try {
+  store = createStore(adapter, {
+    storeRoot,
+    runId,
+    ...(providerLive ? {
+      dryRun: false,
+      enforcePreflight: true,
+      safetyBudget,
+      signal: abortController.signal,
+    } : {}),
+  });
+  if (mode === "checksum-backfill-crash") {
+    await store.initialize({ faultInjector: crashInjector() });
+    report({ status: "backfilled-unexpectedly" });
+    process.exit(0);
+  }
+  await store.initialize();
+} catch (error) {
+  report({
+    status: "error",
+    phase: "initialize",
+    name: error?.name,
+    code: error?.code,
+    message: error?.message,
+  });
+  try { await store?.close(); } catch { /* best effort */ }
+  if (deadlineTimer) clearTimeout(deadlineTimer);
+  process.exit(1);
+}
 
 try {
   if (mode === "read") {
@@ -196,6 +279,8 @@ try {
   const conflict = error?.code === "generation_conflict";
   report({
     status: conflict ? "conflict" : "error",
+    phase: "operation",
+    name: error?.name,
     code: error?.code,
     message: error?.message,
   });

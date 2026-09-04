@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,8 +34,12 @@ import {
   createSyntheticWorkspace,
 } from "../src/synthetic-fixtures.mjs";
 import {
+  DURABLE_IDENTITY_CHECKSUM_VERSION,
+  LEGACY_WORKSPACE_CHECKSUM_VERSION,
   WorkspaceConflictError,
   applyWorkspaceOperation,
+  checksumWorkspace,
+  checksumWorkspaceV1,
   validateWorkspaceRecord,
 } from "../src/workspace-contract.mjs";
 
@@ -44,6 +49,43 @@ const config = JSON.parse(fs.readFileSync(
   path.join(spikeRoot, "config", "reference-memory.json"),
   "utf8",
 ));
+
+function writeLockOwner(lockPath, { pid, token }) {
+  fs.rmSync(lockPath, { recursive: true, force: true });
+  fs.mkdirSync(lockPath, { recursive: true });
+  fs.writeFileSync(
+    path.join(lockPath, `${token}.owner`),
+    JSON.stringify({ pid, token, at: Date.now() }),
+  );
+}
+
+function writeLegacyCasEnvelope(storeRoot, workspace) {
+  const workspaceDir = path.join(storeRoot, "workspaces");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workspaceDir, `${workspace.workspaceId}.json`),
+    JSON.stringify({
+      schemaVersion: 1,
+      checksum: checksumWorkspaceV1(workspace),
+      workspace,
+    }),
+  );
+}
+
+function writeCurrentCasEnvelope(storeRoot, workspace) {
+  const workspaceDir = path.join(storeRoot, "workspaces");
+  fs.mkdirSync(workspaceDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(workspaceDir, `${workspace.workspaceId}.json`),
+    JSON.stringify({
+      schemaVersion: 1,
+      checksumVersion: DURABLE_IDENTITY_CHECKSUM_VERSION,
+      durableWorkspaceId: workspace.workspaceId,
+      checksum: checksumWorkspace(workspace, workspace.workspaceId),
+      workspace,
+    }),
+  );
+}
 
 let pass = 0;
 let fail = 0;
@@ -243,12 +285,12 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     fs.rmSync(directory, { recursive: true, force: true });
     fs.mkdirSync(directory, { recursive: true });
     const lockPath = path.join(directory, "workspace.lock");
-    const owner = await acquireLock(lockPath, { staleMs: 1, timeoutMs: 100 });
+    const owner = await acquireLock(lockPath, { timeoutMs: 100 });
     const old = new Date(Date.now() - 60_000);
     fs.utimesSync(lockPath, old, old);
     try {
       await assert.rejects(
-        acquireLock(lockPath, { staleMs: 1, timeoutMs: 20, pollMs: 1 }),
+        acquireLock(lockPath, { timeoutMs: 20, pollMs: 1 }),
         (error) => error.code === "lock_timeout",
       );
     } finally {
@@ -263,13 +305,40 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     fs.mkdirSync(directory, { recursive: true });
     const lockPath = path.join(directory, "workspace.lock");
     const owner = await acquireLock(lockPath);
-    fs.writeFileSync(lockPath, JSON.stringify({
+    const replacement = {
       pid: process.pid,
-      token: "replacement-owner-token",
-      at: Date.now(),
-    }));
+      token: crypto.randomUUID(),
+    };
+    writeLockOwner(lockPath, replacement);
     assert.equal(owner.release(), false);
-    assert.equal(fs.existsSync(lockPath), true);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(lockPath, `${replacement.token}.owner`), "utf8")).token,
+      replacement.token,
+    );
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  await check("a crashed reclaimer and its stale marker cannot wedge the lock", async () => {
+    const directory = path.join(spikeRoot, ".test-state", "lock-reclaimer-crash");
+    fs.rmSync(directory, { recursive: true, force: true });
+    fs.mkdirSync(directory, { recursive: true });
+    const lockPath = path.join(directory, "workspace.lock");
+    const deadOwner = { pid: 2147483647, token: crypto.randomUUID() };
+    fs.writeFileSync(lockPath, JSON.stringify({ ...deadOwner, at: 0 }));
+    fs.writeFileSync(`${lockPath}.reclaim`, "legacy interrupted reclaimer");
+
+    const crashed = await runWorker([
+      "--mode=lock-reclaim-crash",
+      `--lock-path=${lockPath}`,
+    ]);
+    assert.equal(crashed.code, 9);
+    assert.equal(crashed.report?.phase, "lock-reclamation");
+    assert.equal(fs.existsSync(`${lockPath}.reclaim`), true);
+
+    const recovered = await acquireLock(lockPath, { timeoutMs: 100, pollMs: 1 });
+    assert.equal(recovered.stolenStaleLock, true);
+    assert.equal(fs.existsSync(`${lockPath}.reclaim`), false);
+    assert.equal(recovered.release(), true);
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
@@ -278,11 +347,15 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     fs.rmSync(directory, { recursive: true, force: true });
     fs.mkdirSync(directory, { recursive: true });
     const lockPath = path.join(directory, "workspace.lock");
-    fs.writeFileSync(lockPath, JSON.stringify({
+    const deadOwner = {
       pid: 2147483647,
-      token: "dead-owner-token",
-      at: 0,
-    }));
+      token: crypto.randomUUID(),
+    };
+    writeLockOwner(lockPath, deadOwner);
+    const replacement = {
+      pid: process.pid,
+      token: crypto.randomUUID(),
+    };
     let replaced = false;
     await assert.rejects(
       acquireLock(lockPath, {
@@ -291,17 +364,13 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
         onBeforeReapDelete() {
           if (replaced) return;
           replaced = true;
-          fs.unlinkSync(lockPath);
-          fs.writeFileSync(lockPath, JSON.stringify({
-            pid: process.pid,
-            token: "replacement-owner-token",
-            at: Date.now(),
-          }));
+          fs.rmSync(lockPath, { recursive: true, force: true });
+          fs.writeFileSync(lockPath, JSON.stringify({ ...replacement, at: Date.now() }));
         },
       }),
       (error) => error.code === "lock_timeout",
     );
-    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, "replacement-owner-token");
+    assert.equal(JSON.parse(fs.readFileSync(lockPath, "utf8")).token, replacement.token);
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
@@ -372,11 +441,125 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     assert.equal((await resumed.initialize()).workspaceCount, 2);
     const verified = new DatabaseSync(databasePath);
     assert.equal(
-      verified.prepare("SELECT COUNT(*) AS n FROM workspaces WHERE checksum IS NULL OR checksum = ''").get().n,
+      verified.prepare(`
+        SELECT COUNT(*) AS n
+        FROM workspaces
+        WHERE checksum IS NULL OR checksum = ''
+           OR checksum_version IS NULL
+           OR checksum_version != ?
+      `).get(DURABLE_IDENTITY_CHECKSUM_VERSION).n,
       0,
     );
     verified.close();
     await resumed.close();
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+  });
+
+  await check("CAS upgrades PR-head v1 envelopes to the identity-bound checksum format", async () => {
+    const storeRoot = path.join(spikeRoot, ".test-state", "cas-checksum-v1-upgrade");
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+    const workspace = createSyntheticWorkspace({ seed: "cas-checksum-v1-upgrade" });
+    writeLegacyCasEnvelope(storeRoot, workspace);
+
+    const store = new LocalCasWorkspaceStore({ storeRoot });
+    assert.equal((await store.initialize()).workspaceCount, 1);
+    assert.deepEqual(await store.readWorkspace(workspace.workspaceId), workspace);
+    const upgraded = JSON.parse(fs.readFileSync(store.envelopePath(workspace.workspaceId), "utf8"));
+    assert.equal(upgraded.checksumVersion, DURABLE_IDENTITY_CHECKSUM_VERSION);
+    assert.equal(upgraded.durableWorkspaceId, workspace.workspaceId);
+    assert.equal(upgraded.checksum, checksumWorkspace(workspace, workspace.workspaceId));
+    assert.notEqual(upgraded.checksum, checksumWorkspaceV1(workspace));
+    await store.close();
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+  });
+
+  await check("CAS checksum upgrade survives a killed atomic replacement and resumes", async () => {
+    const storeRoot = path.join(spikeRoot, ".test-state", "cas-checksum-upgrade-crash");
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+    const current = createSyntheticWorkspace({ seed: "cas-checksum-upgrade-a-current" });
+    const legacy = ["b-one", "c-two"].map((suffix) =>
+      createSyntheticWorkspace({ seed: `cas-checksum-upgrade-${suffix}` }));
+    writeCurrentCasEnvelope(storeRoot, current);
+    for (const workspace of legacy) writeLegacyCasEnvelope(storeRoot, workspace);
+
+    const crashed = await runWorker([
+      "--mode=checksum-backfill-crash",
+      "--adapter=local-cas",
+      `--root=${storeRoot}`,
+      "--crash-at=during-checksum-upgrade",
+    ]);
+    assert.equal(crashed.code, 9);
+    const preserved = JSON.parse(fs.readFileSync(
+      path.join(storeRoot, "workspaces", `${current.workspaceId}.json`),
+      "utf8",
+    ));
+    assert.equal(preserved.checksumVersion, DURABLE_IDENTITY_CHECKSUM_VERSION);
+    for (const workspace of legacy) {
+      const envelope = JSON.parse(fs.readFileSync(
+        path.join(storeRoot, "workspaces", `${workspace.workspaceId}.json`),
+        "utf8",
+      ));
+      assert.equal(envelope.checksumVersion, undefined);
+      assert.equal(envelope.checksum, checksumWorkspaceV1(workspace));
+    }
+
+    const resumed = new LocalCasWorkspaceStore({ storeRoot });
+    const workspaces = [current, ...legacy];
+    assert.equal((await resumed.initialize()).workspaceCount, workspaces.length);
+    for (const workspace of workspaces) {
+      assert.deepEqual(await resumed.readWorkspace(workspace.workspaceId), workspace);
+      const envelope = JSON.parse(fs.readFileSync(resumed.envelopePath(workspace.workspaceId), "utf8"));
+      assert.equal(envelope.checksumVersion, DURABLE_IDENTITY_CHECKSUM_VERSION);
+      assert.equal(envelope.durableWorkspaceId, workspace.workspaceId);
+    }
+    await resumed.close();
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+  });
+
+  await check("SQLite versions and upgrades legacy checksums transactionally", async () => {
+    const storeRoot = path.join(spikeRoot, ".test-state", "sqlite-checksum-v1-upgrade");
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+    fs.mkdirSync(storeRoot, { recursive: true });
+    const workspace = createSyntheticWorkspace({ seed: "sqlite-checksum-v1-upgrade" });
+    const databasePath = path.join(storeRoot, "workspace.db");
+    const database = new DatabaseSync(databasePath);
+    database.exec(`
+      CREATE TABLE workspaces (
+        workspace_id TEXT PRIMARY KEY,
+        schema_version INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        payload TEXT NOT NULL,
+        checksum TEXT,
+        checksum_version INTEGER
+      )
+    `);
+    database.prepare(`
+      INSERT INTO workspaces (
+        workspace_id, schema_version, generation, payload, checksum, checksum_version
+      )
+      VALUES (?, 1, ?, ?, ?, ?)
+    `).run(
+      workspace.workspaceId,
+      workspace.generation,
+      JSON.stringify(workspace),
+      checksumWorkspaceV1(workspace),
+      LEGACY_WORKSPACE_CHECKSUM_VERSION,
+    );
+    database.close();
+
+    const store = new LocalSqliteWorkspaceStore({ storeRoot });
+    assert.equal((await store.initialize()).workspaceCount, 1);
+    assert.deepEqual(await store.readWorkspace(workspace.workspaceId), workspace);
+    const verified = new DatabaseSync(databasePath);
+    const row = verified.prepare(`
+      SELECT checksum, checksum_version
+      FROM workspaces
+      WHERE workspace_id = ?
+    `).get(workspace.workspaceId);
+    assert.equal(row.checksum_version, DURABLE_IDENTITY_CHECKSUM_VERSION);
+    assert.equal(row.checksum, checksumWorkspace(workspace, workspace.workspaceId));
+    verified.close();
+    await store.close();
     fs.rmSync(storeRoot, { recursive: true, force: true });
   });
 
@@ -395,6 +578,32 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     );
     await cas.close();
 
+    const legacyCasRoot = path.join(spikeRoot, ".test-state", "cas-v1-identity-binding");
+    fs.rmSync(legacyCasRoot, { recursive: true, force: true });
+    const legacyWorkspace = createSyntheticWorkspace({ seed: "cas-v1-identity-source" });
+    writeLegacyCasEnvelope(legacyCasRoot, legacyWorkspace);
+    const legacyPath = path.join(
+      legacyCasRoot,
+      "workspaces",
+      `${legacyWorkspace.workspaceId}.json`,
+    );
+    const legacyReplacementId = "syn-ws-cas-v1-identity-replacement";
+    fs.renameSync(
+      legacyPath,
+      path.join(legacyCasRoot, "workspaces", `${legacyReplacementId}.json`),
+    );
+    const legacyCas = new LocalCasWorkspaceStore({ storeRoot: legacyCasRoot });
+    await assert.rejects(
+      legacyCas.initialize(),
+      (error) => error.code === "store_corrupt" && /filename/.test(error.message),
+    );
+    const substituted = JSON.parse(fs.readFileSync(
+      path.join(legacyCasRoot, "workspaces", `${legacyReplacementId}.json`),
+      "utf8",
+    ));
+    assert.equal(substituted.checksumVersion, undefined);
+    await legacyCas.close();
+
     const sqliteRoot = path.join(spikeRoot, ".test-state", "sqlite-identity-binding");
     fs.rmSync(sqliteRoot, { recursive: true, force: true });
     const sqlite = new LocalSqliteWorkspaceStore({ storeRoot: sqliteRoot });
@@ -411,6 +620,7 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
     );
     await sqlite.close();
     fs.rmSync(casRoot, { recursive: true, force: true });
+    fs.rmSync(legacyCasRoot, { recursive: true, force: true });
     fs.rmSync(sqliteRoot, { recursive: true, force: true });
   });
   const owned = {

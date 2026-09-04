@@ -13,9 +13,12 @@ import {
   WorkspaceConflictError,
   WorkspaceNotFoundError,
   WorkspaceStoreError,
+  DURABLE_IDENTITY_CHECKSUM_VERSION,
+  LEGACY_WORKSPACE_CHECKSUM_VERSION,
   applyWorkspaceOperation,
   assertReconcilable,
   checksumWorkspace,
+  checksumWorkspaceV1,
   deepClone,
   needsReconciliation,
   validateWorkspaceRecord,
@@ -27,6 +30,50 @@ const SCHEMA_VERSION = 1;
 
 function checksumOf(workspace, durableWorkspaceId = workspace.workspaceId) {
   return checksumWorkspace(workspace, durableWorkspaceId);
+}
+
+function canonicalEnvelope(workspace) {
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    checksumVersion: DURABLE_IDENTITY_CHECKSUM_VERSION,
+    durableWorkspaceId: workspace.workspaceId,
+    checksum: checksumOf(workspace),
+    workspace,
+  };
+}
+
+function checksumFormat(envelope, workspaceId) {
+  const declaredVersion = envelope.checksumVersion;
+  const identityChecksum = checksumOf(envelope.workspace, workspaceId);
+  const legacyChecksum = checksumWorkspaceV1(envelope.workspace);
+  if (declaredVersion === DURABLE_IDENTITY_CHECKSUM_VERSION) {
+    if (envelope.durableWorkspaceId !== workspaceId || envelope.checksum !== identityChecksum) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} failed durable-identity checksum validation`,
+      );
+    }
+    return { version: declaredVersion, canonical: true };
+  }
+  if (declaredVersion === LEGACY_WORKSPACE_CHECKSUM_VERSION) {
+    if (envelope.checksum !== legacyChecksum) {
+      throw new CorruptWorkspaceStoreError(
+        `Workspace ${workspaceId} failed legacy checksum validation`,
+      );
+    }
+    return { version: declaredVersion, canonical: false };
+  }
+  if (declaredVersion === undefined || declaredVersion === null) {
+    if (envelope.checksum === legacyChecksum) {
+      return { version: LEGACY_WORKSPACE_CHECKSUM_VERSION, canonical: false };
+    }
+    // Canonicalize the short-lived unversioned identity-bound format too.
+    if (envelope.checksum === identityChecksum) {
+      return { version: DURABLE_IDENTITY_CHECKSUM_VERSION, canonical: false };
+    }
+  }
+  throw new CorruptWorkspaceStoreError(
+    `Workspace ${workspaceId} has an unsupported or invalid checksum format`,
+  );
 }
 
 export class LocalCasWorkspaceStore {
@@ -58,7 +105,7 @@ export class LocalCasWorkspaceStore {
     }
   }
 
-  readEnvelope(workspaceId) {
+  decodeEnvelope(workspaceId) {
     const file = this.envelopePath(workspaceId);
     let raw;
     try {
@@ -88,22 +135,23 @@ export class LocalCasWorkspaceStore {
         `Workspace ${workspaceId} envelope identity does not match its filename`,
       );
     }
-    if (envelope.checksum !== checksumOf(envelope.workspace, workspaceId)) {
-      throw new CorruptWorkspaceStoreError(`Workspace ${workspaceId} failed checksum validation`);
-    }
-    return validateWorkspaceRecord(envelope.workspace);
+    const format = checksumFormat(envelope, workspaceId);
+    return {
+      workspace: validateWorkspaceRecord(envelope.workspace),
+      checksumVersion: format.version,
+      requiresUpgrade: !format.canonical,
+    };
   }
 
-  writeEnvelope(workspace, faultInjector = null) {
-    const envelope = {
-      schemaVersion: SCHEMA_VERSION,
-      checksum: checksumOf(workspace),
-      workspace,
-    };
+  readEnvelope(workspaceId) {
+    return this.decodeEnvelope(workspaceId).workspace;
+  }
+
+  writeEnvelope(workspace, faultInjector = null, faultPoint = "during-atomic-replace") {
     writeFileAtomicSync(
       this.envelopePath(workspace.workspaceId),
-      JSON.stringify(envelope),
-      { onBeforeRename: () => faultInjector?.hit("during-atomic-replace") },
+      JSON.stringify(canonicalEnvelope(workspace)),
+      { onBeforeRename: () => faultInjector?.hit(faultPoint) },
     );
   }
 
@@ -133,11 +181,28 @@ export class LocalCasWorkspaceStore {
     this.aliasIndex = index;
   }
 
-  async initialize() {
+  async initialize({ faultInjector = null } = {}) {
     fs.mkdirSync(this.workspaceDir, { recursive: true });
     fs.mkdirSync(this.lockDir, { recursive: true });
     fs.mkdirSync(this.legacyDir, { recursive: true });
     fs.mkdirSync(this.migratedDir, { recursive: true });
+    for (const workspaceId of this.workspaceIdsOnDisk()) {
+      const lock = await acquireLock(this.lockPath(workspaceId), {
+        timeoutMs: this.lockTimeoutMs,
+      });
+      try {
+        const decoded = this.decodeEnvelope(workspaceId);
+        if (decoded.requiresUpgrade) {
+          this.writeEnvelope(
+            decoded.workspace,
+            faultInjector,
+            "during-checksum-upgrade",
+          );
+        }
+      } finally {
+        lock.release();
+      }
+    }
     this.rebuildAliasIndex();
     this.initialized = true;
     return { workspaceCount: this.workspaceIdsOnDisk().length };
@@ -333,9 +398,7 @@ export class LocalCasWorkspaceStore {
         !envelope.workspace) {
       throw new CorruptWorkspaceStoreError("Import envelope is malformed");
     }
-    if (envelope.checksum !== checksumOf(envelope.workspace)) {
-      throw new CorruptWorkspaceStoreError("Import envelope failed checksum validation");
-    }
+    checksumFormat(envelope, envelope.workspace.workspaceId);
     validateWorkspaceRecord(envelope.workspace);
     const workspaceId = envelope.workspace.workspaceId;
     if (fs.existsSync(this.envelopePath(workspaceId))) {

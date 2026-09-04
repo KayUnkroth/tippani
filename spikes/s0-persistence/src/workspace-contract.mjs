@@ -237,6 +237,13 @@ export function applyWorkspaceOperation(current, operation = {}) {
   return next;
 }
 
+export const LEGACY_WORKSPACE_CHECKSUM_VERSION = 1;
+export const DURABLE_IDENTITY_CHECKSUM_VERSION = 2;
+
+export function checksumWorkspaceV1(workspace) {
+  return crypto.createHash("sha256").update(JSON.stringify(workspace)).digest("hex");
+}
+
 export function checksumWorkspace(workspace, durableWorkspaceId = workspace?.workspaceId) {
   return crypto.createHash("sha256").update(JSON.stringify({
     durableWorkspaceId,

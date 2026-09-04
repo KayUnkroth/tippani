@@ -53,70 +53,133 @@ export function isPidAlive(pid) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function readOwner(lockPath) {
+const OWNER_SUFFIX = ".owner";
+
+function sameOwner(left, right) {
+  return left?.token === right?.token && left?.pid === right?.pid;
+}
+
+function readLockClaim(lockPath) {
   try {
-    return JSON.parse(fs.readFileSync(lockPath, "utf8"));
+    const stat = fs.statSync(lockPath);
+    if (!stat.isDirectory()) {
+      return {
+        kind: "legacy-file",
+        owner: JSON.parse(fs.readFileSync(lockPath, "utf8")),
+        stat,
+      };
+    }
+    const entries = fs.readdirSync(lockPath);
+    const ownerEntries = entries.filter((name) => name.endsWith(OWNER_SUFFIX));
+    if (entries.length === 0) {
+      return { kind: "directory", owner: null, empty: true, stat };
+    }
+    if (entries.length !== 1 || ownerEntries.length !== 1) {
+      return { kind: "directory", owner: null, empty: false, stat };
+    }
+    const ownerPath = path.join(lockPath, ownerEntries[0]);
+    const owner = JSON.parse(fs.readFileSync(ownerPath, "utf8"));
+    if (`${owner?.token}${OWNER_SUFFIX}` !== ownerEntries[0]) {
+      return { kind: "directory", owner: null, empty: false, stat };
+    }
+    return { kind: "directory", owner, ownerPath, empty: false, stat };
   } catch {
     return null;
   }
 }
 
 export function reapStaleLock(lockPath, { onBeforeDelete = null } = {}) {
-  const owner = readOwner(lockPath);
+  const claim = readLockClaim(lockPath);
+  if (claim?.kind === "directory" && claim.empty) {
+    try {
+      fs.rmdirSync(lockPath);
+      return true;
+    } catch (error) {
+      return error?.code === "ENOENT";
+    }
+  }
+  const owner = claim?.owner;
   if (!owner?.token || !Number.isInteger(owner.pid) || owner.pid <= 0 || isPidAlive(owner.pid)) {
     return false;
   }
   return removeOwnedLock(lockPath, owner, { onBeforeDelete });
 }
 
-function removeOwnedLock(lockPath, expectedOwner, { onBeforeDelete = null } = {}) {
-  const reclaimPath = `${lockPath}.reclaim`;
-  let reclaimHandle;
+function removeOwnedDirectoryLock(lockPath, expectedOwner, { onBeforeDelete = null } = {}) {
+  const claim = readLockClaim(lockPath);
+  if (claim?.kind !== "directory" || !sameOwner(claim.owner, expectedOwner)) return false;
+  onBeforeDelete?.({ owner: { ...claim.owner }, lockPath });
+  const current = readLockClaim(lockPath);
+  if (current?.kind !== "directory" || !sameOwner(current.owner, expectedOwner)) return false;
   try {
-    reclaimHandle = fs.openSync(reclaimPath, "wx");
+    fs.unlinkSync(current.ownerPath);
   } catch (error) {
-    if (error?.code === "EEXIST") return false;
-    throw error;
+    if (error?.code !== "ENOENT") return false;
   }
-  const snapshotPath = `${reclaimPath}.${process.pid}.${crypto.randomUUID()}.snapshot`;
   try {
-    const owner = readOwner(lockPath);
-    if (owner?.token !== expectedOwner.token || owner?.pid !== expectedOwner.pid) {
-      return false;
-    }
+    fs.rmdirSync(lockPath);
+    return true;
+  } catch (error) {
+    return error?.code === "ENOENT";
+  }
+}
+
+function removeOwnedLegacyFileLock(lockPath, expectedOwner, { onBeforeDelete = null } = {}) {
+  const snapshotPath = `${lockPath}.reclaim.${process.pid}.${crypto.randomUUID()}`;
+  try {
+    const claim = readLockClaim(lockPath);
+    if (claim?.kind !== "legacy-file" || !sameOwner(claim.owner, expectedOwner)) return false;
     try {
       fs.linkSync(lockPath, snapshotPath);
     } catch (error) {
       return error?.code === "ENOENT";
     }
-    const snapshotOwner = readOwner(snapshotPath);
-    const snapshotStat = fs.statSync(snapshotPath);
-    if (snapshotOwner?.token !== expectedOwner.token ||
-        snapshotOwner?.pid !== expectedOwner.pid) return false;
-    onBeforeDelete?.({ owner: { ...owner }, lockPath });
-    const currentOwner = readOwner(lockPath);
-    if (currentOwner?.token !== expectedOwner.token ||
-        currentOwner?.pid !== expectedOwner.pid) return false;
-    const currentStat = fs.statSync(lockPath);
-    if (currentStat.dev !== snapshotStat.dev || currentStat.ino !== snapshotStat.ino) return false;
+    const snapshot = readLockClaim(snapshotPath);
+    if (snapshot?.kind !== "legacy-file" || !sameOwner(snapshot.owner, expectedOwner)) return false;
+    onBeforeDelete?.({ owner: { ...claim.owner }, lockPath });
+    const current = readLockClaim(lockPath);
+    if (current?.kind !== "legacy-file" || !sameOwner(current.owner, expectedOwner)) return false;
+    if (current.stat.dev !== snapshot.stat.dev || current.stat.ino !== snapshot.stat.ino) return false;
     fs.unlinkSync(lockPath);
     return true;
   } catch {
     return false;
   } finally {
-    try { fs.closeSync(reclaimHandle); } catch { /* already closed */ }
-    try { fs.unlinkSync(reclaimPath); } catch { /* already removed */ }
     try { fs.unlinkSync(snapshotPath); } catch { /* no snapshot */ }
   }
 }
 
+function removeOwnedLock(lockPath, expectedOwner, options = {}) {
+  const claim = readLockClaim(lockPath);
+  if (!claim) return true;
+  if (claim.kind === "directory") {
+    return removeOwnedDirectoryLock(lockPath, expectedOwner, options);
+  }
+  return removeOwnedLegacyFileLock(lockPath, expectedOwner, options);
+}
+
+function cleanupReclaimArtifacts(lockPath) {
+  const directory = path.dirname(lockPath);
+  const basename = path.basename(lockPath);
+  let entries;
+  try {
+    entries = fs.readdirSync(directory);
+  } catch {
+    return;
+  }
+  for (const name of entries) {
+    if (name !== `${basename}.reclaim` && !name.startsWith(`${basename}.reclaim.`)) continue;
+    try { fs.unlinkSync(path.join(directory, name)); } catch { /* best effort */ }
+  }
+}
+
 /**
- * Exclusive cross-process lock. The owner record is written to a private
- * temporary file first and published with an atomic link, so the lock path is
- * never observable in a half-written state. A crashed owner leaves the file
- * behind, and it is only stolen when its recorded owner and owner token are
- * still the exact same dead claim at deletion time. Malformed claims fail
- * closed rather than being age-reaped.
+ * Exclusive cross-process lock. A complete owner directory is assembled at a
+ * private path and atomically renamed into place. The token is also the owner
+ * filename, so a delayed releaser can only unlink its own claim; a replacement
+ * owner keeps a different non-empty directory that rmdir cannot remove. An
+ * empty lock directory is therefore unambiguously an interrupted release and
+ * can be recovered without a persistent reclamation mutex.
  */
 export async function acquireLock(lockPath, {
   timeoutMs = 10_000,
@@ -128,7 +191,9 @@ export async function acquireLock(lockPath, {
   for (;;) {
     const token = crypto.randomUUID();
     const staging = `${lockPath}.${process.pid}.${tempCounter++}.claim`;
-    const handle = fs.openSync(staging, "w");
+    fs.mkdirSync(staging);
+    const ownerPath = path.join(staging, `${token}${OWNER_SUFFIX}`);
+    const handle = fs.openSync(ownerPath, "wx");
     try {
       fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, token, at: Date.now() }));
       fs.fsyncSync(handle);
@@ -136,9 +201,8 @@ export async function acquireLock(lockPath, {
       fs.closeSync(handle);
     }
     try {
-      // linkSync fails with EEXIST if the destination exists, so publication of
-      // an already-complete record is the atomic acquisition step.
-      fs.linkSync(staging, lockPath);
+      fs.renameSync(staging, lockPath);
+      cleanupReclaimArtifacts(lockPath);
       return {
         path: lockPath,
         token,
@@ -148,7 +212,12 @@ export async function acquireLock(lockPath, {
         },
       };
     } catch (error) {
-      if (error?.code !== "EEXIST") throw error;
+      try {
+        fs.statSync(lockPath);
+      } catch (statError) {
+        if (statError?.code === "ENOENT") continue;
+        throw statError;
+      }
       if (reapStaleLock(lockPath, { onBeforeDelete: onBeforeReapDelete })) {
         stolenStaleLock = true;
         continue;
@@ -160,7 +229,7 @@ export async function acquireLock(lockPath, {
       }
       await sleep(pollMs);
     } finally {
-      try { fs.unlinkSync(staging); } catch { /* already cleaned */ }
+      try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* already moved */ }
     }
   }
 }
