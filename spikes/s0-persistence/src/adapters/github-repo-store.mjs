@@ -13,6 +13,7 @@
 //
 // Host-agnostic: owner, repo, and token come from the environment.
 
+import crypto from "node:crypto";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -31,6 +32,7 @@ import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const API = "https://api.github.com";
+const RUN_MARKER_PATH = ".tippani-s0-run";
 
 function b64encode(text) { return Buffer.from(text, "utf8").toString("base64"); }
 function b64decode(text) { return Buffer.from(text, "base64").toString("utf8"); }
@@ -153,6 +155,104 @@ export class GitHubRepoStore {
     return `${API}/repos/${this.owner}/${this.repo}`;
   }
 
+  runMarker(baseSha) {
+    return {
+      schemaVersion: 1,
+      syntheticData: true,
+      kind: "tippani-s0-github-run",
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      namespace: `tippani-s0/${this.runId}`,
+      branch: `refs/heads/${this.branch}`,
+      owner: this.owner,
+      repository: this.repo,
+      baseSha,
+      effectiveTargetHash: this.effectiveTargetHash,
+      cleanupManifestId: this.cleanupManifestId,
+    };
+  }
+
+  runMarkerContent(baseSha) {
+    return JSON.stringify(this.runMarker(baseSha));
+  }
+
+  runMarkerBlobSha(baseSha) {
+    const content = this.runMarkerContent(baseSha);
+    return crypto.createHash("sha1")
+      .update(`blob ${Buffer.byteLength(content)}\0${content}`)
+      .digest("hex");
+  }
+
+  async createRunMarker(baseSha) {
+    await this.safetyBudget?.recordObjects(1);
+    this.record("put-run-marker", {
+      item: RUN_MARKER_PATH,
+      precondition: "create-only",
+    });
+    const response = await this.gh("PUT", `${this.repoBase()}/contents/${RUN_MARKER_PATH}`, {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: `s0 claim ${this.runId}`,
+        content: b64encode(this.runMarkerContent(baseSha)),
+        branch: this.branch,
+      }),
+    });
+    if (!response.ok) {
+      throw new WorkspaceStoreError(
+        `run ownership marker create failed: ${response.status}`,
+        "branch_ownership_conflict",
+      );
+    }
+  }
+
+  async verifyRunMarker(baseSha) {
+    const refResponse = await this.gh(
+      "GET",
+      `${this.repoBase()}/git/ref/heads/${this.branch}`,
+    );
+    if (!refResponse.ok) {
+      throw new WorkspaceStoreError(
+        `existing run branch lookup failed: ${refResponse.status}`,
+        "branch_ownership_conflict",
+      );
+    }
+    const tip = (await refResponse.json())?.object?.sha;
+    if (!tip) {
+      throw new WorkspaceStoreError(
+        "existing run branch has no immutable tip",
+        "branch_ownership_conflict",
+      );
+    }
+    const markerResponse = await this.gh(
+      "GET",
+      `${this.repoBase()}/contents/${RUN_MARKER_PATH}?ref=${encodeURIComponent(tip)}`,
+    );
+    if (!markerResponse.ok) {
+      throw new WorkspaceStoreError(
+        "existing run branch lacks the approved ownership marker",
+        "branch_ownership_conflict",
+      );
+    }
+    const body = await markerResponse.json();
+    let marker;
+    try {
+      marker = JSON.parse(b64decode(body.content));
+    } catch {
+      throw new WorkspaceStoreError(
+        "existing run branch ownership marker is invalid",
+        "branch_ownership_conflict",
+      );
+    }
+    const expected = this.runMarker(baseSha);
+    if (JSON.stringify(marker) !== JSON.stringify(expected) ||
+        (body.sha && body.sha !== this.runMarkerBlobSha(baseSha))) {
+      throw new WorkspaceStoreError(
+        "existing run branch is not owned by this approved run",
+        "branch_ownership_conflict",
+      );
+    }
+  }
+
   async gh(method, url, { headers = {}, body } = {}) {
     if (this.dryRun) throw new Error("gh() must not be called in dry-run");
     if (!this._getToken) throw new WorkspaceStoreError("No GitHub token supplied", "no_token");
@@ -231,7 +331,15 @@ export class GitHubRepoStore {
   async initialize() {
     await this.assertEffectiveTargetApproved();
     this.record("connect");
-    if (this.dryRun) { await this.model.initialize(); this.initialized = true; return { backingPath: "github", dryRun: true, branch: this.branch }; }
+    if (this.dryRun) {
+      this.record("put-run-marker", {
+        item: RUN_MARKER_PATH,
+        precondition: "create-only-or-verify",
+      });
+      await this.model.initialize();
+      this.initialized = true;
+      return { backingPath: "github", dryRun: true, branch: this.branch };
+    }
     // Create the per-run branch off the default branch; the default is untouched.
     const repoResp = await this.gh("GET", this.repoBase());
     if (!repoResp.ok) throw new WorkspaceStoreError(`repo lookup failed: ${repoResp.status}`, "provider_error");
@@ -244,8 +352,12 @@ export class GitHubRepoStore {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ref: `refs/heads/${this.branch}`, sha: baseSha }),
     });
-    if (!createResp.ok) {
+    if (createResp.status === 422) {
+      await this.verifyRunMarker(baseSha);
+    } else if (!createResp.ok) {
       throw new WorkspaceStoreError(`branch create failed: ${createResp.status}`, "provider_error");
+    } else {
+      await this.createRunMarker(baseSha);
     }
     this.initialized = true;
     return { backingPath: "github", dryRun: false, branch: this.branch };

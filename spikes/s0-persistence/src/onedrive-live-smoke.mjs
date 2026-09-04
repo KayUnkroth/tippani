@@ -13,7 +13,10 @@
 //
 // The token is read from the environment and never printed.
 
+import path from "node:path";
+import { performance } from "node:perf_hooks";
 import { OneDriveGraphStore } from "./adapters/onedrive-store.mjs";
+import { ProviderTelemetry } from "./adapters/provider-telemetry.mjs";
 import { createCleanupAuthorization } from "./cleanup-manifest.mjs";
 import { OperationBudget } from "./operation-budget.mjs";
 import {
@@ -63,21 +66,29 @@ let config = resolveEffectiveProviderConfig({
     cleanup: { manifestId: `syn-cleanup-${runId}`, retentionHours: 1 },
   },
 });
-config = withResolvedProviderIdentity(
-  config,
-  await resolveProviderIdentityForConfig(config),
-);
-assertPreflight(config);
 const abortController = new AbortController();
+const deadlineAt = performance.now() + config.budgets.maxDurationMs;
 const deadlineTimer = setTimeout(
   () => abortController.abort(),
-  config.budgets.maxDurationMs,
+  Math.max(0, deadlineAt - performance.now()),
 );
+deadlineTimer.unref?.();
 const safetyBudget = new OperationBudget({
   limits: config.budgets,
   signal: abortController.signal,
+  deadlineAt,
 });
-const makeStore = ({ budgeted = true } = {}) => new OneDriveGraphStore({
+const identityTelemetry = new ProviderTelemetry({ safetyBudget });
+config = withResolvedProviderIdentity(
+  config,
+  await resolveProviderIdentityForConfig(config, {
+    signal: abortController.signal,
+    beforeAttempt: () => identityTelemetry.recordRequest(),
+    wrapResponse: (response, context) => identityTelemetry.wrapResponse(response, context),
+  }),
+);
+assertPreflight(config);
+const makeStore = () => new OneDriveGraphStore({
   dryRun: false,
   driveId,
   folderPath: folder,
@@ -88,8 +99,8 @@ const makeStore = ({ budgeted = true } = {}) => new OneDriveGraphStore({
   enforcePreflight: true,
   ownershipMarker: config.sandbox.ownershipMarker,
   cleanupManifestId: config.sandbox.cleanup.manifestId,
-  safetyBudget: budgeted ? safetyBudget : null,
-  signal: budgeted ? abortController.signal : null,
+  safetyBudget,
+  signal: abortController.signal,
 });
 
 let pass = 0;
@@ -99,8 +110,17 @@ function ok(name, cond) {
   else { failn++; console.log(`  FAIL  ${name}`); }
 }
 
+const cleanupStore = makeStore();
+const cleanupManifestPath = path.resolve(
+  process.env.S0_CLEANUP_MANIFEST_PATH ||
+    path.join("spikes", "s0-persistence", "results", runId, "cleanup-manifest.json"),
+);
+const cleanupAuthorization = createCleanupAuthorization(config, cleanupStore, {
+  filePath: cleanupManifestPath,
+});
 const store = makeStore();
 console.log(`live OneDrive smoke: subfolder=tippani-s0/${runId}`);
+console.log(`cleanup manifest: ${cleanupManifestPath} ${cleanupAuthorization.manifest.evidence().digest}`);
 
 try {
   await store.initialize();
@@ -141,16 +161,23 @@ try {
   console.log(`  FAIL  unexpected error: ${error?.code || ""} ${error?.message || error}`);
 } finally {
   try {
-    const cleanupStore = makeStore({ budgeted: false });
-    const authorization = createCleanupAuthorization(config, cleanupStore);
-    await cleanupStore.prepareCleanup(authorization);
-    const result = await cleanupStore.cleanup(authorization);
+    if (!cleanupAuthorization.resource.condition) {
+      await cleanupStore.prepareCleanup(cleanupAuthorization);
+    }
+    const result = await cleanupStore.cleanup(cleanupAuthorization);
     console.log(`cleanup: deleted ${result.deleted}`);
   } catch (error) {
+    failn++;
     console.log(`cleanup FAILED (manual delete may be needed): ${error?.message || error}`);
   }
   clearTimeout(deadlineTimer);
 }
 
+console.log(`final budget telemetry: ${JSON.stringify({
+  identity: identityTelemetry.snapshot(),
+  cleanup: cleanupStore.providerTelemetry(),
+  final: safetyBudget.snapshot(),
+  manifest: cleanupAuthorization.manifest.evidence(),
+})}`);
 console.log(`\nlive OneDrive smoke: ${pass} passed, ${failn} failed`);
 process.exit(failn > 0 ? 1 : 0);

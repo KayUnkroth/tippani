@@ -168,22 +168,34 @@ export async function runHarness({
     signal: abortController.signal,
     deadlineAt,
   });
+  const deadlineTimer = setTimeout(
+    () => abortController.abort(),
+    Math.max(0, deadlineAt - performance.now()),
+  );
+  deadlineTimer.unref?.();
   const liveProviderRun = config.dryRun === false &&
     ["onedrive", "ado", "github"].includes(config.backingPath);
   let preflight;
-  if (liveProviderRun && missingProviderEnv.length === 0) {
-    const identityTelemetry = new ProviderTelemetry({ safetyBudget });
-    const identity = await resolveProviderIdentityForConfig(config, {
-      identityResolver,
-      fetchImpl: identityFetchImpl || config.fetchImpl || globalThis.fetch,
-      signal: abortController.signal,
-      beforeAttempt: () => identityTelemetry.recordRequest(),
-      wrapResponse: (response) => identityTelemetry.wrapResponse(response),
-    });
-    config = withResolvedProviderIdentity(config, identity);
-    preflight = assertPreflight(config, preflightTime);
-  } else {
-    preflight = assertPreflight(config, preflightTime, { requireApproval: false });
+  let identityTelemetrySnapshot = null;
+  try {
+    if (liveProviderRun && missingProviderEnv.length === 0) {
+      const identityTelemetry = new ProviderTelemetry({ safetyBudget });
+      const identity = await resolveProviderIdentityForConfig(config, {
+        identityResolver,
+        fetchImpl: identityFetchImpl || config.fetchImpl || globalThis.fetch,
+        signal: abortController.signal,
+        beforeAttempt: () => identityTelemetry.recordRequest(),
+        wrapResponse: (response) => identityTelemetry.wrapResponse(response),
+      });
+      identityTelemetrySnapshot = identityTelemetry.snapshot();
+      config = withResolvedProviderIdentity(config, identity);
+      preflight = assertPreflight(config, preflightTime);
+    } else {
+      preflight = assertPreflight(config, preflightTime, { requireApproval: false });
+    }
+  } catch (error) {
+    clearTimeout(deadlineTimer);
+    throw error;
   }
   const evidenceIdentity = buildEvidenceIdentity(config);
   const factory = adapterFactory ||
@@ -193,22 +205,33 @@ export async function runHarness({
       signal: abortController.signal,
       enforcePreflight: config.dryRun === false,
     }));
-  let cleanupAuthorization = null;
-  if (liveProviderRun && !adapterFactory) {
-    const descriptor = createAdapterStore(config.adapter, {
-      ...config,
-      enforcePreflight: true,
-    });
-    cleanupAuthorization = createCleanupAuthorization(config, descriptor);
-  }
-
   const selected = scenarioIds || config.scenarioIds || applicableIds;
   const unknown = selected.filter((id) => !scenarioById(id));
-  if (unknown.length) throw new Error(`Unknown scenario IDs: ${unknown.join(", ")}`);
+  if (unknown.length) {
+    clearTimeout(deadlineTimer);
+    throw new Error(`Unknown scenario IDs: ${unknown.join(", ")}`);
+  }
   const runRoot = fs.mkdtempSync(path.join(os.tmpdir(), `tippani-s0-${config.runId}-`));
+  let cleanupAuthorization = null;
+  try {
+    if (liveProviderRun && !adapterFactory) {
+      const descriptor = createAdapterStore(config.adapter, {
+        ...config,
+        enforcePreflight: true,
+      });
+      const manifestPath = path.join(outputDir || runRoot, "cleanup-manifest.json");
+      cleanupAuthorization = createCleanupAuthorization(config, descriptor, {
+        filePath: manifestPath,
+      });
+    }
+  } catch (error) {
+    clearTimeout(deadlineTimer);
+    if (!config.keepStoreArtifacts) {
+      try { fs.rmSync(runRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    throw error;
+  }
   const startedAt = preflightTime.toISOString();
-  const deadlineTimer = setTimeout(() => abortController.abort(), config.budgets.maxDurationMs);
-  deadlineTimer.unref?.();
   const results = [];
   let cleanupEvidence = { required: liveProviderRun, status: liveProviderRun ? "pending" : "not-applicable" };
 
@@ -326,20 +349,35 @@ export async function runHarness({
       }
     }
   } finally {
-    clearTimeout(deadlineTimer);
-    // Tear down a live provider run's per-run namespace (best effort).
+    // Tear down a live provider run's per-run namespace under the same approved
+    // operation budget and deadline as identity resolution and scenario work.
     if (liveProviderRun && !adapterFactory) {
+      const budgetBefore = safetyBudget.snapshot();
+      let teardown = null;
       try {
-        const teardown = createAdapterStore(config.adapter, {
+        teardown = createAdapterStore(config.adapter, {
           ...config,
+          safetyBudget,
+          signal: abortController.signal,
           enforcePreflight: true,
         });
         if (typeof teardown.cleanup === "function") {
-          if (typeof teardown.prepareCleanup === "function") {
+          if (typeof teardown.prepareCleanup === "function" &&
+              !cleanupAuthorization.resource.condition) {
             await teardown.prepareCleanup(cleanupAuthorization);
           }
           const outcome = await teardown.cleanup(cleanupAuthorization);
           cleanupEvidence = { required: true, status: "complete", outcome };
+        } else {
+          cleanupEvidence = {
+            required: true,
+            status: "failed",
+            error: {
+              name: "WorkspaceStoreError",
+              code: "cleanup_unavailable",
+              message: "Provider adapter has no cleanup operation",
+            },
+          };
         }
       } catch (error) {
         cleanupEvidence = { required: true, status: "failed", error: errorSummary(error) };
@@ -350,8 +388,38 @@ export async function runHarness({
           delete cleanupGate.reason;
           delete cleanupGate.evidence;
         }
+      } finally {
+        cleanupEvidence = {
+          ...cleanupEvidence,
+          budgeted: teardown?.safetyBudget === safetyBudget,
+          budgetSource: "preflight.budgets",
+          sharedDeadline: teardown?.signal === abortController.signal,
+          budgetBefore,
+          budgetAfter: safetyBudget.snapshot(),
+          providerTelemetry: teardown?.providerTelemetry?.() || null,
+          manifest: cleanupAuthorization?.manifest?.evidence?.() || null,
+          manifestDocument: cleanupAuthorization?.manifest?.toJSON?.() || null,
+        };
       }
     }
+    const budgetGate = results.find((result) => result.scenarioId === "S0-SEC-006");
+    if (liveProviderRun && !adapterFactory && budgetGate?.status === "Pass" &&
+        (cleanupEvidence.budgeted !== true || cleanupEvidence.sharedDeadline !== true)) {
+      budgetGate.status = "Fail";
+      budgetGate.error = {
+        name: "WorkspaceStoreError",
+        code: "cleanup_budget_unverified",
+        message: "Cleanup did not use the approved shared budget and deadline",
+      };
+      delete budgetGate.evidence;
+    } else if (liveProviderRun && !adapterFactory && budgetGate?.status === "Pass") {
+      budgetGate.evidence = {
+        ...(budgetGate.evidence || {}),
+        cleanupBudgeted: true,
+        cleanupSharedDeadline: true,
+      };
+    }
+    clearTimeout(deadlineTimer);
     if (!config.keepStoreArtifacts) {
       try { fs.rmSync(runRoot, { recursive: true, force: true }); } catch { /* best effort */ }
     }
@@ -387,6 +455,11 @@ export async function runHarness({
     })),
     results,
     safetyBudget: safetyBudget.snapshot(),
+    budgetTelemetry: {
+      identity: identityTelemetrySnapshot,
+      cleanup: cleanupEvidence.providerTelemetry || null,
+      final: safetyBudget.snapshot(),
+    },
     cleanup: cleanupEvidence,
   };
   const artifacts = writeArtifacts ? writeRunArtifacts(run, outputDir) : null;

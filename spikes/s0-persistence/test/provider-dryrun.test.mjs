@@ -4,6 +4,7 @@
 // precise reasons.
 
 import assert from "node:assert/strict";
+import { fork } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,10 @@ import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
 import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
 import { createStore } from "../src/adapters/registry.mjs";
 import { applicableScenarioIds } from "../src/applicability.mjs";
+import {
+  CleanupManifest,
+  createCleanupAuthorization,
+} from "../src/cleanup-manifest.mjs";
 import {
   buildPreflightSheet,
   renderPreflightSheet,
@@ -32,10 +37,17 @@ import { OperationBudget } from "../src/operation-budget.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const spikeRoot = path.dirname(here);
+const cleanupManifestWorker = fileURLToPath(
+  new URL("../src/workers/cleanup-manifest-worker.mjs", import.meta.url),
+);
 // GitHub is the remaining generic-scaffold provider (OneDrive and ADO have real
 // transports), so the generic dry-run/fail-closed assertions run against it.
 const providerConfig = JSON.parse(fs.readFileSync(
   path.join(spikeRoot, "config", "provider-github-dryrun.json"),
+  "utf8",
+));
+const onedriveLiveConfig = JSON.parse(fs.readFileSync(
+  path.join(spikeRoot, "config", "provider-onedrive-live.json"),
   "utf8",
 ));
 
@@ -351,7 +363,7 @@ await check("a rotated credential is re-resolved and accepted only for the appro
   });
   await store.initialize();
   assert.deepEqual(resolvedTokens, ["token-a", "token-b"]);
-  assert.equal(providerCalls, 3);
+  assert.equal(providerCalls, 4);
 });
 
 await check("all provider stores unblock FIFO replay only after explicit head resolution", async () => {
@@ -404,6 +416,178 @@ await check("all provider stores unblock FIFO replay only after explicit head re
     }
   } finally {
     fs.rmSync(storeRoot, { recursive: true, force: true });
+  }
+});
+
+await check("an atomically persisted cleanup manifest survives process death and remains usable", async () => {
+  const storeRoot = path.join(spikeRoot, ".test-state", "cleanup-manifest-crash");
+  const manifestPath = path.join(storeRoot, "cleanup-manifest.json");
+  const runId = "s0-cleanup-manifest-crash";
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  fs.mkdirSync(storeRoot, { recursive: true });
+  try {
+    const store = new OneDriveGraphStore({
+      dryRun: true,
+      driveId: "drive-a",
+      folderPath: "Synthetic",
+      runId,
+      ownershipMarker: `tippani-s0:${runId}`,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:cleanup-manifest-target",
+    });
+    const resource = store.cleanupResource();
+    const child = fork(cleanupManifestWorker, [
+      `--file=${manifestPath}`,
+      `--manifest-id=syn-cleanup-${runId}`,
+      `--resource=${Buffer.from(JSON.stringify(resource), "utf8").toString("base64url")}`,
+    ], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const exit = await new Promise((resolve) => {
+      child.on("exit", (code, signal) => resolve({ code, signal }));
+    });
+    assert.equal(exit.code, 9, stderr || "worker must terminate without cleanup");
+    assert.equal(fs.existsSync(manifestPath), true);
+    assert.equal(
+      fs.readdirSync(storeRoot).some((name) => name.endsWith(".tmp")),
+      false,
+    );
+
+    const recoveredAuthorization = createCleanupAuthorization({
+      runId,
+      backingPath: "onedrive",
+      driveId: "drive-a",
+      folderPath: "Synthetic",
+      sandbox: {
+        ownershipMarker: `tippani-s0:${runId}`,
+        effectiveTargetHash: "sha256:cleanup-manifest-target",
+        coordinates: { driveId: "drive-a", folder: "Synthetic" },
+        cleanup: { manifestId: `syn-cleanup-${runId}` },
+      },
+    }, store, { filePath: manifestPath });
+    const recovered = recoveredAuthorization.manifest;
+    const initialDigest = recovered.evidence().digest;
+    const recoveredResource = recoveredAuthorization.resource;
+    await store.prepareCleanup({ manifest: recovered, resource: recoveredResource });
+    const prepared = CleanupManifest.load(manifestPath);
+    assert(prepared.resources[0].condition, "prepared cleanup condition must be durable");
+    await store.cleanup({ manifest: recovered, resource: recoveredResource });
+    const cleaned = CleanupManifest.load(manifestPath);
+    assert.equal(cleaned.resources[0].cleaned, true);
+    assert.equal(cleaned.revision, 3);
+    assert.notEqual(cleaned.evidence().digest, initialDigest);
+  } finally {
+    fs.rmSync(storeRoot, { recursive: true, force: true });
+  }
+});
+
+await check("runner persists and meters cleanup under the shared approved deadline", async () => {
+  const outputDir = path.join(spikeRoot, ".test-state", "runner-cleanup-budget");
+  const manifestPath = path.join(outputDir, "cleanup-manifest.json");
+  const runId = "s0-runner-cleanup-budget";
+  const identity = "onedrive:identity-a";
+  const targetHash = providerTargetHash({
+    provider: "onedrive",
+    identity,
+    coordinates: { driveId: "drive-a", folder: "Synthetic" },
+    namespace: `tippani-s0/${runId}`,
+  });
+  const envValues = {
+    S0_ONEDRIVE_TOKEN: "syn-token",
+    S0_ONEDRIVE_DRIVE_ID: "drive-a",
+    S0_ONEDRIVE_FOLDER: "Synthetic",
+    S0_PREFLIGHT_APPROVER: "Synthetic Reviewer",
+    S0_PREFLIGHT_APPROVED_AT: "2026-09-04T15:00:00.000Z",
+    S0_PREFLIGHT_APPROVAL_REFERENCE: "syn-review-91",
+    S0_PREFLIGHT_TARGET_HASH: targetHash,
+  };
+  const previousEnv = Object.fromEntries(
+    Object.keys(envValues).map((key) => [key, process.env[key]]),
+  );
+  fs.rmSync(outputDir, { recursive: true, force: true });
+  Object.assign(process.env, envValues);
+  const previousFetch = globalThis.fetch;
+  let identitySignal = null;
+  let cleanupMutationSawManifest = false;
+  let cleanupGetAttempts = 0;
+  try {
+    const live = structuredClone(onedriveLiveConfig);
+    live.runId = runId;
+    live.driveId = "drive-a";
+    live.folderPath = "Synthetic";
+    live.sandbox.ownershipMarker = `tippani-s0:${runId}`;
+    live.sandbox.namespace = `tippani-s0/${runId}`;
+    live.sandbox.coordinates = { driveId: "drive-a", folder: "Synthetic" };
+    live.sandbox.cleanup.manifestId = `syn-cleanup-${runId}`;
+    const fakeFetch = async (url, options) => {
+      if (url.includes("/me?$select=")) {
+        identitySignal ??= options.signal;
+        assert.equal(options.signal, identitySignal);
+        return { ok: true, status: 200, json: async () => ({ id: "identity-a" }) };
+      }
+      assert.equal(options.signal, identitySignal, "cleanup must retain the shared deadline signal");
+      if (options.method === "GET") {
+        cleanupGetAttempts++;
+        if (cleanupGetAttempts === 1) throw new TypeError("synthetic cleanup retry");
+        assert.equal(fs.existsSync(manifestPath), true);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "folder-a", eTag: "etag-a" }),
+        };
+      }
+      if (options.method === "DELETE") {
+        const persisted = CleanupManifest.load(manifestPath);
+        assert.deepEqual(persisted.resources[0].condition, {
+          expectedItemId: "folder-a",
+          expectedETag: "etag-a",
+        });
+        cleanupMutationSawManifest = true;
+        return { ok: true, status: 204 };
+      }
+      throw new Error(`Unexpected runner cleanup request: ${options.method} ${url}`);
+    };
+    globalThis.fetch = fakeFetch;
+    const { run, artifacts } = await runHarness({
+      config: live,
+      outputDir,
+      scenarioIds: ["S0-SEC-006"],
+      identityFetchImpl: fakeFetch,
+    });
+    assert.equal(run.results[0].status, "Pass", JSON.stringify(run.results[0]));
+    assert.equal(run.results[0].evidence.cleanupBudgeted, true);
+    assert.equal(run.results[0].evidence.cleanupSharedDeadline, true);
+    assert.equal(cleanupMutationSawManifest, true);
+    assert.equal(run.cleanup.status, "complete");
+    assert.equal(run.cleanup.budgeted, true);
+    assert.equal(run.cleanup.budgetSource, "preflight.budgets");
+    assert.equal(run.cleanup.sharedDeadline, true);
+    assert.equal(
+      run.cleanup.budgetBefore.deadlineAt,
+      run.cleanup.budgetAfter.deadlineAt,
+    );
+    assert.equal(run.cleanup.providerTelemetry.requests, 5);
+    assert.equal(run.cleanup.providerTelemetry.retries, 1);
+    assert(run.cleanup.providerTelemetry.transferredBytes > 0);
+    assert.equal(run.cleanup.manifest.cleanedCount, 1);
+    assert.equal(run.cleanup.manifest.revision, 3);
+    assert.deepEqual(run.budgetTelemetry.final, run.safetyBudget);
+    assert.equal(run.safetyBudget.operations, 6);
+    assert.equal(artifacts.cleanupManifestPath, manifestPath);
+    assert(
+      fs.readFileSync(artifacts.reportPath, "utf8").includes(run.cleanup.manifest.digest),
+    );
+    assert.equal(
+      CleanupManifest.load(manifestPath).evidence().digest,
+      run.cleanup.manifest.digest,
+    );
+  } finally {
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    globalThis.fetch = previousFetch;
+    fs.rmSync(outputDir, { recursive: true, force: true });
   }
 });
 

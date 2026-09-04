@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { writeFileAtomicSync } from "./adapters/fs-atomic.mjs";
+import { CleanupManifest } from "./cleanup-manifest.mjs";
 import { effectiveResult, gateSummary } from "./eligibility.mjs";
 
 function fixed(value, digits = 3) {
@@ -148,6 +150,8 @@ export function renderOutcomeReport(run) {
     `| Store namespace | ${display(run.preflight.sandbox.namespace)} |`,
     `| Authentication setup | ${display(run.preflight.sandbox.identityLabel)} |`,
     `| Cleanup manifest | ${display(run.preflight.sandbox.cleanup?.manifestId)} |`,
+    `| Cleanup manifest artifact | ${display(run.cleanup?.manifest?.artifact)} |`,
+    `| Cleanup manifest digest | ${display(run.cleanup?.manifest?.digest)} |`,
     `| Cleanup expiry | ${display(run.preflight.sandbox.cleanup?.expiresAt)} |`,
     `| Effective target hash | ${display(run.preflight.sandbox.effectiveTargetHash)} |`,
     "",
@@ -162,6 +166,14 @@ export function renderOutcomeReport(run) {
     `| Duration budget | ${run.preflight.budgets.maxDurationMs} ms |`,
     `| Object budget | ${run.preflight.budgets.maxObjects} |`,
     `| Storage/transfer budget | ${run.preflight.budgets.maxBytes} bytes |`,
+    `| Final metered operations | ${display(run.budgetTelemetry?.final?.operations)} |`,
+    `| Final metered objects | ${display(run.budgetTelemetry?.final?.objects)} |`,
+    `| Final metered bytes | ${display(run.budgetTelemetry?.final?.bytes)} |`,
+    `| Cleanup requests/retries/bytes | ${display({
+      requests: run.budgetTelemetry?.cleanup?.requests,
+      retries: run.budgetTelemetry?.cleanup?.retries,
+      transferredBytes: run.budgetTelemetry?.cleanup?.transferredBytes,
+    })} |`,
     `| Declared provider operations | ${display(run.preflight.sandbox.dryRunOperations)} |`,
     "| Timer | `performance.now()` monotonic elapsed time |",
     "| Performance statistics | Minimum, p50, p95, maximum, mean, sample variability |",
@@ -292,6 +304,9 @@ export function renderOutcomeReport(run) {
     "",
     "- [Raw machine-readable results](raw-results.json)",
     "- [Redacted preflight](preflight.json)",
+    ...(run.cleanup?.manifest?.artifact
+      ? [`- [Cleanup manifest](${run.cleanup.manifest.artifact}) — \`${run.cleanup.manifest.digest}\``]
+      : []),
     "",
     "## Sign-off",
     "",
@@ -309,8 +324,25 @@ export function writeRunArtifacts(run, outputDir) {
   const rawPath = path.join(outputDir, "raw-results.json");
   const reportPath = path.join(outputDir, "outcome.md");
   const preflightPath = path.join(outputDir, "preflight.json");
+  let cleanupManifestPath = null;
+  if (run.cleanup?.manifestDocument) {
+    cleanupManifestPath = path.join(
+      outputDir,
+      run.cleanup.manifest?.artifact || "cleanup-manifest.json",
+    );
+    if (!fs.existsSync(cleanupManifestPath)) {
+      writeFileAtomicSync(
+        cleanupManifestPath,
+        JSON.stringify(run.cleanup.manifestDocument, null, 2) + "\n",
+      );
+    }
+    const persisted = CleanupManifest.load(cleanupManifestPath);
+    if (persisted.evidence().digest !== run.cleanup.manifest?.digest) {
+      throw new Error("Retained cleanup manifest digest does not match run evidence");
+    }
+  }
   fs.writeFileSync(rawPath, JSON.stringify(run, null, 2) + "\n", "utf8");
   fs.writeFileSync(reportPath, renderOutcomeReport(run), "utf8");
   fs.writeFileSync(preflightPath, JSON.stringify(run.preflight, null, 2) + "\n", "utf8");
-  return { rawPath, reportPath, preflightPath };
+  return { rawPath, reportPath, preflightPath, cleanupManifestPath };
 }

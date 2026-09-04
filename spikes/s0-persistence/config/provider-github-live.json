@@ -30,11 +30,12 @@
     },
     "dryRunOperations": [
       "connect",
+      "put-run-marker",
       "get-contents",
       "put-contents",
       "list-contents",
       "list-commits",
-      "delete-ref"
+      "cleanup-unsupported"
     ],
     "cleanup": {
       "manifestId": "syn-cleanup-s0-github-live",
