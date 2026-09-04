@@ -592,5 +592,87 @@ await check("separate sync comparison verifies the complete signed proof, approv
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
 });
 
+await check("campaignVariability must be a non-null plain object even when recomputed variability is empty", () => {
+  const config = JSON.parse(fs.readFileSync(
+    path.join(root, "config", "provider-github-live.json"),
+    "utf8",
+  ));
+  const applicable = applicableScenarioIds(config);
+  const directory = path.join(root, ".test-state", "cv-type", config.configurationId);
+  fs.rmSync(directory, { recursive: true, force: true });
+  fs.mkdirSync(directory, { recursive: true });
+  const linkedRun = (index) => ({
+    schemaVersion: 2,
+    evidenceIdentity: buildEvidenceIdentity(config),
+    configuration: {
+      configurationId: config.configurationId,
+      adapter: config.adapter,
+      backingPath: config.backingPath,
+      applicabilityProfile: applicabilityProfile(config),
+      runId: `s0-run-${index}`,
+    },
+    preflight: {
+      sandbox: {
+        effectiveTargetHash: `sha256:t-${index}`,
+        approval: { approver: "R", approvedAt: "2026-09-03T20:00:00.000Z", reference: `syn-${index}`, targetHash: `sha256:t-${index}` },
+      },
+    },
+    catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
+    applicableScenarioIds: applicable,
+    results: applicable.map((scenarioId) => ({ scenarioId, status: "Pass", durationMs: 1, evidence: {}, measurements: {} })),
+  });
+  const writeCampaign = (index, run) => {
+    const name = `campaign-${index}`;
+    fs.mkdirSync(path.join(directory, name), { recursive: true });
+    const raw = `${name}/raw-results.json`;
+    const report = `${name}/outcome.md`;
+    const rawBytes = Buffer.from(JSON.stringify(run));
+    const reportBytes = Buffer.from(`# ${name}\n`);
+    fs.writeFileSync(path.join(directory, raw), rawBytes);
+    fs.writeFileSync(path.join(directory, report), reportBytes);
+    return { name, runId: `s0-run-${index}`, raw, rawSha256: `sha256:${sha256(rawBytes)}`, report, reportSha256: `sha256:${sha256(reportBytes)}` };
+  };
+  const linkedCampaigns = [];
+  const campaigns = [];
+  const approvals = [];
+  for (let index = 1; index <= 3; index++) {
+    const linked = linkedRun(index);
+    linkedCampaigns.push({ name: `campaign-${index}`, run: linked });
+    campaigns.push(writeCampaign(index, linked));
+    approvals.push({ name: `campaign-${index}`, effectiveTargetHash: `sha256:t-${index}`, approval: { approver: "R", approvedAt: "2026-09-03T20:00:00.000Z", reference: `syn-${index}`, targetHash: `sha256:t-${index}` } });
+  }
+  assert.deepEqual(campaignVariability(linkedCampaigns), {}, "this setup must recompute an empty variability object");
+  const baseRun = {
+    schemaVersion: 2,
+    evidenceIdentity: buildEvidenceIdentity(config),
+    configuration: {
+      configurationId: config.configurationId,
+      adapter: config.adapter,
+      backingPath: config.backingPath,
+      applicabilityProfile: applicabilityProfile(config),
+      campaignCount: 3,
+    },
+    catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
+    applicableScenarioIds: applicable,
+    results: combineResults(linkedCampaigns, applicable),
+    campaigns,
+    campaignApprovals: approvals,
+  };
+  const aggregatePath = path.join(directory, "raw-results.json");
+  assert.deepEqual(
+    validateExistingRun({ ...baseRun, campaignVariability: {} }, config, { artifactPath: aggregatePath }),
+    [],
+    "an explicit empty campaignVariability object must pass",
+  );
+  for (const bad of [null, false, 0, "variability", []]) {
+    assert(
+      validateExistingRun({ ...baseRun, campaignVariability: bad }, config, { artifactPath: aggregatePath })
+        .some((error) => /campaignVariability must be a non-null plain object/.test(error)),
+      `campaignVariability=${JSON.stringify(bad)} must be rejected even with empty recomputed variability`,
+    );
+  }
+  fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
+});
+
 console.log(`s0-comparison-report: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

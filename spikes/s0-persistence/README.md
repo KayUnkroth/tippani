@@ -415,13 +415,17 @@ authorization context** — `syncTargetHash`, config revision, signer fingerprin
 the sync approval (`targetHash`/approver/date/reference), the `validatedAt` time,
 and the clients/outcomes — verified by Node's `crypto` against the trusted signer
 whose SPKI fingerprint is pinned into `syncProfile` (and therefore the config
-revision). RSA/EC keys are rejected before verification, and an unkeyed SHA is
-forgeable and is not accepted. If no trusted key is configured, `Pass` is
+revision). The signed proof approval must canonically equal the runtime sync
+approval (approver/date/reference/targetHash) validated before the probe/write, so
+a proof approved for a different approval is rejected before any mutation. RSA/EC
+keys are rejected before verification, and an unkeyed SHA is forgeable and is not
+accepted. If no trusted key is configured, `Pass` is
 unreachable and the result is `Incomplete`. The signed authorization is retained
 **canonically identically** on both the raw run and the aggregate `separateSync`
 record; comparison requires the two copies to match, requires the retained
-authorization to be derived from (bound to) the signed proof, and rejects any
-`validatedAt` after the linked run's `completedAt` or the current time. Because the
+authorization to be derived from (bound to) the signed proof, requires a valid
+finite linked-run `completedAt` for every retained Pass, and rejects any
+`validatedAt` after that `completedAt` or the current time. Because the
 temporal bounds use the signed `validatedAt` capped by the current clock, waiting
 can never make future-dated (e.g. a 2099 proof with a fabricated 2100 receipt)
 evidence valid. Until credible automatic proof exists, the **required future

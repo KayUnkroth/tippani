@@ -68,6 +68,7 @@ export function validateCrossClientEvidence(artifact, {
   configRevision = null,
   trustedPublicKey = null,
   trustedFingerprint = null,
+  expectedApproval = null,
   now = Date.now(),
 } = {}) {
   if (!artifact || typeof artifact !== "object") {
@@ -126,6 +127,19 @@ export function validateCrossClientEvidence(artifact, {
   }
   if (!approval.targetHash || approval.targetHash !== boundTargetHash) {
     errors.push("evidence approval is not bound to the sync target hash");
+  }
+  // The signed proof approval must canonically equal the runtime sync approval
+  // validated before the probe/write (approver/date/reference/targetHash).
+  if (expectedApproval && typeof expectedApproval === "object") {
+    const canonicalApproval = (value) => stableJson({
+      targetHash: value?.targetHash ?? null,
+      approver: value?.approver ?? null,
+      approvedAt: value?.approvedAt ?? null,
+      reference: value?.reference ?? null,
+    });
+    if (canonicalApproval(approval) !== canonicalApproval(expectedApproval)) {
+      errors.push("evidence approval does not match the runtime sync approval");
+    }
   }
   if (!trustedFingerprint) {
     errors.push("no trusted signer fingerprint is configured; a signed cross-client artifact cannot be verified");
@@ -244,6 +258,7 @@ export function assessSyncedFolderEvidence({
     configRevision,
     trustedPublicKey,
     trustedFingerprint,
+    expectedApproval: syncApproval,
     now,
   });
   if (evidenceErrors.length) {
@@ -361,7 +376,12 @@ export function verifyRetainedSyncProof({
     errors.push("retained sync approval reuses the provider-API target hash");
   }
   const validationTime = Date.parse(authorization.validatedAt);
-  const completed = linkedCompletedAt ? Date.parse(linkedCompletedAt) : NaN;
+  const completed = Date.parse(linkedCompletedAt);
+  // Every retained Pass must carry a valid, finite linked-run completedAt so the
+  // validatedAt upper bound is always enforced (never skipped).
+  if (typeof linkedCompletedAt !== "string" || !Number.isFinite(completed)) {
+    errors.push("retained sync proof requires a valid linked run completedAt");
+  }
   if (typeof authorization.validatedAt !== "string" || !Number.isFinite(validationTime)) {
     errors.push("retained sync authorization has no valid validation time");
   } else {

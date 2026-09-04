@@ -52,6 +52,13 @@ function sign(artifact) {
   return { ...artifact, signature: signature.toString("base64") };
 }
 
+const syncApproval = {
+  targetHash: approvedHash,
+  approver: "S0 sync approver",
+  approvedAt: "2026-09-03T20:00:00.000Z",
+  reference: "syn-sync-approval-1",
+};
+
 function signedArtifact(overrides = {}) {
   const now = Date.now();
   return sign({
@@ -66,22 +73,10 @@ function signedArtifact(overrides = {}) {
       { clientId: "device-B-1a77", observedAt: new Date(now - 60000).toISOString(), operations: ["edit"] },
     ],
     outcomes: { conflict: true, recovery: true, conflictArtifacts: ["workspace-device-B.json"] },
-    approval: {
-      targetHash: approvedHash,
-      approver: "Windows sync-client test owner",
-      approvedAt: new Date(now - 120000).toISOString(),
-      reference: "syn-sync-001",
-    },
+    approval: { ...syncApproval },
     ...overrides,
   });
 }
-
-const syncApproval = {
-  targetHash: approvedHash,
-  approver: "S0 sync approver",
-  approvedAt: "2026-09-03T20:00:00.000Z",
-  reference: "syn-sync-approval-1",
-};
 
 function baseInput(overrides = {}) {
   return {
@@ -330,7 +325,7 @@ await check("a valid Pass retains an authorization context derived from the sign
       { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
     ],
   });
-  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact, now: base }));
+  const detail = assessSyncedFolderEvidence(baseInput({ retainedEvidence: artifact, syncApproval: approval, now: base }));
   assert.ok(detail.evidence);
   const authorization = detail.evidence.syncAuthorization;
   assert.equal(authorization.syncTargetHash, approvedHash);
@@ -455,6 +450,38 @@ await check("linked and separate retained copies must be canonically identical",
     expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
   });
   assert(errors.some((error) => /not canonically identical/.test(error)));
+});
+
+await check("a signed proof approval that differs from the runtime sync approval is rejected before the probe", () => {
+  const runtimeDifferent = { ...syncApproval, reference: "runtime-approval-differs" };
+  const detail = assessSyncedFolderEvidence(baseInput({ syncApproval: runtimeDifferent }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /approval does not match the runtime sync approval/);
+  assert.equal(detail.evidence, undefined);
+});
+
+await check("a signed proof approval that exactly matches the runtime sync approval passes", () => {
+  const detail = assessSyncedFolderEvidence(baseInput());
+  assert.ok(detail.evidence);
+  assert.deepEqual(detail.evidence.syncAuthorization.syncApproval, syncApproval);
+});
+
+await check("verifyRetainedSyncProof requires a finite linkedCompletedAt (null)", () => {
+  const { linkedResult, separateRecord } = retainedPair({});
+  const errors = verifyRetainedSyncProof({
+    linkedResult, separateRecord, linkedCompletedAt: null,
+    expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /requires a valid linked run completedAt/.test(error)));
+});
+
+await check("verifyRetainedSyncProof requires a finite linkedCompletedAt (invalid string)", () => {
+  const { linkedResult, separateRecord } = retainedPair({});
+  const errors = verifyRetainedSyncProof({
+    linkedResult, separateRecord, linkedCompletedAt: "not-a-timestamp",
+    expectedConfigRevision: configRevision, expectedSignerFingerprint: signerFingerprint,
+  });
+  assert(errors.some((error) => /requires a valid linked run completedAt/.test(error)));
 });
 
 console.log(`s0-synced-folder: ${pass} passed, ${fail} failed`);

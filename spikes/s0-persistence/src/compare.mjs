@@ -152,8 +152,14 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
     linkedCampaigns.push({ name: campaign?.name, run: linked });
   }
   const claimedResults = Array.isArray(run?.results) ? run.results : [];
+  const campaignVariabilityValue = run?.campaignVariability;
+  const campaignVariabilityIsObject = campaignVariabilityValue !== null &&
+    typeof campaignVariabilityValue === "object" &&
+    !Array.isArray(campaignVariabilityValue);
   if (!run || !("campaignVariability" in run)) {
     errors.push("aggregate is missing campaignVariability");
+  } else if (!campaignVariabilityIsObject) {
+    errors.push("aggregate campaignVariability must be a non-null plain object");
   }
   if (!recomputable || linkedCampaigns.length !== campaigns.length) {
     for (const result of claimedResults) {
@@ -180,11 +186,12 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
       errors.push(`${result.scenarioId} aggregate result does not match the recomputed linked-campaign result`);
     }
   }
-  // campaignVariability is always required and canonically compared; an absent
-  // aggregate value recomputes to an explicit empty object.
+  // campaignVariability is always required as a non-null plain object and is
+  // compared directly (never coerced) with the recomputed object, which is an
+  // explicit empty object when no per-campaign variability exists.
   const recomputedVariability = campaignVariability(linkedCampaigns) || {};
-  if (("campaignVariability" in (run || {})) &&
-      stableJson(run.campaignVariability || {}) !== stableJson(recomputedVariability)) {
+  if (campaignVariabilityIsObject &&
+      stableJson(campaignVariabilityValue) !== stableJson(recomputedVariability)) {
     errors.push("aggregate campaignVariability does not match the recomputed linked-campaign variability");
   }
   return errors;

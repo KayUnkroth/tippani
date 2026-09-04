@@ -1158,8 +1158,9 @@ async function syncedFolderCompatibility(context) {
     now: validationTime,
   });
   if (precondition) return precondition;
-  const probe = sameDeviceSyncProbe(syncRoot, context.config.runId);
-  return assessSyncedFolderEvidence({
+  // Fully validate the signed proof (including that its approval canonically
+  // equals the runtime sync approval) BEFORE any probe or filesystem write.
+  const evidenceInputs = {
     boundTargetHash,
     syncApproval,
     providerApprovalTargetHash,
@@ -1171,8 +1172,18 @@ async function syncedFolderCompatibility(context) {
     trustedPublicKey: resolveTrustedSignerKey(profile, env),
     trustedFingerprint: profile?.trustedSignerFingerprint || null,
     now: validationTime,
-    probe,
-  });
+  };
+  const gate = assessSyncedFolderEvidence(evidenceInputs);
+  if (!gate.evidence) return gate;
+  // Approved and cryptographically valid: run the probe and attach its measurement.
+  const probe = sameDeviceSyncProbe(syncRoot, context.config.runId);
+  if (Number.isFinite(probe.conflictFilesCreated)) {
+    gate.evidence.sameDeviceConflictFiles = probe.conflictFilesCreated;
+  }
+  gate.measurements = Number.isFinite(probe.createMs)
+    ? { syncedFolderCreateMs: probe.createMs }
+    : {};
+  return gate;
 }
 
 async function complexityRubric(context) {
