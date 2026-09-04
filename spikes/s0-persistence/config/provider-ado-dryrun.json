@@ -32,6 +32,7 @@
     },
     "dryRunOperations": [
       "connect",
+      "push-run-marker",
       "put-workspace",
       "get-workspace",
       "export-history"

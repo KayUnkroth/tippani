@@ -14,6 +14,7 @@
 // construction/runtime (never hardcoded), so no corporate coordinate or
 // credential lives in the repo.
 
+import crypto from "node:crypto";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -32,6 +33,7 @@ import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry } from "./provider-telemetry.mjs";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
+const RUN_MARKER_NAME = ".tippani-s0-run";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function encodePath(p) {
@@ -57,6 +59,7 @@ export class OneDriveGraphStore {
     enforcePreflight = false,
     ownershipMarker,
     cleanupManifestId = null,
+    cleanupManifestNonce = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.driveId = driveId || process.env.S0_ONEDRIVE_DRIVE_ID || null;
@@ -77,6 +80,7 @@ export class OneDriveGraphStore {
     this.enforcePreflight = enforcePreflight === true;
     this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
     this.cleanupManifestId = cleanupManifestId;
+    this.cleanupManifestNonce = cleanupManifestNonce;
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
@@ -110,6 +114,55 @@ export class OneDriveGraphStore {
   // write lands but the client never sees the acknowledgement).
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  bindCleanupManifestNonce(nonce) {
+    if (typeof nonce !== "string" || !nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is required", "cleanup_manifest_required");
+    }
+    if (this.cleanupManifestNonce && this.cleanupManifestNonce !== nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is immutable", "cleanup_manifest_mismatch");
+    }
+    this.cleanupManifestNonce = nonce;
+  }
+
+  ensureCleanupManifestNonce() {
+    if (!this.cleanupManifestNonce) {
+      if (this.enforcePreflight) {
+        throw new WorkspaceStoreError(
+          "Provider initialization requires a persisted cleanup manifest nonce",
+          "cleanup_manifest_required",
+        );
+      }
+      this.cleanupManifestNonce = `syn-test-${this.runId}`;
+    }
+  }
+
+  runMarkerPath() {
+    return `${this.subfolder}/${RUN_MARKER_NAME}`;
+  }
+
+  runMarker() {
+    return {
+      schemaVersion: 1,
+      syntheticData: true,
+      kind: "tippani-s0-onedrive-run",
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      namespace: `tippani-s0/${this.runId}`,
+      effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+      manifestNonce: this.cleanupManifestNonce,
+      driveId: this.driveId,
+      folder: this.baseFolder,
+    };
+  }
+
+  runMarkerContent() {
+    return JSON.stringify(this.runMarker());
+  }
+
+  runMarkerDigest() {
+    return `sha256:${crypto.createHash("sha256").update(this.runMarkerContent()).digest("hex")}`;
   }
 
   async resolveCredentialIdentity() {
@@ -225,27 +278,104 @@ export class OneDriveGraphStore {
   }
 
   async ensureSubfolder() {
-    // Idempotent create of the per-run subfolder chain under the base folder.
     const parts = `tippani-s0/${this.runId}`.split("/");
     let parent = this.baseFolder;
-    for (const part of parts) {
+    for (const [index, part] of parts.entries()) {
       await this.safetyBudget?.recordObjects(1);
       const listUrl = `/drives/${this.driveId}/root:/${encodePath(parent)}:/children`;
       const resp = await this.graph("POST", listUrl, {
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: part, folder: {}, "@microsoft.graph.conflictBehavior": "replace" }),
+        body: JSON.stringify({ name: part, folder: {}, "@microsoft.graph.conflictBehavior": "fail" }),
       });
       if (!resp.ok && resp.status !== 409) {
         throw new WorkspaceStoreError(`ensure-folder ${part} failed: ${resp.status}`, "provider_error");
       }
       parent = `${parent}/${part}`;
+      if (index === parts.length - 1) {
+        if (resp.status === 409) await this.verifyRunMarker();
+        else await this.createRunMarker();
+      }
     }
+  }
+
+  async createRunMarker() {
+    await this.safetyBudget?.recordObjects(1);
+    this.record("put-run-marker", {
+      item: this.runMarkerPath(),
+      precondition: "conflictBehavior=fail",
+    });
+    const response = await this.graph(
+      "PUT",
+      `/drives/${this.driveId}/root:/${encodePath(this.runMarkerPath())}:/content?@microsoft.graph.conflictBehavior=fail`,
+      {
+        headers: { "Content-Type": "application/json" },
+        body: this.runMarkerContent(),
+      },
+    );
+    if (response.status === 409) {
+      await this.verifyRunMarker();
+      return;
+    }
+    if (!response.ok) {
+      throw new WorkspaceStoreError(
+        `run ownership marker create failed: ${response.status}`,
+        "cleanup_ownership_mismatch",
+      );
+    }
+  }
+
+  async verifyRunMarker() {
+    const meta = await this.graph(
+      "GET",
+      `/drives/${this.driveId}/root:/${encodePath(this.runMarkerPath())}?$select=id,eTag`,
+    );
+    if (!meta.ok) {
+      throw new WorkspaceStoreError(
+        "OneDrive run folder lacks the persisted ownership marker",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    const { id, eTag } = await meta.json();
+    if (!id || !eTag) {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker identity is incomplete",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    const content = await this.graph("GET", `/drives/${this.driveId}/items/${id}/content`);
+    if (!content.ok) {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker content is unavailable",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    let marker;
+    try {
+      marker = JSON.parse(await content.text());
+    } catch {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker content is invalid",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    if (JSON.stringify(marker) !== JSON.stringify(this.runMarker())) {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker does not match this approved run",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    return { id, eTag, digest: this.runMarkerDigest() };
   }
 
   async initialize() {
     await this.assertEffectiveTargetApproved();
+    this.ensureCleanupManifestNonce();
     this.record("ensure-folder", { path: `${this.baseFolder ?? "<folder>"}/tippani-s0/${this.runId}` });
     if (this.dryRun) {
+      this.record("put-run-marker", {
+        item: this.runMarkerPath(),
+        precondition: "conflictBehavior=fail-or-verify",
+      });
       await this.model.initialize();
       this.initialized = true;
       return { backingPath: "onedrive", dryRun: true, subfolder: this.subfolder };
@@ -407,6 +537,12 @@ export class OneDriveGraphStore {
         folder: this.baseFolder,
       }),
       effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+      manifestNonce: this.cleanupManifestNonce,
+      marker: {
+        kind: "onedrive-item",
+        id: this.runMarkerPath(),
+        digest: this.runMarkerDigest(),
+      },
     };
   }
 
@@ -431,7 +567,13 @@ export class OneDriveGraphStore {
     if (!id || !eTag) {
       throw new WorkspaceStoreError("cleanup precondition unavailable", "cleanup_precondition_unavailable");
     }
-    manifest.bindCondition(resource, { expectedItemId: id, expectedETag: eTag });
+    const marker = await this.verifyRunMarker();
+    manifest.bindCondition(resource, {
+      expectedItemId: id,
+      expectedETag: eTag,
+      expectedMarkerItemId: marker.id,
+      expectedMarkerDigest: marker.digest,
+    });
     return resource.condition;
   }
 
@@ -499,6 +641,14 @@ export class OneDriveGraphStore {
     if (id !== resource.condition.expectedItemId ||
         eTag !== resource.condition.expectedETag) {
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
+    const marker = await this.verifyRunMarker();
+    if (marker.id !== resource.condition.expectedMarkerItemId ||
+        marker.digest !== resource.condition.expectedMarkerDigest) {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker changed after cleanup preparation",
+        "cleanup_ownership_mismatch",
+      );
     }
     manifest.markMutating(resource);
     const resp = await this.graph("DELETE", `/drives/${this.driveId}/items/${id}`, {

@@ -62,7 +62,13 @@ let config = resolveEffectiveProviderConfig({
     ownershipMarker: `tippani-s0:${runId}`,
     namespace: `tippani-s0/${runId}`,
     coordinates: { driveId, folder },
-    dryRunOperations: ["ensure-folder", "put-content", "get-content", "delete-folder"],
+    dryRunOperations: [
+      "ensure-folder",
+      "put-run-marker",
+      "put-content",
+      "get-content",
+      "delete-folder",
+    ],
     cleanup: { manifestId: `syn-cleanup-${runId}`, retentionHours: 1 },
   },
 });
@@ -99,6 +105,7 @@ const makeStore = () => new OneDriveGraphStore({
   enforcePreflight: true,
   ownershipMarker: config.sandbox.ownershipMarker,
   cleanupManifestId: config.sandbox.cleanup.manifestId,
+  cleanupManifestNonce: config.sandbox.cleanup.manifestNonce,
   safetyBudget,
   signal: abortController.signal,
 });

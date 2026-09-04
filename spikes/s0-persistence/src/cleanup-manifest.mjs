@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import path from "node:path";
 import { writeFileAtomicSync } from "./adapters/fs-atomic.mjs";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const CLEANUP_PHASES = new Set([
   "recorded",
   "prepared",
@@ -38,6 +38,7 @@ export class CleanupManifest {
     manifestId = null,
     coordinatesHash = null,
     effectiveTargetHash = null,
+    manifestNonce = null,
     filePath = null,
     revision = 0,
   }) {
@@ -49,6 +50,7 @@ export class CleanupManifest {
     this.manifestId = manifestId;
     this.coordinatesHash = coordinatesHash;
     this.effectiveTargetHash = effectiveTargetHash;
+    this.manifestNonce = manifestNonce;
     this.filePath = filePath;
     this.revision = revision;
     this.resources = [];
@@ -62,7 +64,7 @@ export class CleanupManifest {
       throw new Error("Cleanup manifest is not valid JSON");
     }
     const { manifestDigest: recordedDigest, ...payload } = document || {};
-    if (![2, SCHEMA_VERSION].includes(payload.schemaVersion) ||
+    if (![2, 3, SCHEMA_VERSION].includes(payload.schemaVersion) ||
         payload.syntheticData !== true ||
         !Number.isInteger(payload.revision) ||
         payload.revision < 0 ||
@@ -86,6 +88,7 @@ export class CleanupManifest {
       manifestId: payload.manifestId,
       coordinatesHash: payload.coordinatesHash,
       effectiveTargetHash: payload.effectiveTargetHash,
+      manifestNonce: payload.manifestNonce || null,
       filePath,
       revision: payload.revision,
     });
@@ -96,6 +99,8 @@ export class CleanupManifest {
           resource.ownershipMarker !== manifest.ownershipMarker ||
           (resource.coordinatesHash ?? null) !== manifest.coordinatesHash ||
           (resource.effectiveTargetHash ?? null) !== manifest.effectiveTargetHash ||
+          (manifest.manifestNonce &&
+            resource.manifestNonce !== manifest.manifestNonce) ||
           !CLEANUP_PHASES.has(resource.phase) ||
           (resource.cleaned === true) !== (resource.phase === "cleaned") ||
           typeof resource.cleaned !== "boolean") {
@@ -117,6 +122,9 @@ export class CleanupManifest {
     if ((resource.coordinatesHash ?? null) !== this.coordinatesHash ||
         (resource.effectiveTargetHash ?? null) !== this.effectiveTargetHash) {
       throw new Error("Cleanup resource does not match the approved provider target");
+    }
+    if (this.manifestNonce && resource.manifestNonce !== this.manifestNonce) {
+      throw new Error("Cleanup resource does not match the persisted manifest nonce");
     }
     if (this.resources.some((item) => item.id === resource.id && item.kind === resource.kind)) {
       throw new Error(`Cleanup resource already recorded: ${resource.kind}/${resource.id}`);
@@ -238,6 +246,7 @@ export class CleanupManifest {
       manifestId: this.manifestId,
       coordinatesHash: this.coordinatesHash,
       effectiveTargetHash: this.effectiveTargetHash,
+      manifestNonce: this.manifestNonce,
       resources: this.resources.map((item) => structuredClone(item)),
     };
   }
@@ -255,6 +264,7 @@ export class CleanupManifest {
     return {
       artifact: this.filePath ? path.basename(this.filePath) : "cleanup-manifest.json",
       manifestId: this.manifestId,
+      manifestNonce: this.manifestNonce,
       digest: document.manifestDigest,
       schemaVersion: document.schemaVersion,
       revision: document.revision,
@@ -287,6 +297,23 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
   if (typeof store?.cleanupResource !== "function") {
     throw new TypeError("Provider store must describe its cleanup resource");
   }
+  const persistedManifest = filePath && fs.existsSync(filePath)
+    ? CleanupManifest.load(filePath)
+    : null;
+  const configuredNonce = config.sandbox?.cleanup?.manifestNonce || null;
+  const manifestNonce =
+    persistedManifest?.manifestNonce ||
+    configuredNonce ||
+    store.cleanupManifestNonce ||
+    crypto.randomUUID();
+  if (persistedManifest && (!persistedManifest.manifestNonce ||
+      (configuredNonce && configuredNonce !== persistedManifest.manifestNonce))) {
+    throw new Error("Persisted cleanup manifest nonce does not match this provider run");
+  }
+  store.bindCleanupManifestNonce?.(manifestNonce);
+  if (config.sandbox?.cleanup) {
+    config.sandbox.cleanup.manifestNonce = manifestNonce;
+  }
   const resource = store.cleanupResource();
   const coordinates = config.backingPath === "onedrive"
     ? {
@@ -309,12 +336,13 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
     config.sandbox?.approval?.targetHash ||
     "dry-run-unapproved";
   if (resource.coordinatesHash !== coordinatesHash ||
-      resource.effectiveTargetHash !== effectiveTargetHash) {
+      resource.effectiveTargetHash !== effectiveTargetHash ||
+      resource.manifestNonce !== manifestNonce) {
     throw new Error("Cleanup store does not match the approved provider coordinates");
   }
   const manifestId = config.sandbox?.cleanup?.manifestId || null;
-  if (filePath && fs.existsSync(filePath)) {
-    const manifest = CleanupManifest.load(filePath);
+  if (persistedManifest) {
+    const manifest = persistedManifest;
     const recorded = manifest.resources.find((candidate) =>
       candidate.kind === resource.kind && candidate.id === resource.id);
     if (manifest.runId !== config.runId ||
@@ -322,12 +350,16 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
         manifest.manifestId !== manifestId ||
         manifest.coordinatesHash !== coordinatesHash ||
         manifest.effectiveTargetHash !== effectiveTargetHash ||
+        manifest.manifestNonce !== manifestNonce ||
         !recorded ||
         recorded.cleaned === true ||
         recorded.runId !== resource.runId ||
         recorded.ownershipMarker !== resource.ownershipMarker ||
         recorded.coordinatesHash !== resource.coordinatesHash ||
-        recorded.effectiveTargetHash !== resource.effectiveTargetHash) {
+        recorded.effectiveTargetHash !== resource.effectiveTargetHash ||
+        recorded.manifestNonce !== resource.manifestNonce ||
+        JSON.stringify(recorded.marker || null) !==
+          JSON.stringify(resource.marker || null)) {
       throw new Error("Persisted cleanup manifest does not authorize this provider run");
     }
     const resumedResource = structuredClone(recorded);
@@ -341,6 +373,7 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
     manifestId,
     coordinatesHash,
     effectiveTargetHash,
+    manifestNonce,
     filePath,
   });
   manifest.record(resource);
@@ -355,7 +388,11 @@ export function assertCleanupAuthorized(manifest, resource, expected) {
       resource?.runId !== expected?.runId ||
       resource?.ownershipMarker !== expected?.ownershipMarker ||
       resource?.coordinatesHash !== expected?.coordinatesHash ||
-      resource?.effectiveTargetHash !== expected?.effectiveTargetHash) {
+      resource?.effectiveTargetHash !== expected?.effectiveTargetHash ||
+      resource?.manifestNonce !== expected?.manifestNonce ||
+      manifest.manifestNonce !== expected?.manifestNonce ||
+      JSON.stringify(resource?.marker || null) !==
+        JSON.stringify(expected?.marker || null)) {
     throw new Error("Refusing provider cleanup without exact manifest authorization");
   }
 }

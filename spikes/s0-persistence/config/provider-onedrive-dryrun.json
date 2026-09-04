@@ -30,6 +30,7 @@
     },
     "dryRunOperations": [
       "ensure-folder",
+      "put-run-marker",
       "put-content",
       "get-content",
       "list-children",

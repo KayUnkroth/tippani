@@ -12,6 +12,7 @@ import {
   createCleanupAuthorization,
 } from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
+import { OperationBudget } from "../src/operation-budget.mjs";
 
 let pass = 0;
 let fail = 0;
@@ -142,6 +143,105 @@ await check("gates report Blocked outside a live provider context", async () => 
   }
 });
 
+await check("ADO initialize rejects a foreign preexisting run branch", async () => {
+  let pushes = 0;
+  const store = new AdoGitStore({
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId: "s0-ado-foreign-branch",
+    adoToken: "syn-token",
+    fetchImpl: async (url, options) => {
+      if (options.method === "GET" && new URL(url).pathname.endsWith("/refs")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ value: [{ objectId: "foreign-tip" }] }),
+        };
+      }
+      if (options.method === "GET") {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ foreign: true }) };
+      }
+      pushes++;
+      return { ok: true, status: 201, json: async () => ({}) };
+    },
+  });
+  await assert.rejects(
+    store.initialize(),
+    (error) => error.code === "cleanup_ownership_mismatch",
+  );
+  assert.equal(pushes, 0, "a foreign branch must not be claimed or overwritten");
+});
+
+await check("ADO marker creation is covered by the persisted manifest and budget", async () => {
+  const runId = "s0-ado-marker-budget";
+  const root = path.resolve("spikes/s0-persistence/.test-state", runId);
+  const manifestPath = path.join(root, "cleanup-manifest.json");
+  const budget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+  });
+  let markerCreated = false;
+  let store;
+  const fetchImpl = async (url, options) => {
+    if (options.method === "GET") {
+      return { ok: true, status: 200, json: async () => ({ value: [] }) };
+    }
+    const push = JSON.parse(options.body);
+    assert.equal(fs.existsSync(manifestPath), true);
+    assert.equal(
+      push.commits[0].changes[0].newContent.content,
+      store.runMarkerContent(),
+    );
+    assert.equal(
+      CleanupManifest.load(manifestPath).manifestNonce,
+      store.cleanupManifestNonce,
+    );
+    assert.equal(
+      CleanupManifest.load(manifestPath).resources[0].marker.digest,
+      store.runMarkerDigest(),
+    );
+    markerCreated = true;
+    return {
+      ok: true,
+      status: 201,
+      json: async () => ({ refUpdates: [{ newObjectId: "marker-tip" }] }),
+    };
+  };
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    store = new AdoGitStore({
+      dryRun: false,
+      org: "O",
+      project: "P",
+      repo: "R",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      adoToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl,
+    });
+    createCleanupAuthorization({
+      runId,
+      backingPath: "ado",
+      sandbox: {
+        ownershipMarker: `tippani-s0:${runId}`,
+        effectiveTargetHash: "sha256:syn-target",
+        coordinates: { organization: "O", project: "P", repository: "R" },
+        cleanup: { manifestId: `syn-cleanup-${runId}` },
+      },
+    }, store, { filePath: manifestPath });
+    await store.initialize();
+    assert.equal(markerCreated, true);
+    assert.equal(budget.snapshot().operations, 2);
+    assert.equal(budget.snapshot().objects, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 await check("ADO teardown is manifest-authorized and oldObjectId-conditional", async () => {
   const runId = "s0-ado-cleanup";
   let conditional = false;
@@ -154,8 +254,11 @@ await check("ADO teardown is manifest-authorized and oldObjectId-conditional", a
     cleanupManifestId: `syn-cleanup-${runId}`,
     effectiveTargetHash: "sha256:syn-target",
     adoToken: "syn-token",
-    fetchImpl: async (_url, options) => {
+    fetchImpl: async (url, options) => {
       if (options.method === "GET") {
+        if (new URL(url).pathname.endsWith("/items")) {
+          return { ok: true, status: 200, text: async () => store.runMarkerContent() };
+        }
         return { ok: true, status: 200, json: async () => ({ value: [{ objectId: "tip-1" }] }) };
       }
       const update = JSON.parse(options.body)[0];
@@ -175,8 +278,66 @@ await check("ADO teardown is manifest-authorized and oldObjectId-conditional", a
     },
   }, store);
   await store.prepareCleanup(authorization);
+  assert.equal(
+    authorization.resource.condition.expectedMarkerDigest,
+    store.runMarkerDigest(),
+  );
   await store.cleanup(authorization);
   assert.equal(conditional, true);
+});
+
+await check("ADO cleanup rejects ownership marker tampering", async () => {
+  const runId = "s0-ado-cleanup-marker-tamper";
+  let tampered = false;
+  let updates = 0;
+  const store = new AdoGitStore({
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    adoToken: "syn-token",
+    fetchImpl: async (url, options) => {
+      if (options.method === "GET" && new URL(url).pathname.endsWith("/items")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => tampered
+            ? JSON.stringify({ foreign: true })
+            : store.runMarkerContent(),
+        };
+      }
+      if (options.method === "GET") {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ value: [{ objectId: "tip-1" }] }),
+        };
+      }
+      updates++;
+      return { ok: true, status: 200, json: async () => ({ value: [{ success: true }] }) };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "ado",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { organization: "O", project: "P", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  tampered = true;
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_ownership_mismatch",
+  );
+  assert.equal(updates, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
 });
 
 await check("ADO cleanup rechecks an absent ref and rejects concurrent creation", async () => {
@@ -240,8 +401,12 @@ await check("ADO cleanup reconciles a crash after remote ref deletion", async ()
   };
   let tip = "tip-1";
   let updates = 0;
-  const fetchImpl = async (_url, options) => {
+  let markerContent = null;
+  const fetchImpl = async (url, options) => {
     if (options.method === "GET") {
+      if (new URL(url).pathname.endsWith("/items")) {
+        return { ok: true, status: 200, text: async () => markerContent };
+      }
       return {
         ok: true,
         status: 200,
@@ -269,6 +434,7 @@ await check("ADO cleanup reconciles a crash after remote ref deletion", async ()
     const authorization = createCleanupAuthorization(config, first, {
       filePath: manifestPath,
     });
+    markerContent = first.runMarkerContent();
     await first.prepareCleanup(authorization);
     authorization.manifest.markDeleted = () => {
       throw new Error("simulated process death after remote deletion");

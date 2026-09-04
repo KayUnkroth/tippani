@@ -295,6 +295,7 @@ for (const item of credentialRotationCases) {
       dryRun: false,
       runId,
       ...item.options,
+      cleanupManifestNonce: `nonce-${item.provider}-credential-binding`,
       getToken: async () => issuance++ === 0 ? "token-a" : "token-b",
       identityResolver: async ({ token }) => ({
         subject: `${item.provider}:${token === "token-a" ? "identity-a" : "identity-b"}`,
@@ -337,6 +338,7 @@ await check("a rotated credential is re-resolved and accepted only for the appro
     owner: "synthetic-owner",
     repo: "synthetic-repository",
     runId,
+    cleanupManifestNonce: "nonce-github-approved-rotation",
     getToken: async () => issuance++ === 0 ? "token-a" : "token-b",
     identityResolver: async ({ token }) => {
       resolvedTokens.push(token);
@@ -433,6 +435,7 @@ await check("an atomically persisted cleanup manifest survives process death and
       runId,
       ownershipMarker: `tippani-s0:${runId}`,
       cleanupManifestId: `syn-cleanup-${runId}`,
+      cleanupManifestNonce: `nonce-${runId}`,
       effectiveTargetHash: "sha256:cleanup-manifest-target",
     });
     const resource = store.cleanupResource();
@@ -462,7 +465,10 @@ await check("an atomically persisted cleanup manifest survives process death and
         ownershipMarker: `tippani-s0:${runId}`,
         effectiveTargetHash: "sha256:cleanup-manifest-target",
         coordinates: { driveId: "drive-a", folder: "Synthetic" },
-        cleanup: { manifestId: `syn-cleanup-${runId}` },
+        cleanup: {
+          manifestId: `syn-cleanup-${runId}`,
+          manifestNonce: `nonce-${runId}`,
+        },
       },
     }, store, { filePath: manifestPath });
     const recovered = recoveredAuthorization.manifest;
@@ -528,6 +534,32 @@ await check("runner persists and meters cleanup under the shared approved deadli
       }
       assert.equal(options.signal, identitySignal, "cleanup must retain the shared deadline signal");
       if (options.method === "GET") {
+        if (url.includes("/items/marker-a/content")) {
+          const manifest = CleanupManifest.load(manifestPath);
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({
+              schemaVersion: 1,
+              syntheticData: true,
+              kind: "tippani-s0-onedrive-run",
+              runId,
+              ownershipMarker: `tippani-s0:${runId}`,
+              namespace: `tippani-s0/${runId}`,
+              effectiveTargetHash: targetHash,
+              manifestNonce: manifest.manifestNonce,
+              driveId: "drive-a",
+              folder: "Synthetic",
+            }),
+          };
+        }
+        if (url.includes(".tippani-s0-run")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ id: "marker-a", eTag: "marker-etag-a" }),
+          };
+        }
         cleanupGetAttempts++;
         if (cleanupGetAttempts === 1) throw new TypeError("synthetic cleanup retry");
         assert.equal(fs.existsSync(manifestPath), true);
@@ -542,6 +574,8 @@ await check("runner persists and meters cleanup under the shared approved deadli
         assert.deepEqual(persisted.resources[0].condition, {
           expectedItemId: "folder-a",
           expectedETag: "etag-a",
+          expectedMarkerItemId: "marker-a",
+          expectedMarkerDigest: persisted.resources[0].marker.digest,
         });
         cleanupMutationSawManifest = true;
         return { ok: true, status: 204 };
@@ -569,14 +603,14 @@ await check("runner persists and meters cleanup under the shared approved deadli
       run.cleanup.budgetBefore.deadlineAt,
       run.cleanup.budgetAfter.deadlineAt,
     );
-    assert.equal(run.cleanup.providerTelemetry.requests, 5);
+    assert.equal(run.cleanup.providerTelemetry.requests, 9);
     assert.equal(run.cleanup.providerTelemetry.retries, 1);
     assert(run.cleanup.providerTelemetry.transferredBytes > 0);
     assert.equal(run.cleanup.manifest.cleanedCount, 1);
     assert.equal(run.cleanup.manifest.phases.cleaned, 1);
     assert.equal(run.cleanup.manifest.revision, 5);
     assert.deepEqual(run.budgetTelemetry.final, run.safetyBudget);
-    assert.equal(run.safetyBudget.operations, 7);
+    assert.equal(run.safetyBudget.operations, 11);
     assert.equal(artifacts.cleanupManifestPath, manifestPath);
     assert(
       fs.readFileSync(artifacts.reportPath, "utf8").includes(run.cleanup.manifest.digest),

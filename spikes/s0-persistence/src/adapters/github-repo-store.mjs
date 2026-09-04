@@ -58,6 +58,7 @@ export class GitHubRepoStore {
     enforcePreflight = false,
     ownershipMarker,
     cleanupManifestId = null,
+    cleanupManifestNonce = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.owner = owner || process.env.S0_GITHUB_OWNER || null;
@@ -78,6 +79,7 @@ export class GitHubRepoStore {
     this.enforcePreflight = enforcePreflight === true;
     this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
     this.cleanupManifestId = cleanupManifestId;
+    this.cleanupManifestNonce = cleanupManifestNonce;
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
@@ -108,6 +110,28 @@ export class GitHubRepoStore {
 
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  bindCleanupManifestNonce(nonce) {
+    if (typeof nonce !== "string" || !nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is required", "cleanup_manifest_required");
+    }
+    if (this.cleanupManifestNonce && this.cleanupManifestNonce !== nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is immutable", "cleanup_manifest_mismatch");
+    }
+    this.cleanupManifestNonce = nonce;
+  }
+
+  ensureCleanupManifestNonce() {
+    if (!this.cleanupManifestNonce) {
+      if (this.enforcePreflight) {
+        throw new WorkspaceStoreError(
+          "Provider initialization requires a persisted cleanup manifest nonce",
+          "cleanup_manifest_required",
+        );
+      }
+      this.cleanupManifestNonce = `syn-test-${this.runId}`;
+    }
   }
 
   async resolveCredentialIdentity() {
@@ -169,6 +193,7 @@ export class GitHubRepoStore {
       baseSha,
       effectiveTargetHash: this.effectiveTargetHash,
       cleanupManifestId: this.cleanupManifestId,
+      manifestNonce: this.cleanupManifestNonce,
     };
   }
 
@@ -336,6 +361,7 @@ export class GitHubRepoStore {
 
   async initialize() {
     await this.assertEffectiveTargetApproved();
+    this.ensureCleanupManifestNonce();
     this.record("connect");
     if (this.dryRun) {
       this.record("put-run-marker", {
@@ -657,6 +683,7 @@ export class GitHubRepoStore {
         repository: this.repo,
       }),
       effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+      manifestNonce: this.cleanupManifestNonce,
     };
   }
 

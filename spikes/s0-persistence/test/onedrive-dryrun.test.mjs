@@ -111,6 +111,96 @@ await check("live fails closed without a token", async () => {
   await assert.rejects(store.initialize(), (e) => e.code === "no_token");
 });
 
+await check("OneDrive initialize rejects a foreign preexisting run folder", async () => {
+  let folderCreates = 0;
+  let markerCreates = 0;
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId: "s0-onedrive-foreign-folder",
+    graphToken: "syn-token",
+    fetchImpl: async (_url, options) => {
+      if (options.method === "POST") {
+        folderCreates++;
+        return { ok: false, status: 409, json: async () => ({}) };
+      }
+      if (options.method === "PUT") {
+        markerCreates++;
+        return { ok: true, status: 201, json: async () => ({}) };
+      }
+      return { ok: false, status: 404, json: async () => ({}) };
+    },
+  });
+  await assert.rejects(
+    store.initialize(),
+    (error) => error.code === "cleanup_ownership_mismatch",
+  );
+  assert.equal(folderCreates, 2);
+  assert.equal(markerCreates, 0, "an existing foreign folder must not be claimed");
+});
+
+await check("OneDrive marker creation is covered by the persisted manifest and budget", async () => {
+  const runId = "s0-onedrive-marker-budget";
+  const root = path.join(spikeRoot, ".test-state", runId);
+  const manifestPath = path.join(root, "cleanup-manifest.json");
+  const budget = new OperationBudget({
+    limits: { maxOperations: 10, maxObjects: 10, maxBytes: 10000, maxDurationMs: 1000 },
+  });
+  let markerCreated = false;
+  let store;
+  const fetchImpl = async (_url, options) => {
+    if (options.method === "POST") {
+      return { ok: true, status: 201, json: async () => ({}) };
+    }
+    if (options.method === "PUT") {
+      assert.equal(fs.existsSync(manifestPath), true);
+      assert.equal(options.body, store.runMarkerContent());
+      assert.equal(
+        CleanupManifest.load(manifestPath).manifestNonce,
+        store.cleanupManifestNonce,
+      );
+      assert.equal(
+        CleanupManifest.load(manifestPath).resources[0].marker.digest,
+        store.runMarkerDigest(),
+      );
+      markerCreated = true;
+      return { ok: true, status: 201, json: async () => ({}) };
+    }
+    throw new Error(`Unexpected marker request: ${options.method}`);
+  };
+  fs.rmSync(root, { recursive: true, force: true });
+  try {
+    store = new OneDriveGraphStore({
+      dryRun: false,
+      driveId: "d1",
+      folderPath: "Base",
+      runId,
+      cleanupManifestId: `syn-cleanup-${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      graphToken: "syn-token",
+      safetyBudget: budget,
+      fetchImpl,
+    });
+    createCleanupAuthorization({
+      runId,
+      backingPath: "onedrive",
+      sandbox: {
+        ownershipMarker: `tippani-s0:${runId}`,
+        effectiveTargetHash: "sha256:syn-target",
+        coordinates: { driveId: "d1", folder: "Base" },
+        cleanup: { manifestId: `syn-cleanup-${runId}` },
+      },
+    }, store, { filePath: manifestPath });
+    await store.initialize();
+    assert.equal(markerCreated, true);
+    assert.equal(budget.snapshot().operations, 3);
+    assert.equal(budget.snapshot().objects, 3);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 await check("cleanup requires manifest authorization before any provider call", async () => {
   let calls = 0;
   const store = new OneDriveGraphStore({
@@ -139,8 +229,18 @@ await check("cleanup uses the authorized folder ETag as a delete precondition", 
     cleanupManifestId: `syn-cleanup-${runId}`,
     effectiveTargetHash: "sha256:syn-target",
     graphToken: "syn-token",
-    fetchImpl: async (_url, options) => {
+    fetchImpl: async (url, options) => {
       if (options.method === "GET") {
+        if (url.includes("/items/marker-1/content")) {
+          return { ok: true, status: 200, text: async () => store.runMarkerContent() };
+        }
+        if (url.includes(".tippani-s0-run")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ id: "marker-1", eTag: "marker-etag-1" }),
+          };
+        }
         return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) };
       }
       if (options.method === "DELETE") {
@@ -172,9 +272,67 @@ await check("cleanup uses the authorized folder ETag as a delete precondition", 
   }, store);
   await assert.rejects(store.cleanup(wrongManifest), /manifest authorization/);
   await store.prepareCleanup(authorization);
+  assert.equal(
+    authorization.resource.condition.expectedMarkerDigest,
+    store.runMarkerDigest(),
+  );
   await store.cleanup(authorization);
   assert.equal(conditionalDelete, true);
   assert.equal(authorization.manifest.authorize(authorization.resource), false);
+});
+
+await check("OneDrive cleanup rejects ownership marker tampering", async () => {
+  const runId = "s0-cleanup-marker-tamper";
+  let tampered = false;
+  let deletes = 0;
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    graphToken: "syn-token",
+    fetchImpl: async (url, options) => {
+      if (options.method === "GET" && url.includes("/items/marker-1/content")) {
+        return {
+          ok: true,
+          status: 200,
+          text: async () => tampered ? JSON.stringify({ foreign: true }) : store.runMarkerContent(),
+        };
+      }
+      if (options.method === "GET" && url.includes(".tippani-s0-run")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "marker-1", eTag: "marker-etag-1" }),
+        };
+      }
+      if (options.method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) };
+      }
+      deletes++;
+      return { ok: true, status: 204 };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  tampered = true;
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_ownership_mismatch",
+  );
+  assert.equal(deletes, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
 });
 
 await check("cleanup authorization rejects different immutable coordinates", async () => {
@@ -273,8 +431,20 @@ await check("OneDrive cleanup reconciles a crash after remote deletion", async (
   };
   let exists = true;
   let deletes = 0;
-  const fetchImpl = async (_url, options) => {
+  let markerContent = null;
+  const fetchImpl = async (url, options) => {
     if (options.method === "GET") {
+      if (!exists) return { ok: false, status: 404, json: async () => ({}) };
+      if (url.includes("/items/marker-1/content")) {
+        return { ok: true, status: 200, text: async () => markerContent };
+      }
+      if (url.includes(".tippani-s0-run")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "marker-1", eTag: "marker-etag-1" }),
+        };
+      }
       return exists
         ? { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) }
         : { ok: false, status: 404, json: async () => ({}) };
@@ -301,6 +471,7 @@ await check("OneDrive cleanup reconciles a crash after remote deletion", async (
     const authorization = createCleanupAuthorization(config, first, {
       filePath: manifestPath,
     });
+    markerContent = first.runMarkerContent();
     await first.prepareCleanup(authorization);
     authorization.manifest.markCleaned = () => {
       throw new Error("simulated process death after remote deletion");

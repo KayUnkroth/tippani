@@ -13,6 +13,7 @@
 //
 // Host-agnostic: org, project, repo, and token come from the environment.
 
+import crypto from "node:crypto";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -34,6 +35,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
 const API = "api-version=7.1";
+const RUN_MARKER_PATH = ".tippani-s0-run";
 
 export class AdoGitStore {
   constructor({
@@ -55,6 +57,7 @@ export class AdoGitStore {
     enforcePreflight = false,
     ownershipMarker,
     cleanupManifestId = null,
+    cleanupManifestNonce = null,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.org = org || process.env.S0_ADO_ORG || null;
@@ -76,6 +79,7 @@ export class AdoGitStore {
     this.enforcePreflight = enforcePreflight === true;
     this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
     this.cleanupManifestId = cleanupManifestId;
+    this.cleanupManifestNonce = cleanupManifestNonce;
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
@@ -104,6 +108,52 @@ export class AdoGitStore {
 
   injectFault(kind) {
     this._fault = { kind };
+  }
+
+  bindCleanupManifestNonce(nonce) {
+    if (typeof nonce !== "string" || !nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is required", "cleanup_manifest_required");
+    }
+    if (this.cleanupManifestNonce && this.cleanupManifestNonce !== nonce) {
+      throw new WorkspaceStoreError("Cleanup manifest nonce is immutable", "cleanup_manifest_mismatch");
+    }
+    this.cleanupManifestNonce = nonce;
+  }
+
+  ensureCleanupManifestNonce() {
+    if (!this.cleanupManifestNonce) {
+      if (this.enforcePreflight) {
+        throw new WorkspaceStoreError(
+          "Provider initialization requires a persisted cleanup manifest nonce",
+          "cleanup_manifest_required",
+        );
+      }
+      this.cleanupManifestNonce = `syn-test-${this.runId}`;
+    }
+  }
+
+  runMarker() {
+    return {
+      schemaVersion: 1,
+      syntheticData: true,
+      kind: "tippani-s0-ado-run",
+      runId: this.runId,
+      ownershipMarker: this.ownershipMarker,
+      namespace: `tippani-s0/${this.runId}`,
+      effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+      manifestNonce: this.cleanupManifestNonce,
+      organization: this.org,
+      project: this.project,
+      repository: this.repo,
+    };
+  }
+
+  runMarkerContent() {
+    return JSON.stringify(this.runMarker());
+  }
+
+  runMarkerDigest() {
+    return `sha256:${crypto.createHash("sha256").update(this.runMarkerContent()).digest("hex")}`;
   }
 
   async resolveCredentialIdentity() {
@@ -228,6 +278,80 @@ export class AdoGitStore {
     return body.value?.[0]?.objectId ?? null;
   }
 
+  async readRawAt(itemPath, version, versionType = "commit") {
+    const url = `${this.base()}/items?path=/${encodeURIComponent(itemPath)}` +
+      `&versionDescriptor.version=${version}&versionDescriptor.versionType=${versionType}&${API}`;
+    const response = await this.ado("GET", url, { accept: "text/plain" });
+    if (!response.ok) {
+      throw new WorkspaceStoreError(
+        "ADO run branch lacks the persisted ownership marker",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    return response.text();
+  }
+
+  async verifyRunMarker(tip = null) {
+    const pinnedTip = tip || await this.getTip();
+    if (!pinnedTip) {
+      throw new WorkspaceStoreError(
+        "ADO run branch is missing",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    let marker;
+    try {
+      marker = JSON.parse(await this.readRawAt(RUN_MARKER_PATH, pinnedTip));
+    } catch (error) {
+      if (error?.code === "cleanup_ownership_mismatch") throw error;
+      throw new WorkspaceStoreError(
+        "ADO ownership marker content is invalid",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    if (JSON.stringify(marker) !== JSON.stringify(this.runMarker())) {
+      throw new WorkspaceStoreError(
+        "ADO ownership marker does not match this approved run",
+        "cleanup_ownership_mismatch",
+      );
+    }
+    return { path: RUN_MARKER_PATH, digest: this.runMarkerDigest(), tip: pinnedTip };
+  }
+
+  async createRunMarker() {
+    await this.safetyBudget?.recordObjects(1);
+    this.record("push-run-marker", {
+      item: RUN_MARKER_PATH,
+      precondition: "oldObjectId=zero",
+    });
+    const body = JSON.stringify({
+      refUpdates: [{ name: this.refName(), oldObjectId: ZERO_OID }],
+      commits: [{
+        comment: `s0 claim ${this.runId}`,
+        changes: [{
+          changeType: "add",
+          item: { path: `/${RUN_MARKER_PATH}` },
+          newContent: { content: this.runMarkerContent(), contentType: "rawtext" },
+        }],
+      }],
+    });
+    const response = await this.ado("POST", `${this.base()}/pushes?${API}`, {
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    if (!response.ok) {
+      const concurrentTip = await this.getTip();
+      if (concurrentTip) {
+        await this.verifyRunMarker(concurrentTip);
+        return;
+      }
+      throw new WorkspaceStoreError(
+        `run ownership marker create failed: ${response.status}`,
+        "cleanup_ownership_mismatch",
+      );
+    }
+  }
+
   async readAt(workspaceId, version, versionType) {
     const url = `${this.base()}/items?path=/${encodeURIComponent(`${workspaceId}.json`)}` +
       `&versionDescriptor.version=${version}&versionDescriptor.versionType=${versionType}&${API}`;
@@ -262,8 +386,20 @@ export class AdoGitStore {
 
   async initialize() {
     await this.assertEffectiveTargetApproved();
+    this.ensureCleanupManifestNonce();
     this.record("connect");
-    if (this.dryRun) { await this.model.initialize(); this.initialized = true; return { backingPath: "ado", dryRun: true, branch: this.branch }; }
+    if (this.dryRun) {
+      this.record("push-run-marker", {
+        item: RUN_MARKER_PATH,
+        precondition: "oldObjectId=zero-or-verify",
+      });
+      await this.model.initialize();
+      this.initialized = true;
+      return { backingPath: "ado", dryRun: true, branch: this.branch };
+    }
+    const tip = await this.getTip();
+    if (tip) await this.verifyRunMarker(tip);
+    else await this.createRunMarker();
     this.initialized = true;
     return { backingPath: "ado", dryRun: false, branch: this.branch };
   }
@@ -494,6 +630,12 @@ export class AdoGitStore {
         repository: this.repo,
       }),
       effectiveTargetHash: this.effectiveTargetHash || "dry-run-unapproved",
+      manifestNonce: this.cleanupManifestNonce,
+      marker: {
+        kind: "ado-git-item",
+        id: RUN_MARKER_PATH,
+        digest: this.runMarkerDigest(),
+      },
     };
   }
 
@@ -506,7 +648,16 @@ export class AdoGitStore {
       return resource.condition;
     }
     const tip = await this.getTip();
-    manifest.bindCondition(resource, tip ? { expectedObjectId: tip } : { absent: true });
+    if (!tip) {
+      manifest.bindCondition(resource, { absent: true });
+      return resource.condition;
+    }
+    const marker = await this.verifyRunMarker(tip);
+    manifest.bindCondition(resource, {
+      expectedObjectId: tip,
+      expectedMarkerPath: marker.path,
+      expectedMarkerDigest: marker.digest,
+    });
     return resource.condition;
   }
 
@@ -549,6 +700,14 @@ export class AdoGitStore {
     }
     if (tip !== resource.condition.expectedObjectId) {
       throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    }
+    const marker = await this.verifyRunMarker(tip);
+    if (marker.path !== resource.condition.expectedMarkerPath ||
+        marker.digest !== resource.condition.expectedMarkerDigest) {
+      throw new WorkspaceStoreError(
+        "ADO ownership marker changed after cleanup preparation",
+        "cleanup_ownership_mismatch",
+      );
     }
     manifest.markMutating(resource);
     const body = JSON.stringify([{

@@ -31,6 +31,7 @@
     },
     "dryRunOperations": [
       "connect",
+      "push-run-marker",
       "read-item",
       "push",
       "list-items",

@@ -14,6 +14,7 @@ const manifest = new CleanupManifest({
   manifestId: argOf("manifest-id"),
   coordinatesHash: resource.coordinatesHash,
   effectiveTargetHash: resource.effectiveTargetHash,
+  manifestNonce: resource.manifestNonce,
   filePath: argOf("file"),
 });
 manifest.record(resource);
