@@ -1144,7 +1144,9 @@ async function syncedFolderCompatibility(context) {
   const observedClientState = env[profile?.clientStateEnv || "S0_SYNC_CLIENT_STATE"] || null;
   const observedClientIdentity = env[profile?.clientIdentityEnv || "S0_SYNC_CLIENT_IDENTITY"] || null;
   // The distinct synced-folder approval and binding are validated BEFORE any
-  // probe or filesystem write occurs.
+  // probe or filesystem write occurs. The validation time is retained so
+  // comparison reuses it and cannot revalidate future evidence later.
+  const validationTime = Date.now();
   const precondition = assessSyncPreconditions({
     boundTargetHash,
     approvedTargetHash: syncApproval?.targetHash || null,
@@ -1153,6 +1155,7 @@ async function syncedFolderCompatibility(context) {
     observedClientState,
     observedClientIdentity,
     syncApproval,
+    now: validationTime,
   });
   if (precondition) return precondition;
   const probe = sameDeviceSyncProbe(syncRoot, context.config.runId);
@@ -1167,6 +1170,8 @@ async function syncedFolderCompatibility(context) {
     retainedEvidence: loadRetainedCrossClientEvidence(profile, env),
     trustedPublicKey: resolveTrustedSignerKey(profile, env),
     trustedFingerprint: profile?.trustedSignerFingerprint || null,
+    now: validationTime,
+    validatedAt: new Date(validationTime).toISOString(),
     probe,
   });
 }

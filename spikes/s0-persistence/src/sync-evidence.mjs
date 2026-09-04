@@ -42,6 +42,7 @@ export function publicKeyFingerprint(publicKey) {
 export function verifyEvidenceSignature(artifact, publicKey) {
   const key = toPublicKey(publicKey);
   if (!key) return false;
+  if (key.asymmetricKeyType !== "ed25519") return false;
   if (typeof artifact?.signature !== "string" || !artifact.signature) return false;
   try {
     return crypto.verify(
@@ -120,6 +121,8 @@ export function validateCrossClientEvidence(artifact, {
   const trustedKey = toPublicKey(trustedPublicKey);
   if (!trustedKey) {
     errors.push("no trusted signer public key is available; Pass is unreachable");
+  } else if (trustedKey.asymmetricKeyType !== "ed25519") {
+    errors.push("trusted signer key must be an Ed25519 key; RSA/EC keys are not accepted");
   } else {
     const actualFingerprint = publicKeyFingerprint(trustedKey);
     if (trustedFingerprint && (!actualFingerprint || actualFingerprint !== trustedFingerprint)) {
@@ -209,6 +212,7 @@ export function assessSyncedFolderEvidence({
   trustedPublicKey = null,
   trustedFingerprint = null,
   now = Date.now(),
+  validatedAt = new Date(now).toISOString(),
   probe = {},
 } = {}) {
   const approvedTargetHash = syncApproval?.targetHash || null;
@@ -239,6 +243,19 @@ export function assessSyncedFolderEvidence({
     };
   }
   const signerPublicKey = toPublicKey(trustedPublicKey);
+  // The independent pre-write authorization context is retained alongside the
+  // proof so comparison revalidates against these values (not the proof's own
+  // fields) and reuses the original validation time.
+  const authorization = {
+    syncTargetHash: boundTargetHash,
+    syncApproval: { ...syncApproval },
+    configRevision,
+    signerFingerprint: trustedFingerprint,
+    signerPublicKey: signerPublicKey
+      ? signerPublicKey.export({ type: "spki", format: "pem" })
+      : null,
+    validatedAt,
+  };
   return {
     evidence: {
       syncClientState: observedClientState,
@@ -252,9 +269,8 @@ export function assessSyncedFolderEvidence({
       approvalReference: retainedEvidence.approval.reference,
       syncApprovalReference: syncApproval.reference,
       crossClientEvidence: retainedEvidence,
-      signerPublicKey: signerPublicKey
-        ? signerPublicKey.export({ type: "spki", format: "pem" })
-        : null,
+      syncAuthorization: authorization,
+      signerPublicKey: authorization.signerPublicKey,
       providerApiCasUsed: false,
       ...(Number.isFinite(probe.conflictFilesCreated)
         ? { sameDeviceConflictFiles: probe.conflictFilesCreated }
@@ -264,4 +280,71 @@ export function assessSyncedFolderEvidence({
     },
     measurements: Number.isFinite(probe.createMs) ? { syncedFolderCreateMs: probe.createMs } : {},
   };
+}
+
+// Comparison-side revalidation of a retained synced-folder proof. It uses the
+// independent retained authorization (its own syncTargetHash, full syncApproval,
+// config revision, signer fingerprint) and the original validation time — never
+// the proof's own fields — so waiting cannot make future evidence valid.
+export function verifyRetainedSyncProof({
+  proof = null,
+  authorization = null,
+  expectedConfigRevision = null,
+  expectedSignerFingerprint = null,
+  providerApprovalTargetHash = null,
+} = {}) {
+  const errors = [];
+  if (!authorization || typeof authorization !== "object") {
+    errors.push("retained sync authorization context is missing");
+    return errors;
+  }
+  const {
+    syncTargetHash = null,
+    syncApproval = null,
+    configRevision = null,
+    signerFingerprint = null,
+    signerPublicKey = null,
+    validatedAt = null,
+  } = authorization;
+  if (!syncTargetHash) errors.push("retained sync authorization has no independent sync target hash");
+  if (expectedConfigRevision && configRevision !== expectedConfigRevision) {
+    errors.push("retained sync authorization config revision is stale");
+  }
+  if (expectedSignerFingerprint && signerFingerprint !== expectedSignerFingerprint) {
+    errors.push("retained sync authorization signer fingerprint does not match the trusted signer");
+  }
+  const validationTime = Date.parse(validatedAt);
+  if (typeof validatedAt !== "string" || !Number.isFinite(validationTime)) {
+    errors.push("retained sync authorization has no valid validation time");
+  }
+  // Approval-record checks, independent of the (non-retained) client state.
+  if (!syncApproval || typeof syncApproval !== "object" || !syncApproval.targetHash) {
+    errors.push("retained sync approval record is missing an approval target hash");
+  } else {
+    if (providerApprovalTargetHash && syncApproval.targetHash === providerApprovalTargetHash) {
+      errors.push("retained sync approval reuses the provider-API target hash");
+    }
+    if (syncTargetHash && syncApproval.targetHash !== syncTargetHash) {
+      errors.push("retained sync approval target hash does not match the retained sync target");
+    }
+    const approvedAt = Date.parse(syncApproval.approvedAt);
+    if (typeof syncApproval.approver !== "string" || !syncApproval.approver.trim() ||
+        typeof syncApproval.approvedAt !== "string" || !Number.isFinite(approvedAt) ||
+        typeof syncApproval.reference !== "string" || !syncApproval.reference.trim()) {
+      errors.push("retained sync approval requires approver, approval date, and reference");
+    } else if (Number.isFinite(validationTime) && approvedAt > validationTime) {
+      errors.push("retained sync approval date is after the validation time");
+    }
+  }
+  const trustedKey = toPublicKey(signerPublicKey);
+  const evidenceErrors = validateCrossClientEvidence(proof, {
+    approvedTargetHash: syncTargetHash,
+    boundTargetHash: syncTargetHash,
+    configRevision,
+    trustedPublicKey: trustedKey,
+    trustedFingerprint: signerFingerprint,
+    now: Number.isFinite(validationTime) ? validationTime : Date.now(),
+  });
+  errors.push(...evidenceErrors);
+  return errors;
 }

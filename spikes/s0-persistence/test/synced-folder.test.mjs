@@ -283,5 +283,60 @@ await check("the S0-BCK-006 implementation is Blocked without a Windows sync cli
   assert.match(detail.blocked, /Windows OneDrive sync-client/i);
 });
 
+await check("an RSA trusted key is rejected before signature verification (Ed25519 required)", () => {
+  const rsa = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const fingerprint = publicKeyFingerprint(rsa.publicKey);
+  const artifact = signedArtifact({ signerFingerprint: fingerprint });
+  const detail = assessSyncedFolderEvidence(baseInput({
+    retainedEvidence: artifact,
+    trustedPublicKey: rsa.publicKey,
+    trustedFingerprint: fingerprint,
+  }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /must be an Ed25519 key/);
+  assert.equal(verifyEvidenceSignature(signedArtifact(), rsa.publicKey), false);
+});
+
+await check("an EC trusted key is rejected before signature verification", () => {
+  const ec = crypto.generateKeyPairSync("ec", { namedCurve: "P-256" });
+  const fingerprint = publicKeyFingerprint(ec.publicKey);
+  const artifact = signedArtifact({ signerFingerprint: fingerprint });
+  const detail = assessSyncedFolderEvidence(baseInput({
+    retainedEvidence: artifact,
+    trustedPublicKey: ec.publicKey,
+    trustedFingerprint: fingerprint,
+  }));
+  assert.ok(detail.skip);
+  assert.match(detail.skip, /must be an Ed25519 key/);
+});
+
+await check("a valid Pass retains an independent authorization context and validation time", () => {
+  const base = Date.parse("2026-09-04T00:00:00.000Z");
+  const validatedAt = new Date(base).toISOString();
+  const artifact = signedArtifact({
+    clients: [
+      { clientId: "device-A", observedAt: new Date(base - 120000).toISOString(), operations: ["create"] },
+      { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
+    ],
+    approval: {
+      approver: "Windows sync-client test owner",
+      approvedAt: new Date(base - 120000).toISOString(),
+      reference: "syn-sync-001",
+    },
+  });
+  const detail = assessSyncedFolderEvidence(baseInput({
+    retainedEvidence: artifact,
+    now: base,
+    validatedAt,
+  }));
+  assert.ok(detail.evidence);
+  const authorization = detail.evidence.syncAuthorization;
+  assert.equal(authorization.syncTargetHash, approvedHash);
+  assert.equal(authorization.validatedAt, validatedAt);
+  assert.equal(authorization.configRevision, configRevision);
+  assert.equal(authorization.signerFingerprint, signerFingerprint);
+  assert.deepEqual(authorization.syncApproval, syncApproval);
+});
+
 console.log(`s0-synced-folder: ${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);

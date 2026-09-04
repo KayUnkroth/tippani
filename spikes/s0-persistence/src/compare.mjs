@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,8 +22,8 @@ import {
   naApprovalErrors,
 } from "./eligibility.mjs";
 import { runHarness } from "./runner.mjs";
-import { combineResults } from "./aggregate-campaigns.mjs";
-import { validateCrossClientEvidence } from "./sync-evidence.mjs";
+import { combineResults, campaignVariability } from "./aggregate-campaigns.mjs";
+import { verifyRetainedSyncProof } from "./sync-evidence.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -98,6 +97,29 @@ function validateLinkedRunIdentity(linked, config, label) {
 // its evidence identity and result schema, and recomputes the aggregate status
 // and per-campaign positions so a Pass cannot be claimed against an unrelated or
 // stale run.
+const NONDETERMINISTIC_RESULT_KEYS = new Set(["durationMs"]);
+const SYNC_AGGREGATE_ANNOTATIONS = new Set(["separateCompatibilityReport", "providerCampaigns"]);
+
+// Strips only explicitly nondeterministic metadata so the complete recomputed
+// result (status, measurements, raw samples, throttle/retry totals, complexity,
+// N/A approvals, positions, and all evidence) is compared canonically.
+function canonicalResult(result) {
+  if (!result || typeof result !== "object") return result;
+  return Object.fromEntries(
+    Object.entries(result).filter(([key]) => !NONDETERMINISTIC_RESULT_KEYS.has(key)),
+  );
+}
+
+function canonicalSyncResult(result) {
+  const base = canonicalResult(effectiveResult(result));
+  if (base && base.evidence && typeof base.evidence === "object") {
+    base.evidence = Object.fromEntries(
+      Object.entries(base.evidence).filter(([key]) => !SYNC_AGGREGATE_ANNOTATIONS.has(key)),
+    );
+  }
+  return base;
+}
+
 export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {}) {
   const errors = [];
   if (!artifactPath) return errors;
@@ -151,14 +173,14 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
     if (result.scenarioId === "S0-BCK-006") continue;
     const rec = recById.get(result.scenarioId);
     if (!rec) { errors.push(`${result.scenarioId} is not backed by every linked campaign raw`); continue; }
-    if (rec.status !== result.status) {
-      errors.push(`${result.scenarioId} aggregate status ${result.status} does not match the recomputed ${rec.status} from linked campaign raws`);
+    if (stableJson(canonicalResult(rec)) !== stableJson(canonicalResult(result))) {
+      errors.push(`${result.scenarioId} aggregate result does not match the recomputed linked-campaign result`);
     }
-    if (stableJson(rec.measurements || {}) !== stableJson(result.measurements || {})) {
-      errors.push(`${result.scenarioId} aggregate measurements/distributions do not match the recomputed linked campaign values`);
-    }
-    if (stableJson(rec.evidence?.campaigns || {}) !== stableJson(result.evidence?.campaigns || {})) {
-      errors.push(`${result.scenarioId} aggregate campaign positions/evidence do not match the linked campaign raws`);
+  }
+  if ("campaignVariability" in (run || {})) {
+    const recomputedVariability = campaignVariability(linkedCampaigns);
+    if (stableJson(run.campaignVariability || {}) !== stableJson(recomputedVariability)) {
+      errors.push("aggregate campaignVariability does not match the recomputed linked-campaign variability");
     }
   }
   return errors;
@@ -199,24 +221,25 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
         errors.push("separate synced-folder linked raw has no S0-BCK-006 result");
       } else {
         const linkedStatus = effectiveResult(linkedBck).status;
-        if (aggregateResult && linkedStatus !== effectiveResult(aggregateResult).status) {
-          errors.push(
-            `aggregate S0-BCK-006 status ${effectiveResult(aggregateResult).status} does not match the linked sync run status ${linkedStatus}`,
-          );
+        // Compare the COMPLETE linked result against the aggregate claim, not
+        // status only (aggregate-only annotations are excluded).
+        if (aggregateResult &&
+            stableJson(canonicalSyncResult(linkedBck)) !== stableJson(canonicalSyncResult(aggregateResult))) {
+          errors.push("aggregate S0-BCK-006 result does not match the linked sync run result");
         }
-        // A retained S0-BCK-006 Pass must carry a full signed cross-client proof
-        // that re-verifies during comparison with the same validator/signature.
+        // A retained S0-BCK-006 Pass must carry a full signed proof that
+        // re-verifies against the independent retained authorization context and
+        // the original validation time (never the proof's own fields).
         if (linkedStatus === "Pass") {
-          const proof = linkedBck.evidence?.crossClientEvidence || null;
-          const pem = linkedBck.evidence?.signerPublicKey || null;
-          let trustedKey = null;
-          try { trustedKey = pem ? crypto.createPublicKey(pem) : null; } catch { trustedKey = null; }
-          const proofErrors = validateCrossClientEvidence(proof, {
-            approvedTargetHash: proof?.syncTargetHash || null,
-            boundTargetHash: proof?.syncTargetHash || null,
-            configRevision: decisionConfigRevision(config),
-            trustedPublicKey: trustedKey,
-            trustedFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
+          const authorization = sync.syncAuthorization ||
+            linkedBck.evidence?.syncAuthorization || null;
+          const proof = sync.crossClientEvidence ||
+            linkedBck.evidence?.crossClientEvidence || null;
+          const proofErrors = verifyRetainedSyncProof({
+            proof,
+            authorization,
+            expectedConfigRevision: decisionConfigRevision(config),
+            expectedSignerFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
           });
           for (const issue of proofErrors) {
             errors.push(`separate synced-folder proof ${issue}`);

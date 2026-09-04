@@ -1,6 +1,6 @@
 {
   "schemaVersion": 3,
-  "generatedAt": "2026-09-04T17:23:23.382Z",
+  "generatedAt": "2026-09-04T17:52:00.031Z",
   "decision": {
     "status": "Incomplete",
     "mapping": null,
@@ -204,13 +204,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:b4e2094153ee14019107a01b6e525e398a0167498f1e9a87795ceb318ec7d1a8",
+        "sourceRevision": "sha256:11f83c1b50bdaf9b3d46e018da4b68c994e01425c330d71087b1e4dabed62506",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:111cad6ecddee4588ea05790ee7bccd3b12857879c63c52a302dc0c5a46bf5fe"
       },
-      "startedAt": "2026-09-04T17:23:23.382Z",
-      "completedAt": "2026-09-04T17:23:23.382Z",
+      "startedAt": "2026-09-04T17:52:00.031Z",
+      "completedAt": "2026-09-04T17:52:00.031Z",
       "configuration": {
         "configurationId": "CFG-LOCAL-SQLITE",
         "adapter": "local-sqlite",
@@ -640,13 +640,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:b4e2094153ee14019107a01b6e525e398a0167498f1e9a87795ceb318ec7d1a8",
+        "sourceRevision": "sha256:11f83c1b50bdaf9b3d46e018da4b68c994e01425c330d71087b1e4dabed62506",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:d74d137ed48d732f594e228961b171205e077f7bdd53004d9b056d0377a41405"
       },
-      "startedAt": "2026-09-04T17:23:23.382Z",
-      "completedAt": "2026-09-04T17:23:23.382Z",
+      "startedAt": "2026-09-04T17:52:00.031Z",
+      "completedAt": "2026-09-04T17:52:00.031Z",
       "configuration": {
         "configurationId": "CFG-LOCAL-CAS",
         "adapter": "local-cas",
@@ -1075,13 +1075,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:b4e2094153ee14019107a01b6e525e398a0167498f1e9a87795ceb318ec7d1a8",
+        "sourceRevision": "sha256:11f83c1b50bdaf9b3d46e018da4b68c994e01425c330d71087b1e4dabed62506",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:3ed9fc1027da5981bf7fc44e0a36abf8c4db3ff3ec137271d104b0174a87e4d2"
       },
-      "startedAt": "2026-09-04T17:23:23.382Z",
-      "completedAt": "2026-09-04T17:23:23.382Z",
+      "startedAt": "2026-09-04T17:52:00.031Z",
+      "completedAt": "2026-09-04T17:52:00.031Z",
       "configuration": {
         "configurationId": "CFG-ONEDRIVE-LIVE",
         "adapter": "onedrive",
@@ -1526,13 +1526,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:b4e2094153ee14019107a01b6e525e398a0167498f1e9a87795ceb318ec7d1a8",
+        "sourceRevision": "sha256:11f83c1b50bdaf9b3d46e018da4b68c994e01425c330d71087b1e4dabed62506",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:3c8e25e95bf02fbe3915dd0d49ed805eb10caa95e3723f7ee06d1e2bfd8a3aaa"
       },
-      "startedAt": "2026-09-04T17:23:23.382Z",
-      "completedAt": "2026-09-04T17:23:23.382Z",
+      "startedAt": "2026-09-04T17:52:00.031Z",
+      "completedAt": "2026-09-04T17:52:00.031Z",
       "configuration": {
         "configurationId": "CFG-ADO-LIVE",
         "adapter": "ado",
@@ -1975,13 +1975,13 @@
       "syntheticData": true,
       "harnessRevision": "invalid-existing-evidence",
       "evidenceIdentity": {
-        "sourceRevision": "sha256:b4e2094153ee14019107a01b6e525e398a0167498f1e9a87795ceb318ec7d1a8",
+        "sourceRevision": "sha256:11f83c1b50bdaf9b3d46e018da4b68c994e01425c330d71087b1e4dabed62506",
         "catalogRevision": "sha256:d423452f3c8870f446a3558f3a7678608fb7f38f72e21aa458fd62113fd7a941",
         "applicabilityRevision": "sha256:bd1f843f2adcf93ae4236331b6ade68e5b66996602283308b3cb8908126d987e",
         "configRevision": "sha256:4fea367135cc75a43b803be5ca182923b75469da7b16a0369f224b151f2d5845"
       },
-      "startedAt": "2026-09-04T17:23:23.382Z",
-      "completedAt": "2026-09-04T17:23:23.382Z",
+      "startedAt": "2026-09-04T17:52:00.031Z",
+      "completedAt": "2026-09-04T17:52:00.031Z",
       "configuration": {
         "configurationId": "CFG-GITHUB-LIVE",
         "adapter": "github",

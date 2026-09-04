@@ -448,6 +448,10 @@ export function buildSeparateSync(configurationId, {
       report: `../${syncConfigurationId}/outcome.md`,
       reportSha256: `sha256:${sha256(syncReportBytes)}`,
       evidenceIdentity: syncIdentity,
+      // Retain the independent pre-write authorization context and full signed
+      // proof so comparison revalidates against these, not the proof's own fields.
+      syncAuthorization: syncResult.evidence?.syncAuthorization || null,
+      crossClientEvidence: syncResult.evidence?.crossClientEvidence || null,
     },
   };
 }

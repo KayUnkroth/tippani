@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,8 +14,13 @@ import {
   validateExistingRun,
   verifySeparateSync,
 } from "../src/compare.mjs";
-import { buildEvidenceIdentity, sha256 } from "../src/evidence-identity.mjs";
-import { combineResults } from "../src/aggregate-campaigns.mjs";
+import { buildEvidenceIdentity, decisionConfigRevision, sha256 } from "../src/evidence-identity.mjs";
+import { combineResults, campaignVariability } from "../src/aggregate-campaigns.mjs";
+import {
+  EVIDENCE_KIND,
+  evidenceSigningPayload,
+  publicKeyFingerprint,
+} from "../src/sync-evidence.mjs";
 import { SCENARIOS } from "../src/scenario-catalog.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -105,13 +111,32 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     "utf8",
   ));
   const applicable = applicableScenarioIds(config);
-  const metricScenario = applicable[0];
   const directory = path.join(root, ".test-state", "comparison-artifacts", config.configurationId);
   fs.rmSync(directory, { recursive: true, force: true });
   fs.mkdirSync(directory, { recursive: true });
+  const resultFor = (scenarioId, statusFor, index) => {
+    if (scenarioId === "S0-PER-004") {
+      return {
+        scenarioId,
+        status: statusFor(scenarioId),
+        durationMs: 1,
+        evidence: { rawSamples: { small: { remoteCasMs: [10, 20] } } },
+        measurements: { remoteCasP50Ms_small: 20 + index },
+      };
+    }
+    if (scenarioId === "S0-PER-005") {
+      return {
+        scenarioId,
+        status: statusFor(scenarioId),
+        durationMs: 1,
+        evidence: { total: 40 },
+        measurements: {},
+      };
+    }
+    return { scenarioId, status: statusFor(scenarioId), durationMs: 1, evidence: {}, measurements: {} };
+  };
   const linkedRun = (index, {
     statusFor = () => "Pass",
-    latency = 100,
     evidenceIdentity = buildEvidenceIdentity(config),
   } = {}) => ({
     schemaVersion: 2,
@@ -136,13 +161,7 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     },
     catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
     applicableScenarioIds: applicable,
-    results: applicable.map((scenarioId) => ({
-      scenarioId,
-      status: statusFor(scenarioId),
-      durationMs: 1,
-      evidence: {},
-      measurements: scenarioId === metricScenario ? { latencyMs: latency } : {},
-    })),
+    results: applicable.map((scenarioId) => resultFor(scenarioId, statusFor, index)),
   });
   const writeCampaign = (index, run) => {
     const name = `campaign-${index}`;
@@ -196,36 +215,64 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     results: aggregateResults,
     campaigns,
     campaignApprovals: approvals,
+    campaignVariability: campaignVariability(linkedCampaigns),
   };
   const aggregatePath = path.join(directory, "raw-results.json");
   assert.deepEqual(validateExistingRun(run, config, { artifactPath: aggregatePath }), []);
 
-  // A 0ms aggregate measurement against 100ms linked raws must be rejected.
+  // A 0ms aggregate measurement against the linked raw distribution must fail.
   const zeroed = structuredClone(run);
-  zeroed.results.find((result) => result.scenarioId === metricScenario).measurements.latencyMs = 0;
+  zeroed.results.find((result) => result.scenarioId === "S0-PER-004").measurements.remoteCasP50Ms_small = 0;
   assert(
     validateExistingRun(zeroed, config, { artifactPath: aggregatePath })
-      .some((error) => /measurements\/distributions do not match/.test(error)),
+      .some((error) => /S0-PER-004 aggregate result does not match the recomputed linked-campaign result/.test(error)),
     "a fabricated 0ms measurement must be rejected",
+  );
+
+  // Fabricated raw samples must fail.
+  const rawTampered = structuredClone(run);
+  rawTampered.results.find((result) => result.scenarioId === "S0-PER-004").evidence.rawSamples.small.remoteCasMs = [1];
+  assert(
+    validateExistingRun(rawTampered, config, { artifactPath: aggregatePath })
+      .some((error) => /S0-PER-004 aggregate result does not match the recomputed/.test(error)),
+    "fabricated raw samples must be rejected",
+  );
+
+  // A fabricated complexity total must fail.
+  const complexityTampered = structuredClone(run);
+  complexityTampered.results.find((result) => result.scenarioId === "S0-PER-005").evidence.total = 1;
+  assert(
+    validateExistingRun(complexityTampered, config, { artifactPath: aggregatePath })
+      .some((error) => /S0-PER-005 aggregate result does not match the recomputed/.test(error)),
+    "a fabricated complexity total must be rejected",
   );
 
   // Bogus campaign position keys must be rejected.
   const bogusKeys = structuredClone(run);
-  const target = bogusKeys.results.find((result) => result.scenarioId === metricScenario);
-  target.evidence.campaigns = { "campaign-forged": { status: "Pass", evidence: {}, measurements: {} } };
+  bogusKeys.results.find((result) => result.scenarioId === "S0-PER-004").evidence.campaigns =
+    { "campaign-forged": { status: "Pass", evidence: {}, measurements: {} } };
   assert(
     validateExistingRun(bogusKeys, config, { artifactPath: aggregatePath })
-      .some((error) => /campaign positions\/evidence do not match/.test(error)),
+      .some((error) => /does not match the recomputed linked-campaign result/.test(error)),
     "bogus campaign keys must be rejected",
   );
 
   // A status not supported by the linked raws must be rejected.
   const wrongStatus = structuredClone(run);
-  wrongStatus.results.find((result) => result.scenarioId === metricScenario).status = "Fail";
+  wrongStatus.results.find((result) => result.scenarioId === "S0-PER-005").status = "Fail";
   assert(
     validateExistingRun(wrongStatus, config, { artifactPath: aggregatePath })
       .some((error) => /does not match the recomputed/.test(error)),
     "an unsupported aggregate status must be rejected",
+  );
+
+  // A mutated campaignVariability must be rejected.
+  const variabilityTampered = structuredClone(run);
+  variabilityTampered.campaignVariability = { remoteCasP50Ms_small: { count: 3, min: 0, p50: 0, p95: 0, max: 0, mean: 0, stddev: 0 } };
+  assert(
+    validateExistingRun(variabilityTampered, config, { artifactPath: aggregatePath })
+      .some((error) => /campaignVariability does not match/.test(error)),
+    "a mutated campaignVariability must be rejected",
   );
 
   // An approval that does not match the linked preflight must be rejected.
@@ -400,8 +447,132 @@ await check("comparison resolves and verifies the separate synced-folder (S0-BCK
   };
   assert(
     verifySeparateSync(passRun, config, { artifactPath: aggregatePath })
-      .some((error) => /proof .*no structured retained cross-client evidence/.test(error)),
-    "a claimed sync Pass with empty signed proof must be rejected",
+      .some((error) => /proof .*(authorization context is missing|no structured retained cross-client evidence)/.test(error)),
+    "a claimed sync Pass with empty signed proof/authorization must be rejected",
+  );
+
+  fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
+});
+
+await check("separate sync comparison verifies the complete signed proof, approval, and result", () => {
+  const config = JSON.parse(fs.readFileSync(
+    path.join(root, "config", "provider-onedrive-live.json"),
+    "utf8",
+  ));
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  const fingerprint = publicKeyFingerprint(publicKey);
+  config.sandbox.syncProfile.trustedSignerFingerprint = fingerprint;
+  const configRevision = decisionConfigRevision(config);
+  const identity = buildEvidenceIdentity(config);
+  const pem = publicKey.export({ type: "spki", format: "pem" });
+  const targetHash = "sha256:sync-target-hash-test";
+  const base = Date.parse("2026-09-04T00:00:00.000Z");
+  const validatedAt = new Date(base).toISOString();
+  const syncApproval = {
+    targetHash,
+    approver: "S0 sync approver",
+    approvedAt: new Date(base - 600000).toISOString(),
+    reference: "syn-approval-1",
+  };
+  const proof = {
+    schemaVersion: 1,
+    kind: EVIDENCE_KIND,
+    syncTargetHash: targetHash,
+    configRevision,
+    signerFingerprint: fingerprint,
+    clients: [
+      { clientId: "device-A", observedAt: new Date(base - 120000).toISOString(), operations: ["create"] },
+      { clientId: "device-B", observedAt: new Date(base - 60000).toISOString(), operations: ["edit"] },
+    ],
+    outcomes: { conflict: true },
+    approval: {
+      approver: "Windows sync-client test owner",
+      approvedAt: new Date(base - 120000).toISOString(),
+      reference: "syn-proof-1",
+    },
+  };
+  proof.signature = crypto.sign(null, evidenceSigningPayload(proof), privateKey).toString("base64");
+  const authorization = {
+    syncTargetHash: targetHash,
+    syncApproval,
+    configRevision,
+    signerFingerprint: fingerprint,
+    signerPublicKey: pem,
+    validatedAt,
+  };
+  const bckEvidence = {
+    crossClientEvidence: proof,
+    syncAuthorization: authorization,
+    signerPublicKey: pem,
+    providerApiCasUsed: false,
+  };
+  const stateRoot = path.join(root, ".test-state", "sync-proof");
+  const resultsRoot = path.join(stateRoot, "results");
+  const aggregateDir = path.join(resultsRoot, "CFG-ONEDRIVE-LIVE");
+  const syncDir = path.join(resultsRoot, "CFG-ONEDRIVE-SYNC");
+  fs.rmSync(stateRoot, { recursive: true, force: true });
+  fs.mkdirSync(aggregateDir, { recursive: true });
+  fs.mkdirSync(syncDir, { recursive: true });
+  const linkedBck = { scenarioId: "S0-BCK-006", status: "Pass", durationMs: 1, evidence: bckEvidence, measurements: {} };
+  const syncRun = {
+    schemaVersion: 2,
+    evidenceIdentity: identity,
+    configuration: {
+      configurationId: config.configurationId,
+      adapter: config.adapter,
+      backingPath: config.backingPath,
+      applicabilityProfile: applicabilityProfile(config),
+      runId: "s0-onedrive-sync",
+    },
+    catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
+    applicableScenarioIds: applicableScenarioIds(config),
+    results: [linkedBck],
+  };
+  const syncRawBytes = Buffer.from(JSON.stringify(syncRun));
+  const syncReportBytes = Buffer.from("# CFG-ONEDRIVE-SYNC\n");
+  fs.writeFileSync(path.join(syncDir, "raw-results.json"), syncRawBytes);
+  fs.writeFileSync(path.join(syncDir, "outcome.md"), syncReportBytes);
+  const aggregatePath = path.join(aggregateDir, "raw-results.json");
+  const aggregateBck = {
+    ...linkedBck,
+    evidence: {
+      ...bckEvidence,
+      separateCompatibilityReport: "../CFG-ONEDRIVE-SYNC/outcome.md",
+      providerCampaigns: "Not part of provider-API CAS campaigns",
+    },
+  };
+  const run = {
+    results: [aggregateBck],
+    separateSync: {
+      configurationId: "CFG-ONEDRIVE-SYNC",
+      scenarioId: "S0-BCK-006",
+      raw: "../CFG-ONEDRIVE-SYNC/raw-results.json",
+      rawSha256: `sha256:${sha256(syncRawBytes)}`,
+      report: "../CFG-ONEDRIVE-SYNC/outcome.md",
+      reportSha256: `sha256:${sha256(syncReportBytes)}`,
+      evidenceIdentity: identity,
+      syncAuthorization: authorization,
+      crossClientEvidence: proof,
+    },
+  };
+  assert.deepEqual(verifySeparateSync(run, config, { artifactPath: aggregatePath }), []);
+
+  // Mutating the retained sync approval must fail revalidation.
+  const badApproval = structuredClone(run);
+  badApproval.separateSync.syncAuthorization.syncApproval.reference = "";
+  assert(
+    verifySeparateSync(badApproval, config, { artifactPath: aggregatePath })
+      .some((error) => /approval requires approver, approval date, and reference/.test(error)),
+    "a mutated sync approval must be rejected",
+  );
+
+  // Mutating the complete aggregate result must fail the full-result comparison.
+  const badResult = structuredClone(run);
+  badResult.results[0].evidence.conflictOutcome = true;
+  assert(
+    verifySeparateSync(badResult, config, { artifactPath: aggregatePath })
+      .some((error) => /result does not match the linked sync run result/.test(error)),
+    "a mutated sync result must be rejected",
   );
 
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
