@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
 import path from "node:path";
-import { writeFileAtomicSync } from "./adapters/fs-atomic.mjs";
+import {
+  acquireLockSync,
+  isIndeterminateAtomicWrite,
+  writeFileAtomicSync,
+} from "./adapters/fs-atomic.mjs";
 
 const SCHEMA_VERSION = 4;
 const CLEANUP_PHASES = new Set([
@@ -41,6 +45,8 @@ export class CleanupManifest {
     manifestNonce = null,
     filePath = null,
     revision = 0,
+    syncDirectory = null,
+    loadPersisted = CleanupManifest.load,
   }) {
     if (ownershipMarker !== `tippani-s0:${runId}`) {
       throw new Error("Cleanup ownership marker does not match run ID");
@@ -54,6 +60,10 @@ export class CleanupManifest {
     this.filePath = filePath;
     this.revision = revision;
     this.resources = [];
+    this.syncDirectory = syncDirectory;
+    this.loadPersisted = loadPersisted;
+    this.reconciliationRequired = false;
+    this.reconciliationError = null;
   }
 
   static load(filePath) {
@@ -114,7 +124,121 @@ export class CleanupManifest {
     if (this.filePath) this.persist();
   }
 
+  assertMutationAllowed() {
+    if (!this.reconciliationRequired) return;
+    const error = new Error(
+      "Cleanup manifest state is indeterminate; reload persisted state before mutation",
+    );
+    error.code = "cleanup_manifest_reconciliation_required";
+    error.requiresReconciliation = true;
+    error.cause = this.reconciliationError;
+    throw error;
+  }
+
+  assertPersistedCurrent(filePath = this.filePath) {
+    if (!filePath || !fs.existsSync(filePath)) {
+      if (this.revision !== 0 || this.resources.length !== 0) {
+        const error = new Error("Cleanup manifest persisted state is missing");
+        error.code = "cleanup_manifest_stale";
+        throw error;
+      }
+      return;
+    }
+    const persisted = this.loadPersisted(filePath);
+    if (persisted.runId !== this.runId ||
+        persisted.ownershipMarker !== this.ownershipMarker ||
+        persisted.manifestId !== this.manifestId ||
+        persisted.coordinatesHash !== this.coordinatesHash ||
+        persisted.effectiveTargetHash !== this.effectiveTargetHash ||
+        persisted.manifestNonce !== this.manifestNonce ||
+        persisted.revision !== this.revision ||
+        JSON.stringify(stable(persisted.resources)) !==
+          JSON.stringify(stable(this.resources))) {
+      const error = new Error("Cleanup manifest revision or resource phase is stale");
+      error.code = "cleanup_manifest_stale";
+      throw error;
+    }
+  }
+
+  reconcilePersistedState(filePath, resource = null) {
+    const persisted = this.loadPersisted(filePath);
+    if (persisted.runId !== this.runId ||
+        persisted.ownershipMarker !== this.ownershipMarker ||
+        persisted.manifestId !== this.manifestId ||
+        persisted.coordinatesHash !== this.coordinatesHash ||
+        persisted.effectiveTargetHash !== this.effectiveTargetHash ||
+        persisted.manifestNonce !== this.manifestNonce) {
+      throw new Error("Cleanup manifest persisted identity changed during reconciliation");
+    }
+    let external = null;
+    if (resource) {
+      const current = persisted.resources.find((candidate) =>
+        candidate.kind === resource.kind && candidate.id === resource.id);
+      if (!current) {
+        throw new Error("Cleanup resource is missing after persisted reconciliation");
+      }
+      external = structuredClone(current);
+      delete external.cleaned;
+    }
+    this.revision = persisted.revision;
+    this.resources = persisted.resources;
+    this.filePath = filePath;
+    if (resource) {
+      for (const key of Object.keys(resource)) delete resource[key];
+      Object.assign(resource, external);
+    }
+    this.reconciliationRequired = false;
+    this.reconciliationError = null;
+  }
+
+  reloadPersisted(resource = null) {
+    if (!this.filePath) throw new TypeError("Cleanup manifest path is required");
+    this.reconcilePersistedState(this.filePath, resource);
+    return this.evidence();
+  }
+
+  mutateAndPersist(resource, mutation) {
+    this.assertMutationAllowed();
+    const previousResources = structuredClone(this.resources);
+    const previousRevision = this.revision;
+    const previousResource = resource ? structuredClone(resource) : null;
+    let lock = null;
+    try {
+      if (this.filePath) {
+        fs.mkdirSync(path.dirname(this.filePath), { recursive: true });
+        lock = acquireLockSync(`${this.filePath}.lock`);
+        this.assertPersistedCurrent();
+      }
+      mutation();
+      if (this.filePath) this.persistUnlocked(this.filePath);
+    } catch (error) {
+      if (this.filePath && isIndeterminateAtomicWrite(error)) {
+        try {
+          this.reconcilePersistedState(this.filePath, resource);
+          error.reconciled = true;
+          error.persistedRevision = this.revision;
+        } catch (reconciliationError) {
+          this.reconciliationRequired = true;
+          this.reconciliationError = reconciliationError;
+          error.reconciled = false;
+          error.reconciliationError = reconciliationError;
+        }
+      } else {
+        this.resources = previousResources;
+        this.revision = previousRevision;
+        if (resource && previousResource) {
+          for (const key of Object.keys(resource)) delete resource[key];
+          Object.assign(resource, previousResource);
+        }
+      }
+      throw error;
+    } finally {
+      lock?.release();
+    }
+  }
+
   record(resource) {
+    this.assertMutationAllowed();
     if (!resource?.id || !resource?.kind) throw new TypeError("Cleanup resource id and kind are required");
     if (resource.runId !== this.runId || resource.ownershipMarker !== this.ownershipMarker) {
       throw new Error("Cleanup resource is not owned by this run");
@@ -129,20 +253,15 @@ export class CleanupManifest {
     if (this.resources.some((item) => item.id === resource.id && item.kind === resource.kind)) {
       throw new Error(`Cleanup resource already recorded: ${resource.kind}/${resource.id}`);
     }
-    resource.phase = "recorded";
-    this.resources.push({
-      ...structuredClone(resource),
-      phase: "recorded",
-      cleaned: false,
+    this.mutateAndPersist(resource, () => {
+      resource.phase = "recorded";
+      this.resources.push({
+        ...structuredClone(resource),
+        phase: "recorded",
+        cleaned: false,
+      });
+      this.revision++;
     });
-    this.revision++;
-    try {
-      this.persistIfConfigured();
-    } catch (error) {
-      this.resources.pop();
-      this.revision--;
-      throw error;
-    }
   }
 
   authorize(resource) {
@@ -170,6 +289,7 @@ export class CleanupManifest {
   }
 
   markDeleted(resource) {
+    this.assertMutationAllowed();
     const phase = this.phase(resource);
     const absentWithoutMutation = phase === "prepared" && resource.condition?.absent === true;
     if (!absentWithoutMutation && phase !== "mutating" && phase !== "deleted") {
@@ -184,56 +304,39 @@ export class CleanupManifest {
   }
 
   transition(resource, allowedPhases, nextPhase, { cleaned = false } = {}) {
+    this.assertMutationAllowed();
     const item = this.resources.find((candidate) =>
       candidate.kind === resource.kind && candidate.id === resource.id);
     if (!item || !this.authorize(resource) || !allowedPhases.includes(item.phase)) {
       throw new Error("Refusing cleanup phase transition");
     }
-    if (item.phase === nextPhase && item.cleaned === cleaned) {
+    this.mutateAndPersist(resource, () => {
+      if (item.phase === nextPhase && item.cleaned === cleaned) {
+        resource.phase = nextPhase;
+        return;
+      }
+      item.phase = nextPhase;
+      item.cleaned = cleaned;
       resource.phase = nextPhase;
-      return;
-    }
-    const previousItemPhase = item.phase;
-    const previousResourcePhase = resource.phase;
-    const previousCleaned = item.cleaned;
-    item.phase = nextPhase;
-    item.cleaned = cleaned;
-    resource.phase = nextPhase;
-    this.revision++;
-    try {
-      this.persistIfConfigured();
-    } catch (error) {
-      item.phase = previousItemPhase;
-      item.cleaned = previousCleaned;
-      if (previousResourcePhase === undefined) delete resource.phase;
-      else resource.phase = previousResourcePhase;
-      this.revision--;
-      throw error;
-    }
+      this.revision++;
+    });
   }
 
   bindCondition(resource, condition) {
+    this.assertMutationAllowed();
     const item = this.resources.find((candidate) =>
       candidate.kind === resource.kind && candidate.id === resource.id);
     if (!item || item.cleaned || item.phase !== "recorded" ||
         item.condition || resource.condition) {
       throw new Error("Refusing to replace or duplicate a cleanup condition");
     }
-    item.condition = structuredClone(condition);
-    resource.condition = structuredClone(condition);
-    item.phase = "prepared";
-    resource.phase = "prepared";
-    this.revision++;
-    try {
-      this.persistIfConfigured();
-    } catch (error) {
-      delete item.condition;
-      delete resource.condition;
-      item.phase = "recorded";
-      resource.phase = "recorded";
-      this.revision--;
-      throw error;
-    }
+    this.mutateAndPersist(resource, () => {
+      item.condition = structuredClone(condition);
+      resource.condition = structuredClone(condition);
+      item.phase = "prepared";
+      resource.phase = "prepared";
+      this.revision++;
+    });
   }
 
   payload() {
@@ -279,13 +382,51 @@ export class CleanupManifest {
     };
   }
 
-  persist(filePath = this.filePath) {
-    if (!filePath) throw new TypeError("Cleanup manifest path is required");
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  persistUnlocked(filePath) {
     const document = this.toJSON();
-    writeFileAtomicSync(filePath, JSON.stringify(document, null, 2) + "\n");
+    writeFileAtomicSync(
+      filePath,
+      JSON.stringify(document, null, 2) + "\n",
+      this.syncDirectory ? { syncDirectory: this.syncDirectory } : undefined,
+    );
     this.filePath = filePath;
     return this.evidence();
+  }
+
+  persist(filePath = this.filePath) {
+    this.assertMutationAllowed();
+    if (!filePath) throw new TypeError("Cleanup manifest path is required");
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const previousPath = this.filePath;
+    const lock = acquireLockSync(`${filePath}.lock`);
+    try {
+      if (fs.existsSync(filePath)) {
+        this.assertPersistedCurrent(filePath);
+      } else if (previousPath === filePath && (this.revision !== 0 || this.resources.length !== 0)) {
+        const error = new Error("Cleanup manifest persisted state is missing");
+        error.code = "cleanup_manifest_stale";
+        throw error;
+      }
+      try {
+        return this.persistUnlocked(filePath);
+      } catch (error) {
+        if (isIndeterminateAtomicWrite(error)) {
+          try {
+            this.reconcilePersistedState(filePath);
+            error.reconciled = true;
+            error.persistedRevision = this.revision;
+          } catch (reconciliationError) {
+            this.reconciliationRequired = true;
+            this.reconciliationError = reconciliationError;
+            error.reconciled = false;
+            error.reconciliationError = reconciliationError;
+          }
+        }
+        throw error;
+      }
+    } finally {
+      lock.release();
+    }
   }
 
   write(filePath) {
@@ -364,7 +505,6 @@ export function createCleanupAuthorization(config, store, { filePath = null } = 
     }
     const resumedResource = structuredClone(recorded);
     delete resumedResource.cleaned;
-    manifest.persist();
     return { manifest, resource: resumedResource };
   }
   const manifest = new CleanupManifest({

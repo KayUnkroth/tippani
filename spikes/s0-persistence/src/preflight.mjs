@@ -256,7 +256,9 @@ export { findEmbeddedSecrets };
 export function validatePreflight(config, {
   env = process.env,
   requireApproval = config?.dryRun === false,
+  now = new Date(),
 } = {}) {
+  const validationTime = now instanceof Date ? now.getTime() : Number(now);
   const errors = findEmbeddedSecrets(config);
   const effectiveConfig = resolveEffectiveProviderConfig(config, env);
   findEmbeddedSecrets(effectiveConfig, "$", errors);
@@ -297,10 +299,11 @@ export function validatePreflight(config, {
     if (!Array.isArray(sandbox.dryRunOperations) || sandbox.dryRunOperations.length === 0) {
       errors.push("Provider dry-run operation manifest is required");
     }
-    const cleanup = normalizedCleanup(sandbox);
+    const cleanup = normalizedCleanup(sandbox, new Date(validationTime));
     if (!cleanup?.manifestId || !cleanup?.expiresAt ||
       !Number.isFinite(Date.parse(cleanup.expiresAt)) ||
-      (!positiveNumber(Number(sandbox.cleanup?.retentionHours)) && Date.parse(cleanup.expiresAt) <= Date.now())) {
+      (!positiveNumber(Number(sandbox.cleanup?.retentionHours)) &&
+        Date.parse(cleanup.expiresAt) <= validationTime)) {
       errors.push("Provider cleanup manifest and expiry are required");
     }
     if (!sandbox.coordinates || typeof sandbox.coordinates !== "object" ||
@@ -318,6 +321,8 @@ export function validatePreflight(config, {
           typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
           typeof approval.reference !== "string" || !approval.reference.trim()) {
         errors.push("Structured preflight approval requires approver, approval date, and reference");
+      } else if (Date.parse(approval.approvedAt) > validationTime) {
+        errors.push("Structured preflight approval date cannot be in the future");
       }
       if (!sandbox.effectiveTargetHash || approval.targetHash !== sandbox.effectiveTargetHash) {
         errors.push("Preflight approval target hash does not match the effective provider target");
@@ -330,7 +335,7 @@ export function validatePreflight(config, {
 
 export function assertPreflight(config, now = new Date(), options = {}) {
   const effectiveConfig = resolveEffectiveProviderConfig(config, options.env || process.env);
-  const errors = validatePreflight(effectiveConfig, options);
+  const errors = validatePreflight(effectiveConfig, { ...options, now });
   if (errors.length) throw new PreflightError(errors);
   return {
     configurationId: effectiveConfig.configurationId,

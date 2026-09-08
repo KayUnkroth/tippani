@@ -23,6 +23,7 @@ import {
   applyWorkspaceOperation,
   assertReconcilable,
   deepClone,
+  validateWorkspaceSnapshot,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
@@ -30,11 +31,12 @@ import { providerTargetHash } from "../preflight.mjs";
 import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
-import { ProviderTelemetry } from "./provider-telemetry.mjs";
+import { ProviderTelemetry, retryAfterMilliseconds } from "./provider-telemetry.mjs";
 
 const GRAPH = "https://graph.microsoft.com/v1.0";
 const RUN_MARKER_NAME = ".tippani-s0-run";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_RETRY_AFTER_MS = 30_000;
 
 function encodePath(p) {
   return p.split("/").filter(Boolean).map(encodeURIComponent).join("/");
@@ -193,6 +195,7 @@ export class OneDriveGraphStore {
         approval.targetHash !== targetHash ||
         typeof approval.approver !== "string" || !approval.approver.trim() ||
         typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        Date.parse(approval.approvedAt) > Date.now() ||
         typeof approval.reference !== "string" || !approval.reference.trim()) {
       throw new WorkspaceStoreError(
         "Effective OneDrive target is not covered by a structured preflight approval",
@@ -215,11 +218,20 @@ export class OneDriveGraphStore {
     if (!this._getToken) throw new WorkspaceStoreError("No Graph token supplied", "no_token");
     if (!this.driveId || !this.baseFolder) throw new WorkspaceStoreError("driveId and folder are required for a live run", "no_coordinates");
     const fault = this._fault;
+    let injectedThrottle = null;
     if (fault && method !== "GET") {
       await this.telemetry.recordRequest(body);
       this.liveProviderCalls++;
       this._fault = null;
-      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), json: async () => ({}), text: async () => "throttled" }, { method, sent: false });
+      if (fault.kind === "throttle") {
+        injectedThrottle = await this.telemetry.wrapResponse({
+          ok: false,
+          status: 429,
+          headers: new Headers({ "Retry-After": "1" }),
+          json: async () => ({}),
+          text: async () => "throttled",
+        }, { method, sent: false });
+      }
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, json: async () => ({}), text: async () => "unauthorized" }, { method, sent: false });
       if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, json: async () => ({}), text: async () => "forbidden" }, { method, sent: false });
       if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, json: async () => ({}), text: async () => "quota exceeded" }, { method, sent: false });
@@ -253,16 +265,32 @@ export class OneDriveGraphStore {
     for (let attempt = 0; ; attempt++) {
       let transportStarted = false;
       try {
-        await this.telemetry.recordRequest(body);
-        this.liveProviderCalls++;
-        transportStarted = true;
-        const resp = await this.fetchImpl(`${GRAPH}${resolvedPath}`, {
-          method,
-          headers: { Authorization: `Bearer ${token}`, ...headers },
-          body,
-          signal: this.signal,
-        });
-        return await this.telemetry.wrapResponse(resp, { method });
+        let response;
+        if (attempt === 0 && injectedThrottle) {
+          response = injectedThrottle;
+        } else {
+          await this.telemetry.recordRequest(body);
+          this.liveProviderCalls++;
+          transportStarted = true;
+          const resp = await this.fetchImpl(`${GRAPH}${resolvedPath}`, {
+            method,
+            headers: { Authorization: `Bearer ${token}`, ...headers },
+            body,
+            signal: this.signal,
+          });
+          response = await this.telemetry.wrapResponse(resp, { method });
+        }
+        if (response.status === 429 && attempt < 2) {
+          const retryAfterMs = retryAfterMilliseconds(response);
+          const delayMs = retryAfterMs ?? (250 * (attempt + 1));
+          if (delayMs <= MAX_RETRY_AFTER_MS) {
+            this.telemetry.recordRetry();
+            this.telemetry.recordBackoff(delayMs);
+            await sleep(delayMs);
+            continue;
+          }
+        }
+        return response;
       } catch (error) {
         if (error?.code === "indeterminate_write") throw error;
         if (method !== "GET" && transportStarted) {
@@ -438,11 +466,15 @@ export class OneDriveGraphStore {
     this.ensureInitialized();
     this.record("list-children");
     if (this.dryRun) return this.model.resolveAlias(alias);
+    const matches = [];
     for (const id of await this.listWorkspaces()) {
       const { workspace } = await this.readItem(id);
-      if (workspace.aliases.includes(alias)) return workspace;
+      if (workspace.aliases.includes(alias)) matches.push(workspace);
     }
-    return null;
+    if (matches.length > 1) {
+      throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+    }
+    return matches[0] || null;
   }
 
   async listWorkspaces() {
@@ -505,24 +537,46 @@ export class OneDriveGraphStore {
     return { schemaVersion: 1, syntheticData: true, configurationId: this.configurationId, workspaces };
   }
 
+  async listCleanupChildren() {
+    const response = await this.graph(
+      "GET",
+      `/drives/${this.driveId}/root:/${encodePath(this.subfolder)}:/children?$select=id,name,eTag,folder`,
+    );
+    if (response.status === 404) return [];
+    if (!response.ok) {
+      throw new WorkspaceStoreError(
+        `cleanup child enumeration failed: ${response.status}`,
+        "provider_error",
+      );
+    }
+    const body = await response.json();
+    if (body["@odata.nextLink"]) {
+      throw new WorkspaceStoreError(
+        "cleanup child enumeration is paged and cannot prove completeness",
+        "cleanup_precondition_unavailable",
+      );
+    }
+    const children = (body.value || []).map((child) => {
+      if (!child?.id || !child?.name || !child?.eTag || child.folder) {
+        throw new WorkspaceStoreError(
+          "cleanup child identity or precondition is unavailable",
+          "cleanup_precondition_unavailable",
+        );
+      }
+      return { id: child.id, name: child.name, eTag: child.eTag };
+    });
+    return children.sort((left, right) => left.id.localeCompare(right.id));
+  }
+
   async restore(snapshot) {
     this.ensureInitialized();
     this.record("restore-head");
     if (this.dryRun) return this.model.restore(snapshot);
-    if (snapshot?.schemaVersion !== 1 || snapshot?.syntheticData !== true || !Array.isArray(snapshot?.workspaces)) {
-      throw new CorruptWorkspaceStoreError("Backup is invalid");
-    }
-    for (const workspace of snapshot.workspaces) {
-      validateWorkspaceRecord(workspace);
-      await this.safetyBudget?.recordObjects(1);
-      const url = `/drives/${this.driveId}/root:/${encodePath(this.itemPath(workspace.workspaceId))}:/content?@microsoft.graph.conflictBehavior=replace`;
-      const resp = await this.graph("PUT", url, {
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(workspace),
-      });
-      if (!resp.ok) throw new WorkspaceStoreError(`restore ${workspace.workspaceId} failed: ${resp.status}`, "provider_error");
-    }
-    return { workspaceCount: snapshot.workspaces.length };
+    validateWorkspaceSnapshot(snapshot);
+    throw new WorkspaceStoreError(
+      "OneDrive item writes cannot atomically replace the complete workspace set",
+      "restore_atomicity_unsupported",
+    );
   }
 
   // Delete only this run's subfolder. Used by cleanup; never touches siblings.
@@ -551,7 +605,14 @@ export class OneDriveGraphStore {
     const expected = { ...this.cleanupResource(), manifestId: this.cleanupManifestId };
     assertCleanupAuthorized(manifest, resource, expected);
     if (this.dryRun) {
-      manifest.bindCondition(resource, { expectedItemId: "<folder-id>", expectedETag: "<folder-etag>" });
+      manifest.bindCondition(resource, {
+        expectedItemId: "<folder-id>",
+        expectedChildren: [{
+          id: "<child-id>",
+          name: "<manifest-enumerated-child>",
+          eTag: "<child-etag>",
+        }],
+      });
       return resource.condition;
     }
     const meta = await this.graph(
@@ -568,11 +629,19 @@ export class OneDriveGraphStore {
       throw new WorkspaceStoreError("cleanup precondition unavailable", "cleanup_precondition_unavailable");
     }
     const marker = await this.verifyRunMarker();
+    const children = await this.listCleanupChildren();
+    const markerChild = children.find((child) => child.id === marker.id);
+    if (!markerChild || markerChild.eTag !== marker.eTag) {
+      throw new WorkspaceStoreError(
+        "OneDrive ownership marker is absent from the cleanup child manifest",
+        "cleanup_ownership_mismatch",
+      );
+    }
     manifest.bindCondition(resource, {
       expectedItemId: id,
-      expectedETag: eTag,
       expectedMarkerItemId: marker.id,
       expectedMarkerDigest: marker.digest,
+      expectedChildren: children,
     });
     return resource.condition;
   }
@@ -586,9 +655,13 @@ export class OneDriveGraphStore {
     }
     const phase = manifest.phase(resource);
     if (this.dryRun) {
+      this.record("delete-manifest-enumerated-children", {
+        path: this.subfolder,
+        precondition: "If-Match:<child-etag>",
+      });
       this.record("delete-folder", {
         path: this.subfolder,
-        precondition: "If-Match:<folder-etag>",
+        precondition: "only-after-proving-empty; live transport fails closed",
       });
       manifest.markMutating(resource);
       manifest.markDeleted(resource);
@@ -637,10 +710,15 @@ export class OneDriveGraphStore {
       throw new WorkspaceStoreError("cleanup target disappeared", "cleanup_conflict");
     }
     if (!meta.ok) throw new WorkspaceStoreError(`cleanup lookup failed: ${meta.status}`, "provider_error");
-    const { id, eTag } = await meta.json();
+    const { id } = await meta.json();
     if (id !== resource.condition.expectedItemId ||
-        eTag !== resource.condition.expectedETag) {
-      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+        !Array.isArray(resource.condition.expectedChildren)) {
+      throw new WorkspaceStoreError("cleanup target identity changed concurrently", "cleanup_conflict");
+    }
+    const currentChildren = await this.listCleanupChildren();
+    if (JSON.stringify(currentChildren) !==
+        JSON.stringify(resource.condition.expectedChildren)) {
+      throw new WorkspaceStoreError("cleanup children changed concurrently", "cleanup_conflict");
     }
     const marker = await this.verifyRunMarker();
     if (marker.id !== resource.condition.expectedMarkerItemId ||
@@ -651,20 +729,40 @@ export class OneDriveGraphStore {
       );
     }
     manifest.markMutating(resource);
-    const resp = await this.graph("DELETE", `/drives/${this.driveId}/items/${id}`, {
-      headers: { "If-Match": resource.condition.expectedETag },
-    });
-    if (resp.status === 412) {
-      manifest.markPrepared(resource);
-      throw new WorkspaceStoreError("cleanup target changed concurrently", "cleanup_conflict");
+    for (const child of resource.condition.expectedChildren) {
+      const response = await this.graph("DELETE", `/drives/${this.driveId}/items/${child.id}`, {
+        headers: { "If-Match": child.eTag },
+      });
+      if (response.status === 412) {
+        throw new WorkspaceStoreError(
+          `cleanup child changed concurrently: ${child.name}`,
+          "cleanup_conflict",
+        );
+      }
+      if (response.status === 404) {
+        throw new WorkspaceStoreError(
+          `cleanup child disappeared concurrently: ${child.name}`,
+          "cleanup_conflict",
+        );
+      }
+      if (!response.ok) {
+        throw new WorkspaceStoreError(
+          `cleanup child failed: ${child.name} (${response.status})`,
+          "provider_error",
+        );
+      }
     }
-    if (!resp.ok && resp.status !== 404) {
-      manifest.markPrepared(resource);
-      throw new WorkspaceStoreError(`cleanup failed: ${resp.status}`, "provider_error");
+    const remaining = await this.listCleanupChildren();
+    if (remaining.length > 0) {
+      throw new WorkspaceStoreError(
+        "cleanup child appeared during deletion",
+        "cleanup_conflict",
+      );
     }
-    manifest.markDeleted(resource);
-    manifest.markCleaned(resource);
-    return { deleted: this.subfolder };
+    throw new WorkspaceStoreError(
+      "OneDrive cannot condition recursive folder deletion on the folder remaining empty",
+      "cleanup_precondition_unavailable",
+    );
   }
 
   async deleteWorkspace(workspaceId) {

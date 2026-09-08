@@ -1,13 +1,14 @@
 // Offline correctness + detection for the live OneDrive gate implementations.
-// Each gate is exercised against an in-memory fake of the Graph drive (with
-// versions, delete, and replace), so the logic is proven without a sandbox.
-// A live run confirms the same gates against a real drive.
+// Provider request logic is exercised against an in-memory fake. Gates that
+// require independent processes or atomic full-store restore must remain
+// incomplete because this execution is in-process transport emulation.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { OneDriveGraphStore } from "../src/adapters/onedrive-store.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
+import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
 
 let pass = 0;
 let fail = 0;
@@ -132,25 +133,35 @@ function liveContext(scenarioId) {
 }
 
 for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
-  await check(`gate ${id} passes against the fake drive`, async () => {
+  await check(`gate ${id} reports evidence no stronger than the fake drive execution`, async () => {
     const context = liveContext(id);
     try {
       const result = await impl(context);
+      if (["S0-COL-002", "S0-COL-003", "S0-COL-006", "S0-BKP-004"].includes(id)) {
+        assert.match(result.skip, /in-process|atomic authoritative head/i);
+        assert.equal(result.evidence, undefined);
+        return;
+      }
       assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
       assert.ok(!result.blocked, `${id} must not be blocked in a live context`);
-      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
-        assert.equal(result.evidence.accounts, 1);
-        assert.equal(result.evidence.clientProcesses, 2);
-      }
       if (id === "S0-BCK-005") {
         assert.deepEqual(result.evidence.faultsExercised,
-          ["throttle", "auth-expiry", "outage", "quota", "permission-loss"]);
+          ["auth-expiry", "outage", "quota", "permission-loss", "throttle"]);
         assert.equal(result.evidence.throttleResponses, 1);
+        assert.equal(result.evidence.throttleRecoveredByBoundedRetry, true);
+        assert.equal(result.evidence.retries, 1);
+        assert.deepEqual(result.evidence.retryAfterSeconds, [1]);
+        assert.ok(result.evidence.backoffMs >= 1000);
         assert.ok(result.evidence.transferredBytes > 0);
       }
       if (id === "S0-REC-003") {
         assert.deepEqual(result.evidence.faultsExercised,
           ["outage", "throttle", "auth-expiry", "quota", "permission-loss", "lost-response"]);
+        assert.deepEqual(result.evidence.throttleRecovery, {
+          boundedRetries: 1,
+          retryAfterSeconds: 1,
+          minimumBackoffMs: 1000,
+        });
       }
       if (["S0-COL-005", "S0-REC-004"].includes(id)) {
         assert.equal(result.evidence.processRestartRecoveredQueue, true);
@@ -164,6 +175,59 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
     }
   });
 }
+
+await check("OneDrive resolveAlias fails closed on duplicate persisted aliases", async () => {
+  const drive = fakeGraphDrive();
+  const runId = "s0-onedrive-duplicate-alias";
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    graphToken: "syn-token",
+    fetchImpl: (url, request) => drive.fetch(url, request),
+  });
+  await store.initialize();
+  const left = createSyntheticWorkspace({ seed: "onedrive-duplicate-left" });
+  const right = createSyntheticWorkspace({ seed: "onedrive-duplicate-right" });
+  right.aliases = [left.aliases[0]];
+  for (const workspace of [left, right]) {
+    drive.items.set(`${store.subfolder}/${workspace.workspaceId}.json`, {
+      id: `id-${workspace.workspaceId}`,
+      eTag: `etag-${workspace.workspaceId}`,
+      content: JSON.stringify(workspace),
+      versions: [JSON.stringify(workspace)],
+    });
+  }
+  await assert.rejects(
+    store.resolveAlias(left.aliases[0]),
+    (error) => error.code === "alias_conflict",
+  );
+});
+
+await check("OneDrive restore validates then fails before any item mutation", async () => {
+  const drive = fakeGraphDrive();
+  const runId = "s0-onedrive-restore-unsupported";
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    graphToken: "syn-token",
+    fetchImpl: (url, request) => drive.fetch(url, request),
+  });
+  await store.initialize();
+  const before = new Map(drive.items);
+  await assert.rejects(
+    store.restore({
+      schemaVersion: 1,
+      syntheticData: true,
+      workspaces: [createSyntheticWorkspace({ seed: "onedrive-restore" })],
+    }),
+    (error) => error.code === "restore_atomicity_unsupported",
+  );
+  assert.deepEqual(drive.items, before);
+});
 
 await check("gates report Blocked outside a live OneDrive context", async () => {
   for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {

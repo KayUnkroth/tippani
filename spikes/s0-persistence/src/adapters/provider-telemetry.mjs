@@ -19,6 +19,15 @@ function isMutation(method) {
   return !["GET", "HEAD", "OPTIONS"].includes(String(method || "GET").toUpperCase());
 }
 
+export function retryAfterMilliseconds(response, now = Date.now()) {
+  const raw = response?.headers?.get?.("retry-after");
+  if (raw === null || raw === undefined) return null;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const at = Date.parse(raw);
+  return Number.isFinite(at) ? Math.max(0, at - now) : null;
+}
+
 export class ProviderTelemetry {
   constructor({ safetyBudget = null } = {}) {
     this.safetyBudget = safetyBudget;
@@ -42,9 +51,14 @@ export class ProviderTelemetry {
     this.retries++;
   }
 
-  recordRetryAfter(value) {
+  recordRetryAfter(value, now = Date.now()) {
     const seconds = Number(value);
-    if (Number.isFinite(seconds) && seconds >= 0) this.retryAfterSeconds.push(seconds);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      this.retryAfterSeconds.push(seconds);
+      return;
+    }
+    const at = Date.parse(value);
+    if (Number.isFinite(at)) this.retryAfterSeconds.push(Math.max(0, at - now) / 1000);
   }
 
   recordBackoff(milliseconds) {

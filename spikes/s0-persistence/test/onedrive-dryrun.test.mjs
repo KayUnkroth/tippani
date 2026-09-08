@@ -218,8 +218,10 @@ await check("cleanup requires manifest authorization before any provider call", 
   assert.equal(calls, 0);
 });
 
-await check("cleanup uses the authorized folder ETag as a delete precondition", async () => {
-  let conditionalDelete = false;
+await check("cleanup deletes only manifest-enumerated children and refuses recursive folder deletion", async () => {
+  let childPresent = true;
+  let conditionalChildDelete = false;
+  let folderDeletes = 0;
   const runId = "s0-cleanup-conditional";
   const store = new OneDriveGraphStore({
     dryRun: false,
@@ -234,6 +236,17 @@ await check("cleanup uses the authorized folder ETag as a delete precondition", 
         if (url.includes("/items/marker-1/content")) {
           return { ok: true, status: 200, text: async () => store.runMarkerContent() };
         }
+        if (url.includes(":/children")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              value: childPresent
+                ? [{ id: "marker-1", name: ".tippani-s0-run", eTag: "marker-etag-1" }]
+                : [],
+            }),
+          };
+        }
         if (url.includes(".tippani-s0-run")) {
           return {
             ok: true,
@@ -244,7 +257,12 @@ await check("cleanup uses the authorized folder ETag as a delete precondition", 
         return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) };
       }
       if (options.method === "DELETE") {
-        conditionalDelete = options.headers["If-Match"] === "etag-1";
+        if (url.includes("/items/marker-1")) {
+          conditionalChildDelete = options.headers["If-Match"] === "marker-etag-1";
+          childPresent = false;
+        } else {
+          folderDeletes++;
+        }
         return { ok: true, status: 204 };
       }
       return { ok: true, status: 201, json: async () => ({}) };
@@ -276,9 +294,77 @@ await check("cleanup uses the authorized folder ETag as a delete precondition", 
     authorization.resource.condition.expectedMarkerDigest,
     store.runMarkerDigest(),
   );
-  await store.cleanup(authorization);
-  assert.equal(conditionalDelete, true);
-  assert.equal(authorization.manifest.authorize(authorization.resource), false);
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_precondition_unavailable",
+  );
+  assert.equal(conditionalChildDelete, true);
+  assert.equal(folderDeletes, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "mutating");
+});
+
+await check("OneDrive cleanup rejects a child ETag change before deletion", async () => {
+  const runId = "s0-cleanup-child-change";
+  let childETag = "marker-etag-1";
+  let deletes = 0;
+  const store = new OneDriveGraphStore({
+    dryRun: false,
+    driveId: "d1",
+    folderPath: "Base",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    graphToken: "syn-token",
+    fetchImpl: async (url, options) => {
+      if (options.method === "GET" && url.includes("/items/marker-1/content")) {
+        return { ok: true, status: 200, text: async () => store.runMarkerContent() };
+      }
+      if (options.method === "GET" && url.includes(":/children")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            value: [{
+              id: "marker-1",
+              name: ".tippani-s0-run",
+              eTag: childETag,
+            }],
+          }),
+        };
+      }
+      if (options.method === "GET" && url.includes(".tippani-s0-run")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id: "marker-1", eTag: childETag }),
+        };
+      }
+      if (options.method === "GET") {
+        return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "folder-etag" }) };
+      }
+      deletes++;
+      return { ok: true, status: 204 };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "onedrive",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { driveId: "d1", folder: "Base" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  childETag = "marker-etag-2";
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_conflict" &&
+      /children changed/.test(error.message),
+  );
+  assert.equal(deletes, 0);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
 });
 
 await check("OneDrive cleanup rejects ownership marker tampering", async () => {
@@ -306,6 +392,15 @@ await check("OneDrive cleanup rejects ownership marker tampering", async () => {
           ok: true,
           status: 200,
           json: async () => ({ id: "marker-1", eTag: "marker-etag-1" }),
+        };
+      }
+      if (options.method === "GET" && url.includes(":/children")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            value: [{ id: "marker-1", name: ".tippani-s0-run", eTag: "marker-etag-1" }],
+          }),
         };
       }
       if (options.method === "GET") {
@@ -415,8 +510,8 @@ await check("OneDrive cleanup rechecks an absent target and rejects concurrent c
   assert.equal(authorization.manifest.authorize(authorization.resource), true);
 });
 
-await check("OneDrive cleanup reconciles a crash after remote deletion", async () => {
-  const runId = "s0-cleanup-post-delete-crash";
+await check("OneDrive cleanup preserves a child that appears during deletion", async () => {
+  const runId = "s0-cleanup-concurrent-child";
   const root = path.join(spikeRoot, ".test-state", runId);
   const manifestPath = path.join(root, "cleanup-manifest.json");
   const config = {
@@ -429,14 +524,24 @@ await check("OneDrive cleanup reconciles a crash after remote deletion", async (
       cleanup: { manifestId: `syn-cleanup-${runId}` },
     },
   };
-  let exists = true;
-  let deletes = 0;
+  let markerPresent = true;
+  let concurrentChildPresent = false;
+  let folderDeletes = 0;
   let markerContent = null;
   const fetchImpl = async (url, options) => {
     if (options.method === "GET") {
-      if (!exists) return { ok: false, status: 404, json: async () => ({}) };
       if (url.includes("/items/marker-1/content")) {
         return { ok: true, status: 200, text: async () => markerContent };
+      }
+      if (url.includes(":/children")) {
+        const value = [];
+        if (markerPresent) {
+          value.push({ id: "marker-1", name: ".tippani-s0-run", eTag: "marker-etag-1" });
+        }
+        if (concurrentChildPresent) {
+          value.push({ id: "child-2", name: "appeared.json", eTag: "child-etag-2" });
+        }
+        return { ok: true, status: 200, json: async () => ({ value }) };
       }
       if (url.includes(".tippani-s0-run")) {
         return {
@@ -445,20 +550,23 @@ await check("OneDrive cleanup reconciles a crash after remote deletion", async (
           json: async () => ({ id: "marker-1", eTag: "marker-etag-1" }),
         };
       }
-      return exists
-        ? { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) }
-        : { ok: false, status: 404, json: async () => ({}) };
+      return { ok: true, status: 200, json: async () => ({ id: "folder-1", eTag: "etag-1" }) };
     }
     if (options.method === "DELETE") {
-      deletes++;
-      exists = false;
+      if (url.includes("/items/marker-1")) {
+        assert.equal(options.headers["If-Match"], "marker-etag-1");
+        markerPresent = false;
+        concurrentChildPresent = true;
+      } else {
+        folderDeletes++;
+      }
       return { ok: true, status: 204 };
     }
     throw new Error(`Unexpected cleanup method: ${options.method}`);
   };
   fs.rmSync(root, { recursive: true, force: true });
   try {
-    const first = new OneDriveGraphStore({
+    const store = new OneDriveGraphStore({
       dryRun: false,
       driveId: "d1",
       folderPath: "Base",
@@ -468,37 +576,19 @@ await check("OneDrive cleanup reconciles a crash after remote deletion", async (
       graphToken: "syn-token",
       fetchImpl,
     });
-    const authorization = createCleanupAuthorization(config, first, {
+    const authorization = createCleanupAuthorization(config, store, {
       filePath: manifestPath,
     });
-    markerContent = first.runMarkerContent();
-    await first.prepareCleanup(authorization);
-    authorization.manifest.markCleaned = () => {
-      throw new Error("simulated process death after remote deletion");
-    };
-    await assert.rejects(first.cleanup(authorization), /simulated process death/);
-    assert.equal(deletes, 1);
-    assert.equal(CleanupManifest.load(manifestPath).resources[0].phase, "deleted");
-
-    const resumed = new OneDriveGraphStore({
-      dryRun: false,
-      driveId: "d1",
-      folderPath: "Base",
-      runId,
-      cleanupManifestId: `syn-cleanup-${runId}`,
-      effectiveTargetHash: "sha256:syn-target",
-      graphToken: "syn-token",
-      fetchImpl,
-    });
-    const recovered = createCleanupAuthorization(config, resumed, {
-      filePath: manifestPath,
-    });
-    const result = await resumed.cleanup(recovered);
-    assert.equal(result.reconciled, true);
-    assert.equal(deletes, 1, "reconciliation must not issue a second delete");
-    const finalManifest = CleanupManifest.load(manifestPath);
-    assert.equal(finalManifest.resources[0].phase, "cleaned");
-    assert.equal(finalManifest.resources[0].cleaned, true);
+    markerContent = store.runMarkerContent();
+    await store.prepareCleanup(authorization);
+    await assert.rejects(
+      store.cleanup(authorization),
+      (error) => error.code === "cleanup_conflict" &&
+        /appeared/.test(error.message),
+    );
+    assert.equal(concurrentChildPresent, true);
+    assert.equal(folderDeletes, 0);
+    assert.equal(CleanupManifest.load(manifestPath).resources[0].phase, "mutating");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

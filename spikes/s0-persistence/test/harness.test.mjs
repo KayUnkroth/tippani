@@ -6,7 +6,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { ReferenceMemoryWorkspaceStore } from "../src/adapters/reference-memory-store.mjs";
-import { acquireLock } from "../src/adapters/fs-atomic.mjs";
+import {
+  acquireLock,
+  fsyncDirectorySync,
+  listTempArtifacts,
+  writeFileAtomicSync,
+} from "../src/adapters/fs-atomic.mjs";
 import { LocalCasWorkspaceStore } from "../src/adapters/local-cas-store.mjs";
 import { LocalSqliteWorkspaceStore } from "../src/adapters/local-sqlite-store.mjs";
 import {
@@ -15,6 +20,7 @@ import {
   validateApplicability,
 } from "../src/applicability.mjs";
 import { CleanupManifest } from "../src/cleanup-manifest.mjs";
+import { FaultInjector, InjectedFaultError } from "../src/fault-injector.mjs";
 import { validatePreflight } from "../src/preflight.mjs";
 import { COMPLEXITY_RUBRIC, complexityAssessment } from "../src/complexity-rubric.mjs";
 import { runHarness } from "../src/runner.mjs";
@@ -639,6 +645,298 @@ await check("cleanup manifest authorizes only owned resources once", async () =>
   assert.throws(() => manifest.markCleaned(owned), /Refusing cleanup/);
 });
 
+await check("CAS serializes global alias claims across store instances", async () => {
+  const storeRoot = path.join(spikeRoot, ".test-state", "cas-global-alias");
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  const first = new LocalCasWorkspaceStore({ storeRoot });
+  const second = new LocalCasWorkspaceStore({ storeRoot });
+  await first.initialize();
+  await second.initialize();
+  const left = createSyntheticWorkspace({ seed: "cas-global-alias-left" });
+  const right = createSyntheticWorkspace({ seed: "cas-global-alias-right" });
+  right.aliases = [left.aliases[0]];
+  const settled = await Promise.allSettled([
+    first.createWorkspace(left),
+    second.createWorkspace(right),
+  ]);
+  assert.equal(settled.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(
+    settled.filter((result) =>
+      result.status === "rejected" && result.reason?.code === "alias_conflict").length,
+    1,
+  );
+  const winner = settled.find((result) => result.status === "fulfilled").value;
+  const verifier = new LocalCasWorkspaceStore({ storeRoot });
+  await verifier.initialize();
+  assert.equal((await verifier.resolveAlias(left.aliases[0])).workspaceId, winner.workspaceId);
+  await first.close();
+  await second.close();
+  await verifier.close();
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+});
+
+await check("CAS restore switches one authoritative HEAD only after a complete stage", async () => {
+  const storeRoot = path.join(spikeRoot, ".test-state", "cas-restore-head");
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  const store = new LocalCasWorkspaceStore({ storeRoot });
+  await store.initialize();
+  const stale = createSyntheticWorkspace({ seed: "cas-restore-stale" });
+  const left = createSyntheticWorkspace({ seed: "cas-restore-left" });
+  const right = createSyntheticWorkspace({ seed: "cas-restore-right" });
+  await store.createWorkspace(stale);
+  const headBefore = fs.readFileSync(path.join(storeRoot, "HEAD"), "utf8");
+  const snapshot = {
+    schemaVersion: 1,
+    syntheticData: true,
+    workspaces: [left, right],
+  };
+  await assert.rejects(
+    store.restore(snapshot, {
+      faultInjector: new FaultInjector(["during-restore-stage"]),
+    }),
+    InjectedFaultError,
+  );
+  assert.equal(fs.readFileSync(path.join(storeRoot, "HEAD"), "utf8"), headBefore);
+  assert.deepEqual(await store.listWorkspaces(), [stale.workspaceId]);
+
+  await store.restore(snapshot);
+  assert.deepEqual(await store.listWorkspaces(), [left.workspaceId, right.workspaceId].sort());
+  await assert.rejects(
+    store.readWorkspace(stale.workspaceId),
+    (error) => error.code === "workspace_not_found",
+  );
+  const head = JSON.parse(fs.readFileSync(path.join(storeRoot, "HEAD"), "utf8"));
+  assert.match(head.directory, /^workspaces\.restore-/);
+  assert.equal(fs.existsSync(path.join(storeRoot, head.directory)), true);
+  await store.close();
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+});
+
+await check("cleanup manifest rejects stale two-instance transitions", () => {
+  const root = path.join(spikeRoot, ".test-state", "cleanup-stale-instance");
+  const filePath = path.join(root, "cleanup-manifest.json");
+  fs.rmSync(root, { recursive: true, force: true });
+  const resource = {
+    kind: "synthetic-ref",
+    id: "syn-stale-resource",
+    runId: "s0-cleanup-stale",
+    ownershipMarker: "tippani-s0:s0-cleanup-stale",
+  };
+  const created = new CleanupManifest({
+    runId: resource.runId,
+    ownershipMarker: resource.ownershipMarker,
+    filePath,
+  });
+  created.record(resource);
+  const first = CleanupManifest.load(filePath);
+  const second = CleanupManifest.load(filePath);
+  const firstResource = structuredClone(first.resources[0]);
+  delete firstResource.cleaned;
+  const secondResource = structuredClone(second.resources[0]);
+  delete secondResource.cleaned;
+  first.bindCondition(firstResource, { expected: "v1" });
+  assert.throws(
+    () => second.bindCondition(secondResource, { expected: "stale" }),
+    (error) => error.code === "cleanup_manifest_stale",
+  );
+  const persisted = CleanupManifest.load(filePath);
+  assert.equal(persisted.revision, 2);
+  assert.equal(persisted.resources[0].phase, "prepared");
+  assert.deepEqual(persisted.resources[0].condition, { expected: "v1" });
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+await check("cleanup manifest reconciles an indeterminate post-rename write", () => {
+  const root = path.join(spikeRoot, ".test-state", "cleanup-indeterminate-write");
+  const filePath = path.join(root, "cleanup-manifest.json");
+  fs.rmSync(root, { recursive: true, force: true });
+  let failSync = false;
+  const resource = {
+    kind: "synthetic-ref",
+    id: "syn-indeterminate-resource",
+    runId: "s0-cleanup-indeterminate",
+    ownershipMarker: "tippani-s0:s0-cleanup-indeterminate",
+  };
+  const manifest = new CleanupManifest({
+    runId: resource.runId,
+    ownershipMarker: resource.ownershipMarker,
+    filePath,
+    syncDirectory(directory) {
+      if (failSync) {
+        const error = new Error("injected directory fsync failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fsyncDirectorySync(directory);
+    },
+  });
+  manifest.record(resource);
+  failSync = true;
+  assert.throws(
+    () => manifest.bindCondition(resource, { expected: "v2" }),
+    (error) =>
+      error.code === "indeterminate_write" &&
+      error.reason === "directory_fsync_failed" &&
+      error.requiresReconciliation === true &&
+      error.reconciled === true &&
+      error.persistedRevision === 2,
+  );
+  assert.equal(manifest.revision, 2);
+  assert.equal(manifest.resources[0].phase, "prepared");
+  assert.equal(resource.phase, "prepared");
+  assert.deepEqual(resource.condition, { expected: "v2" });
+  assert.equal(CleanupManifest.load(filePath).revision, 2);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+await check("cleanup manifest preserves and poisons indeterminate state when reload fails", () => {
+  const root = path.join(spikeRoot, ".test-state", "cleanup-indeterminate-reload");
+  const filePath = path.join(root, "cleanup-manifest.json");
+  fs.rmSync(root, { recursive: true, force: true });
+  let failSync = false;
+  let failReload = false;
+  const resource = {
+    kind: "synthetic-ref",
+    id: "syn-indeterminate-reload-resource",
+    runId: "s0-cleanup-indeterminate-reload",
+    ownershipMarker: "tippani-s0:s0-cleanup-indeterminate-reload",
+  };
+  const manifest = new CleanupManifest({
+    runId: resource.runId,
+    ownershipMarker: resource.ownershipMarker,
+    filePath,
+    loadPersisted(target) {
+      if (failReload) {
+        const error = new Error("injected persisted-state read failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return CleanupManifest.load(target);
+    },
+    syncDirectory(directory) {
+      if (failSync) {
+        failReload = true;
+        const error = new Error("injected directory fsync failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fsyncDirectorySync(directory);
+    },
+  });
+  manifest.record(resource);
+  failSync = true;
+  assert.throws(
+    () => manifest.bindCondition(resource, { expected: "indeterminate" }),
+    (error) =>
+      error.code === "indeterminate_write" &&
+      error.requiresReconciliation === true &&
+      error.reconciled === false &&
+      error.reconciliationError?.code === "EIO",
+  );
+  assert.equal(manifest.revision, 2);
+  assert.equal(manifest.resources[0].phase, "prepared");
+  assert.equal(resource.phase, "prepared");
+  assert.deepEqual(resource.condition, { expected: "indeterminate" });
+  assert.equal(manifest.reconciliationRequired, true);
+  assert.throws(
+    () => manifest.markMutating(resource),
+    (error) =>
+      error.code === "cleanup_manifest_reconciliation_required" &&
+      error.requiresReconciliation === true,
+  );
+  assert.equal(manifest.revision, 2);
+  assert.equal(manifest.resources[0].phase, "prepared");
+
+  failSync = false;
+  failReload = false;
+  manifest.reloadPersisted(resource);
+  assert.equal(manifest.reconciliationRequired, false);
+  manifest.markMutating(resource);
+  assert.equal(manifest.revision, 3);
+  assert.equal(manifest.resources[0].phase, "mutating");
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+await check("atomic file replacement fsyncs its parent and cleans failed temps", () => {
+  const root = path.join(spikeRoot, ".test-state", "atomic-parent-fsync");
+  const filePath = path.join(root, "state.json");
+  fs.rmSync(root, { recursive: true, force: true });
+  fs.mkdirSync(root, { recursive: true });
+  let syncedDirectory = null;
+  writeFileAtomicSync(filePath, "one", {
+    syncDirectory(directory) {
+      syncedDirectory = directory;
+    },
+  });
+  assert.equal(syncedDirectory, root);
+  assert.equal(fs.readFileSync(filePath, "utf8"), "one");
+  assert.throws(
+    () => writeFileAtomicSync(filePath, "two", {
+      syncDirectory() {
+        const error = new Error("injected directory fsync failure");
+        error.code = "EIO";
+        throw error;
+      },
+    }),
+    (error) =>
+      error.code === "indeterminate_write" &&
+      error.reason === "directory_fsync_failed" &&
+      error.commitPoint === "rename" &&
+      error.requiresReconciliation === true &&
+      error.cause?.code === "EIO",
+  );
+  assert.equal(fs.readFileSync(filePath, "utf8"), "two");
+  assert.throws(
+    () => writeFileAtomicSync(filePath, "three", {
+      onBeforeRename() {
+        throw new Error("injected before rename");
+      },
+    }),
+    /injected before rename/,
+  );
+  assert.equal(fs.readFileSync(filePath, "utf8"), "two");
+  assert.deepEqual(listTempArtifacts(root), []);
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
+await check("CAS reconciles an indeterminate post-rename workspace write", async () => {
+  const storeRoot = path.join(spikeRoot, ".test-state", "cas-indeterminate-write");
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+  let failSync = false;
+  const store = new LocalCasWorkspaceStore({
+    storeRoot,
+    syncDirectory(directory) {
+      if (failSync) {
+        const error = new Error("injected directory fsync failure");
+        error.code = "EIO";
+        throw error;
+      }
+      return fsyncDirectorySync(directory);
+    },
+  });
+  await store.initialize();
+  const workspace = createSyntheticWorkspace({ seed: "cas-indeterminate-write" });
+  await store.createWorkspace(workspace);
+  const alias = "syn-alias-indeterminate-write";
+  failSync = true;
+  await assert.rejects(
+    store.compareAndSwap({
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      operation: { addAliases: [alias] },
+    }),
+    (error) =>
+      error.code === "indeterminate_write" &&
+      error.requiresReconciliation === true &&
+      error.reconciled === true &&
+      error.persistedGeneration === 1,
+  );
+  assert.equal((await store.readWorkspace(workspace.workspaceId)).generation, 1);
+  assert.equal((await store.resolveAlias(alias)).workspaceId, workspace.workspaceId);
+  await store.close();
+  fs.rmSync(storeRoot, { recursive: true, force: true });
+});
+
 await check("reference self-test writes raw and Markdown outcomes", async () => {
   const outputDir = fs.mkdtempSync(path.join(os.tmpdir(), "tippani-s0-"));
   try {
@@ -777,6 +1075,29 @@ await check("an approved N/A without a scenario-specific rationale remains incom
   const gates = gateSummary(run);
   assert.equal(gates.eligible, "Incomplete");
   assert.match(gates.unresolved[0].reason, /scenario-specific contract rationale/);
+});
+
+await check("a future-dated N/A approval is incomplete at the run time", () => {
+  const run = {
+    completedAt: "2026-09-08T20:00:00.000Z",
+    catalog: [{ id: "S0-REC-002", criterionType: "absolute", title: "recovery" }],
+    results: [{
+      scenarioId: "S0-REC-002",
+      status: "N/A",
+      approval: {
+        approver: "Synthetic Reviewer",
+        approvedAt: "2026-09-09T20:00:00.000Z",
+        reference: "syn-future",
+      },
+      contractRationale: {
+        scenarioId: "S0-REC-002",
+        rationale: "Synthetic rationale.",
+      },
+    }],
+  };
+  const gates = gateSummary(run);
+  assert.equal(gates.eligible, "Incomplete");
+  assert.match(gates.unresolved[0].reason, /future/);
 });
 
 await check("corrected local SQLite gates report checksum coverage, real migration kill, and known limitations", async () => {

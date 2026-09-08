@@ -1,6 +1,6 @@
 # ADR: Draft Workspace persistence architecture
 
-**Status:** Incomplete — decision pending corrected evidence
+**Status:** Harness accepted for merge; persistence decision pending corrected evidence
 **Original decision date:** 2026-08-31
 **Reopened:** 2026-09-03
 
@@ -25,6 +25,11 @@ independently approved, scenario-specific rationale-backed `N/A`.
 ## Decision
 
 No persistence mapping is selected.
+
+PR #91 ships only the hardened S0 evaluation harness and its fail-closed
+classification semantics. It does not integrate a persistence implementation
+into the production runtime and does not authorize R1 to adopt SQLite, a local
+CAS envelope, a hybrid mapping, or any provider mapping.
 
 The previous hybrid SQLite + provider-native CAS acceptance is withdrawn for
 the current evidence revision. It must not guide R1 until a newly generated
@@ -61,6 +66,7 @@ approver record a dated decision.
 ## Consequences
 
 - Existing outcome files remain historical artifacts only.
+- The harness repair can merge independently of the architecture decision.
 - Relative performance numbers are excluded from architecture rationale.
 - `compare.mjs --use-existing` exits nonzero while no selected mapping is
   eligible.

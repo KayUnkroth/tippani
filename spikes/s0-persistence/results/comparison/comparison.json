@@ -1,6 +1,13 @@
 {
   "schemaVersion": 3,
   "generatedAt": "2026-09-04T18:20:50.320Z",
+  "artifactDisposition": {
+    "status": "historical-invalid-incomplete",
+    "harnessOnly": true,
+    "productionIntegration": false,
+    "mappingSelected": false,
+    "followUp": "Fresh local, cross-platform, synced-folder, and provider campaigns plus independent sign-off are required."
+  },
   "decision": {
     "status": "Incomplete",
     "mapping": null,

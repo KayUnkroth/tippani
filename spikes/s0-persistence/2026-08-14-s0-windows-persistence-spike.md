@@ -5,6 +5,11 @@
 **Source:** `2026-08-13-target-architecture-conformance-analysis.md`  
 **Fitness gate:** `FF-S0-01`
 
+> **Current disposition:** PR #91 delivers this specification's hardened S0
+> evaluation harness only. Retained evidence is invalid/incomplete for the
+> repaired source. No persistence mapping is selected; fresh campaigns and
+> independent ADR sign-off remain follow-up work.
+
 ## Purpose
 
 S0 will select the persistence architecture for Tippani's durable Draft Workspace before R1 begins. The architecture must support today's private/local workspace and the anticipated shared workspace in which multiple users collaborate through OneDrive, Azure DevOps, or GitHub. Although the source conformance analysis describes a Windows spike, Tippani also targets macOS and Linux. This scenario definition therefore expands the gate to cross-platform and collaborative backing-store behavior.

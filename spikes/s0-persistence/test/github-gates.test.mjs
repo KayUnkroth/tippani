@@ -46,6 +46,15 @@ function fakeGitHubRepo() {
       history.set(".tippani-s0-run", [{ commitSha, content: markerContent }]);
       tip = commitSha;
     },
+    seedWorkspace(workspace) {
+      const rel = `${workspace.workspaceId}.json`;
+      const content = JSON.stringify(workspace);
+      const blobSha = gitBlobSha(content);
+      const commitSha = `c${++seq}`;
+      files.set(rel, { blobSha, content });
+      history.set(rel, [{ commitSha, content }]);
+      tip = commitSha;
+    },
     async fetch(url, opts) {
       const u = new URL(url);
       const p = u.pathname;
@@ -128,24 +137,30 @@ function liveContext(scenarioId) {
 }
 
 for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
-  await check(`gate ${id} passes against the fake GitHub repo`, async () => {
+  await check(`gate ${id} reports evidence no stronger than the fake GitHub execution`, async () => {
     const context = liveContext(id);
     try {
       const result = await impl(context);
+      if (["S0-COL-002", "S0-COL-003", "S0-COL-006", "S0-BKP-004"].includes(id)) {
+        assert.match(result.skip, /in-process|atomic authoritative head/i);
+        assert.equal(result.evidence, undefined);
+        return;
+      }
       assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
       assert.ok(!result.blocked, `${id} must not be blocked in a live GitHub context`);
-      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
-        assert.equal(result.evidence.accounts, 1);
-        assert.equal(result.evidence.clientProcesses, 2);
-      }
       if (id === "S0-BCK-005") {
         assert.deepEqual(result.evidence.faultsExercised,
-          ["throttle", "auth-expiry", "outage", "quota", "permission-loss"]);
+          ["auth-expiry", "outage", "quota", "permission-loss", "throttle"]);
         assert.equal(result.evidence.throttleResponses, 1);
+        assert.equal(result.evidence.throttleRecoveredByBoundedRetry, true);
+        assert.equal(result.evidence.retries, 1);
+        assert.deepEqual(result.evidence.retryAfterSeconds, [1]);
+        assert.ok(result.evidence.backoffMs >= 1000);
         assert.ok(result.evidence.transferredBytes > 0);
       }
       if (id === "S0-REC-003") {
         assert.equal(result.evidence.faultsExercised.includes("lost-response"), true);
+        assert.equal(result.evidence.throttleRecovery.boundedRetries, 1);
       }
       if (["S0-COL-005", "S0-REC-004"].includes(id)) {
         assert.equal(result.evidence.processRestartRecoveredQueue, true);
@@ -159,6 +174,51 @@ for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
     }
   });
 }
+
+await check("GitHub resolveAlias fails closed on duplicate persisted aliases", async () => {
+  const repo = fakeGitHubRepo();
+  const store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "O",
+    repo: "R",
+    runId: "s0-github-duplicate-alias",
+    githubToken: "syn-token",
+    fetchImpl: (url, request) => repo.fetch(url, request),
+  });
+  await store.initialize();
+  const left = createSyntheticWorkspace({ seed: "github-duplicate-left" });
+  const right = createSyntheticWorkspace({ seed: "github-duplicate-right" });
+  right.aliases = [left.aliases[0]];
+  repo.seedWorkspace(left);
+  repo.seedWorkspace(right);
+  await assert.rejects(
+    store.resolveAlias(left.aliases[0]),
+    (error) => error.code === "alias_conflict",
+  );
+});
+
+await check("GitHub restore validates then fails before any contents mutation", async () => {
+  const repo = fakeGitHubRepo();
+  const store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "O",
+    repo: "R",
+    runId: "s0-github-restore-unsupported",
+    githubToken: "syn-token",
+    fetchImpl: (url, request) => repo.fetch(url, request),
+  });
+  await store.initialize();
+  const markerWrites = repo.stats.markerWrites;
+  await assert.rejects(
+    store.restore({
+      schemaVersion: 1,
+      syntheticData: true,
+      workspaces: [createSyntheticWorkspace({ seed: "github-restore" })],
+    }),
+    (error) => error.code === "restore_atomicity_unsupported",
+  );
+  assert.equal(repo.stats.markerWrites, markerWrites);
+});
 
 await check("gates report Blocked outside a live provider context", async () => {
   for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {

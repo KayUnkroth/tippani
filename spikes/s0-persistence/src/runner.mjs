@@ -84,7 +84,9 @@ function environmentDetails(config, runRoot) {
     knownLimitations: process.env.S0_ENVIRONMENT_LIMITATIONS || "None recorded",
     processTopology: config.backingPath === "local"
       ? "Independent OS child processes for concurrency and kill tests"
-      : "Independent OS child processes sharing one provider account for collaboration gates",
+      : config.dryRun === false
+        ? "Scenario-dependent: distinct child PIDs are required and recorded for collaboration gates"
+        : "In-process provider transport emulation; cannot satisfy distinct-process gates",
   };
 }
 
@@ -311,6 +313,7 @@ export async function runHarness({
           const completeApproval = approval &&
             typeof approval.approver === "string" && approval.approver.trim() &&
             typeof approval.approvedAt === "string" && Number.isFinite(Date.parse(approval.approvedAt)) &&
+            Date.parse(approval.approvedAt) <= preflightTime.getTime() &&
             typeof approval.reference === "string" && approval.reference.trim();
           const completeRationale = contractRationale &&
             contractRationale.scenarioId === scenarioId &&

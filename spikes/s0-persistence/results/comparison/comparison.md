@@ -6,6 +6,12 @@
 **ADR approval:** Pending; this generated comparison does not record human acceptance.
 **Concrete mapping recommendation:** Deferred until a selected mapping passes every applicable absolute gate.
 
+**Artifact disposition:** Historical fail-closed summary only. It was not
+regenerated as a fresh campaign after the merge-readiness repairs. No result
+count below is current proof, no mapping is selected, and fresh local,
+cross-platform, synced-folder, and provider campaigns plus independent sign-off
+remain required.
+
 Eligibility is evaluated per engine/backing-path configuration and then rolled up into
 candidate mappings. `N/A` requires approver identity, approval date, and a reference.
 Stale, identity-mismatched, or incomplete artifacts are rejected as incomplete evidence.

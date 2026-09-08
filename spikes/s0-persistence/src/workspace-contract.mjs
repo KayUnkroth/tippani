@@ -136,6 +136,33 @@ export function validateWorkspaceRecord(workspace) {
   return workspace;
 }
 
+export function validateWorkspaceSnapshot(snapshot, { schemaVersion = 1 } = {}) {
+  if (snapshot?.schemaVersion !== schemaVersion ||
+      snapshot?.syntheticData !== true ||
+      !Array.isArray(snapshot?.workspaces)) {
+    throw new CorruptWorkspaceStoreError("Backup is invalid");
+  }
+  const workspaces = [];
+  const workspaceIds = new Set();
+  const aliases = new Map();
+  for (const workspace of snapshot.workspaces) {
+    validateWorkspaceRecord(workspace);
+    if (workspaceIds.has(workspace.workspaceId)) {
+      throw new CorruptWorkspaceStoreError("Backup contains duplicate workspace IDs");
+    }
+    workspaceIds.add(workspace.workspaceId);
+    for (const alias of workspace.aliases) {
+      const owner = aliases.get(alias);
+      if (owner && owner !== workspace.workspaceId) {
+        throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+      }
+      aliases.set(alias, workspace.workspaceId);
+    }
+    workspaces.push(deepClone(workspace));
+  }
+  return { workspaces, workspaceIds, aliases };
+}
+
 function tupleMatchesIntent(tuple, intent) {
   return !!intent &&
     tuple.intentId === intent.intentId &&

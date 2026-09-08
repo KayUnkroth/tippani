@@ -1,9 +1,13 @@
 # S0 Persistence Spike Revision Plan
 
-**Status:** Reopened — source fixes implemented; corrected evidence and ADR decision pending
-**Purpose:** Turn the existing S0 harness evidence into an applicability-aware, decision-ready persistence architecture handoff.
+**Status:** Harness merge-ready; corrected evidence and ADR decision pending
+**Purpose:** Record the hardened S0 harness delivered by PR #91 and the evidence work that remains before any persistence decision.
 
 ## Current state
+
+PR #91 delivers only the repaired, provider-neutral S0 evaluation harness. It
+does not integrate persistence into the production runtime or select a local,
+provider, hybrid, or all-envelope mapping.
 
 The review fixes are implemented in source and deterministic tests. The
 [architecture-mapping handoff](results/comparison/comparison.md) now rejects the
@@ -21,9 +25,9 @@ Before this revision, the comparison evaluated adapters as if every catalog gate
 
 The prior comparison also omitted live outcomes, presented single-run local measurements before an eligible mapping existed, and lacked the recommendation, conditions, owners, evidence links, and sign-off required for an ADR input.
 
-## Revision outcome
+## Follow-up outcome
 
-The revision will produce:
+After this harness merges, separate evidence work must produce:
 
 1. An applicability model for every scenario and each of the five engine/backing-path configurations.
 2. Five regenerated configuration outcomes using distinct evidence states.
@@ -116,7 +120,8 @@ The following pre-revision results are historical inputs only. No current
 decision may use these counts; all affected configurations require newly
 generated applicability-aware campaigns.
 
-Historical evidence included:
+Historical reports claimed the following counts, but none is a current pass or
+decision input:
 
 - Local envelope: 38 reported absolute passes in the superseded Windows run.
 - Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`. One of those reported passes, `S0-CON-003`, is now a known **structural failure**: `BEGIN IMMEDIATE` serializes writers database-wide even across independent workspaces, so it cannot satisfy the current no-global-serialization criterion. A rerun alone cannot close it; closure requires revising the absolute `S0-CON-003` criterion or an independently approved, scenario-specific rationale-backed `N/A`.

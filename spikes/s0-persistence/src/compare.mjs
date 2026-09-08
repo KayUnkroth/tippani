@@ -248,6 +248,9 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
             linkedCompletedAt: linked?.completedAt || null,
             expectedConfigRevision: decisionConfigRevision(config),
             expectedSignerFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
+            providerApprovalTargetHashes: (run?.campaignApprovals || [])
+              .map((campaign) => campaign?.effectiveTargetHash)
+              .filter((value) => typeof value === "string" && value),
           });
           for (const issue of proofErrors) {
             errors.push(`separate synced-folder proof ${issue}`);
@@ -261,6 +264,8 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
 
 export function validateExistingRun(run, config, { artifactPath = null } = {}) {
   const errors = [];
+  const completedAt = Date.parse(run?.completedAt);
+  const approvalNow = Number.isFinite(completedAt) ? completedAt : Date.now();
   const expectedIdentity = buildEvidenceIdentity(config);
   const expectedApplicable = applicableScenarioIds(config);
   const expectedCatalog = currentCatalog();
@@ -292,7 +297,7 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
   if (unexpected.length) errors.push(`unexpected results: ${unexpected.join(", ")}`);
   for (const result of results) {
     if (!RESULT_STATUSES.has(result.status)) errors.push(`unknown status for ${result.scenarioId}`);
-    const approvalErrors = naApprovalErrors(result);
+    const approvalErrors = naApprovalErrors(result, { now: approvalNow });
     if (approvalErrors.length) {
       errors.push(`${result.scenarioId} N/A lacks ${approvalErrors.join(", ")}`);
     }
@@ -329,6 +334,7 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
           typeof item.approval?.approver !== "string" || !item.approval.approver.trim() ||
           typeof item.approval?.approvedAt !== "string" ||
           !Number.isFinite(Date.parse(item.approval.approvedAt)) ||
+          Date.parse(item.approval.approvedAt) > approvalNow ||
           typeof item.approval?.reference !== "string" || !item.approval.reference.trim())) {
       errors.push("provider campaigns lack structured approvals for their effective target hashes");
     }

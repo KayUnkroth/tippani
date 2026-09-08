@@ -8,6 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import {
   CorruptWorkspaceStoreError,
   WorkspaceConflictError,
@@ -21,12 +22,19 @@ import {
   checksumWorkspaceV1,
   deepClone,
   needsReconciliation,
+  validateWorkspaceSnapshot,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { migrateWorkspaceV0ToV1 } from "../synthetic-fixtures.mjs";
-import { acquireLock, listTempArtifacts, writeFileAtomicSync } from "./fs-atomic.mjs";
+import {
+  acquireLock,
+  isIndeterminateAtomicWrite,
+  listTempArtifacts,
+  writeFileAtomicSync,
+} from "./fs-atomic.mjs";
 
 const SCHEMA_VERSION = 1;
+const HEAD_SCHEMA_VERSION = 1;
 
 function checksumOf(workspace, durableWorkspaceId = workspace.workspaceId) {
   return checksumWorkspace(workspace, durableWorkspaceId);
@@ -77,26 +85,91 @@ function checksumFormat(envelope, workspaceId) {
 }
 
 export class LocalCasWorkspaceStore {
-  constructor({ storeRoot, configurationId = "CFG-LOCAL-CAS", lockTimeoutMs = 10_000 } = {}) {
+  constructor({
+    storeRoot,
+    configurationId = "CFG-LOCAL-CAS",
+    lockTimeoutMs = 10_000,
+    syncDirectory = null,
+  } = {}) {
     if (!storeRoot) throw new TypeError("storeRoot is required");
     this.configurationId = configurationId;
     this.root = storeRoot;
     this.workspaceDir = path.join(storeRoot, "workspaces");
+    this.headPath = path.join(storeRoot, "HEAD");
     this.lockDir = path.join(storeRoot, "locks");
     this.legacyDir = path.join(storeRoot, "legacy");
     this.migratedDir = path.join(storeRoot, "migrated");
     this.lockTimeoutMs = lockTimeoutMs;
+    this.syncDirectory = syncDirectory;
     this.aliasIndex = new Map();
     this.readFaults = new Set();
     this.initialized = false;
   }
 
   envelopePath(workspaceId) {
-    return path.join(this.workspaceDir, `${workspaceId}.json`);
+    return path.join(this.activeWorkspaceDir(), `${workspaceId}.json`);
   }
 
   lockPath(workspaceId) {
     return path.join(this.lockDir, `${workspaceId}.lock`);
+  }
+
+  storeLockPath() {
+    return path.join(this.lockDir, "store.lock");
+  }
+
+  readHeadDirectoryName() {
+    let head;
+    try {
+      head = JSON.parse(fs.readFileSync(this.headPath, "utf8"));
+    } catch {
+      throw new CorruptWorkspaceStoreError("CAS authoritative HEAD is missing or invalid");
+    }
+    if (head?.schemaVersion !== HEAD_SCHEMA_VERSION ||
+        typeof head.directory !== "string" ||
+        !/^workspaces(?:\.restore-[a-f0-9-]+)?$/.test(head.directory)) {
+      throw new CorruptWorkspaceStoreError("CAS authoritative HEAD is invalid");
+    }
+    const directory = path.join(this.root, head.directory);
+    if (!fs.statSync(directory, { throwIfNoEntry: false })?.isDirectory()) {
+      throw new CorruptWorkspaceStoreError("CAS authoritative HEAD target is missing");
+    }
+    return head.directory;
+  }
+
+  activeWorkspaceDir() {
+    if (!fs.existsSync(this.headPath)) return this.workspaceDir;
+    this.workspaceDir = path.join(this.root, this.readHeadDirectoryName());
+    return this.workspaceDir;
+  }
+
+  writeHead(directoryName, { onBeforeRename = null } = {}) {
+    try {
+      writeFileAtomicSync(
+        this.headPath,
+        JSON.stringify({ schemaVersion: HEAD_SCHEMA_VERSION, directory: directoryName }),
+        {
+          onBeforeRename,
+          ...(this.syncDirectory ? { syncDirectory: this.syncDirectory } : {}),
+        },
+      );
+    } catch (error) {
+      if (isIndeterminateAtomicWrite(error)) {
+        try {
+          const persistedDirectory = this.readHeadDirectoryName();
+          error.reconciled = persistedDirectory === directoryName;
+          error.persistedDirectory = persistedDirectory;
+          if (error.reconciled) {
+            this.workspaceDir = path.join(this.root, persistedDirectory);
+          }
+        } catch (reconciliationError) {
+          error.reconciled = false;
+          error.reconciliationError = reconciliationError;
+        }
+      }
+      throw error;
+    }
+    this.workspaceDir = path.join(this.root, directoryName);
   }
 
   ensureInitialized() {
@@ -147,17 +220,51 @@ export class LocalCasWorkspaceStore {
     return this.decodeEnvelope(workspaceId).workspace;
   }
 
+  writeEnvelopeTo(
+    directory,
+    workspace,
+    faultInjector = null,
+    faultPoint = "during-atomic-replace",
+  ) {
+    const filePath = path.join(directory, `${workspace.workspaceId}.json`);
+    const serialized = JSON.stringify(canonicalEnvelope(workspace));
+    try {
+      writeFileAtomicSync(filePath, serialized, {
+        onBeforeRename: () => faultInjector?.hit(faultPoint),
+        ...(this.syncDirectory ? { syncDirectory: this.syncDirectory } : {}),
+      });
+    } catch (error) {
+      if (isIndeterminateAtomicWrite(error)) {
+        try {
+          error.reconciled = fs.readFileSync(filePath, "utf8") === serialized;
+          error.persistedGeneration = error.reconciled
+            ? workspace.generation
+            : null;
+        } catch (reconciliationError) {
+          error.reconciled = false;
+          error.reconciliationError = reconciliationError;
+        }
+      }
+      throw error;
+    }
+  }
+
   writeEnvelope(workspace, faultInjector = null, faultPoint = "during-atomic-replace") {
-    writeFileAtomicSync(
-      this.envelopePath(workspace.workspaceId),
-      JSON.stringify(canonicalEnvelope(workspace)),
-      { onBeforeRename: () => faultInjector?.hit(faultPoint) },
-    );
+    try {
+      this.writeEnvelopeTo(this.activeWorkspaceDir(), workspace, faultInjector, faultPoint);
+    } catch (error) {
+      if (isIndeterminateAtomicWrite(error) && error.reconciled) {
+        for (const alias of workspace.aliases) {
+          this.aliasIndex.set(alias, workspace.workspaceId);
+        }
+      }
+      throw error;
+    }
   }
 
   workspaceIdsOnDisk() {
     try {
-      return fs.readdirSync(this.workspaceDir)
+      return fs.readdirSync(this.activeWorkspaceDir())
         .filter((name) => name.endsWith(".json"))
         .map((name) => name.slice(0, -".json".length))
         .sort();
@@ -182,50 +289,69 @@ export class LocalCasWorkspaceStore {
   }
 
   async initialize({ faultInjector = null } = {}) {
-    fs.mkdirSync(this.workspaceDir, { recursive: true });
     fs.mkdirSync(this.lockDir, { recursive: true });
     fs.mkdirSync(this.legacyDir, { recursive: true });
     fs.mkdirSync(this.migratedDir, { recursive: true });
-    for (const workspaceId of this.workspaceIdsOnDisk()) {
-      const lock = await acquireLock(this.lockPath(workspaceId), {
-        timeoutMs: this.lockTimeoutMs,
-      });
-      try {
-        const decoded = this.decodeEnvelope(workspaceId);
-        if (decoded.requiresUpgrade) {
-          this.writeEnvelope(
-            decoded.workspace,
-            faultInjector,
-            "during-checksum-upgrade",
-          );
-        }
-      } finally {
-        lock.release();
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    try {
+      if (!fs.existsSync(this.headPath)) {
+        fs.mkdirSync(this.workspaceDir, { recursive: true });
+        this.writeHead("workspaces");
+      } else {
+        this.activeWorkspaceDir();
       }
+      for (const workspaceId of this.workspaceIdsOnDisk()) {
+        const lock = await acquireLock(this.lockPath(workspaceId), {
+          timeoutMs: this.lockTimeoutMs,
+        });
+        try {
+          const decoded = this.decodeEnvelope(workspaceId);
+          if (decoded.requiresUpgrade) {
+            this.writeEnvelope(
+              decoded.workspace,
+              faultInjector,
+              "during-checksum-upgrade",
+            );
+          }
+        } finally {
+          lock.release();
+        }
+      }
+      this.rebuildAliasIndex();
+      this.initialized = true;
+      return { workspaceCount: this.workspaceIdsOnDisk().length };
+    } finally {
+      storeLock.release();
     }
-    this.rebuildAliasIndex();
-    this.initialized = true;
-    return { workspaceCount: this.workspaceIdsOnDisk().length };
   }
 
   async createWorkspace(workspace) {
     this.ensureInitialized();
     validateWorkspaceRecord(workspace);
-    if (fs.existsSync(this.envelopePath(workspace.workspaceId))) {
-      throw new WorkspaceStoreError("Workspace already exists", "workspace_exists");
-    }
-    this.rebuildAliasIndex();
-    for (const alias of workspace.aliases) {
-      const owner = this.aliasIndex.get(alias);
-      if (owner && owner !== workspace.workspaceId) {
-        throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    try {
+      if (fs.existsSync(this.envelopePath(workspace.workspaceId))) {
+        throw new WorkspaceStoreError("Workspace already exists", "workspace_exists");
       }
+      this.rebuildAliasIndex();
+      for (const alias of workspace.aliases) {
+        const owner = this.aliasIndex.get(alias);
+        if (owner && owner !== workspace.workspaceId) {
+          throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+        }
+      }
+      this.writeEnvelope(workspace);
+      for (const alias of workspace.aliases) {
+        this.aliasIndex.set(alias, workspace.workspaceId);
+      }
+      return deepClone(workspace);
+    } finally {
+      storeLock.release();
     }
-    this.writeEnvelope(workspace);
-    for (const alias of workspace.aliases) {
-      this.aliasIndex.set(alias, workspace.workspaceId);
-    }
-    return deepClone(workspace);
   }
 
   async readWorkspace(workspaceId) {
@@ -235,10 +361,16 @@ export class LocalCasWorkspaceStore {
 
   async resolveAlias(alias) {
     this.ensureInitialized();
-    // Another process may have committed since the cache was built.
-    this.rebuildAliasIndex();
-    const workspaceId = this.aliasIndex.get(alias);
-    return workspaceId ? this.readEnvelope(workspaceId) : null;
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    try {
+      this.rebuildAliasIndex();
+      const workspaceId = this.aliasIndex.get(alias);
+      return workspaceId ? this.readEnvelope(workspaceId) : null;
+    } finally {
+      storeLock.release();
+    }
   }
 
   async listWorkspaces() {
@@ -248,20 +380,29 @@ export class LocalCasWorkspaceStore {
 
   async compareAndSwap({ workspaceId, expectedGeneration, operation, faultInjector = null }) {
     this.ensureInitialized();
-    const lock = await acquireLock(this.lockPath(workspaceId), {
-      timeoutMs: this.lockTimeoutMs,
-    });
+    const changesAliases = Array.isArray(operation?.addAliases) &&
+      operation.addAliases.length > 0;
+    const storeLock = changesAliases
+      ? await acquireLock(this.storeLockPath(), { timeoutMs: this.lockTimeoutMs })
+      : null;
+    let lock = null;
     try {
+      lock = await acquireLock(this.lockPath(workspaceId), {
+        timeoutMs: this.lockTimeoutMs,
+      });
       const current = this.readEnvelope(workspaceId);
       if (current.generation !== expectedGeneration) {
         throw new WorkspaceConflictError(workspaceId, expectedGeneration, current.generation);
       }
       assertReconcilable(current, operation);
       const next = applyWorkspaceOperation(current, operation);
-      for (const alias of next.aliases) {
-        const owner = this.aliasIndex.get(alias);
-        if (owner && owner !== workspaceId) {
-          throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+      if (changesAliases) {
+        this.rebuildAliasIndex();
+        for (const alias of next.aliases) {
+          const owner = this.aliasIndex.get(alias);
+          if (owner && owner !== workspaceId) {
+            throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+          }
         }
       }
       faultInjector?.hit("before-commit");
@@ -270,7 +411,8 @@ export class LocalCasWorkspaceStore {
       for (const alias of next.aliases) this.aliasIndex.set(alias, workspaceId);
       return deepClone(next);
     } finally {
-      lock.release();
+      lock?.release();
+      storeLock?.release();
     }
   }
 
@@ -286,35 +428,76 @@ export class LocalCasWorkspaceStore {
 
   async restore(snapshot, { faultInjector = null } = {}) {
     this.ensureInitialized();
-    if (snapshot?.schemaVersion !== SCHEMA_VERSION || snapshot?.syntheticData !== true ||
-        !Array.isArray(snapshot?.workspaces)) {
-      throw new CorruptWorkspaceStoreError("Backup is invalid");
-    }
-    // Validate the entire snapshot before touching durable state.
-    const aliases = new Map();
-    const seen = new Set();
-    for (const workspace of snapshot.workspaces) {
-      validateWorkspaceRecord(workspace);
-      if (seen.has(workspace.workspaceId)) {
-        throw new CorruptWorkspaceStoreError("Backup contains duplicate workspace IDs");
+    const validated = validateWorkspaceSnapshot(snapshot, { schemaVersion: SCHEMA_VERSION });
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    const workspaceLocks = [];
+    const previousDirectory = this.readHeadDirectoryName();
+    const nextDirectory = `workspaces.restore-${crypto.randomUUID()}`;
+    const nextPath = path.join(this.root, nextDirectory);
+    let committed = false;
+    let failure = null;
+    try {
+      for (const workspaceId of this.workspaceIdsOnDisk()) {
+        workspaceLocks.push(await acquireLock(this.lockPath(workspaceId), {
+          timeoutMs: this.lockTimeoutMs,
+        }));
       }
-      seen.add(workspace.workspaceId);
-      for (const alias of workspace.aliases) {
-        const owner = aliases.get(alias);
-        if (owner && owner !== workspace.workspaceId) {
-          throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+      fs.mkdirSync(nextPath);
+      for (const workspace of validated.workspaces) {
+        this.writeEnvelopeTo(nextPath, workspace);
+        faultInjector?.hit("during-restore-stage");
+      }
+      faultInjector?.hit("before-restore-commit");
+      try {
+        this.writeHead(nextDirectory, {
+          onBeforeRename: () => faultInjector?.hit("during-restore-head-replace"),
+        });
+        committed = true;
+      } catch (error) {
+        committed = isIndeterminateAtomicWrite(error) ||
+          (fs.existsSync(this.headPath) &&
+            this.readHeadDirectoryName() === nextDirectory);
+        if (committed) {
+          this.workspaceDir = nextPath;
+          this.aliasIndex = validated.aliases;
+          if (isIndeterminateAtomicWrite(error)) {
+            error.reconciled = true;
+            error.persistedDirectory = nextDirectory;
+          }
         }
-        aliases.set(alias, workspace.workspaceId);
+        throw error;
       }
+      this.aliasIndex = validated.aliases;
+      const previousPath = path.join(this.root, previousDirectory);
+      if (previousPath !== nextPath) {
+        try { fs.rmSync(previousPath, { recursive: true, force: true }); } catch { /* old generation is non-authoritative */ }
+      }
+      faultInjector?.hit("after-restore-commit");
+      return { workspaceCount: validated.workspaces.length };
+    } catch (error) {
+      failure = error;
+      throw error;
+    } finally {
+      if (!committed) {
+        try { fs.rmSync(nextPath, { recursive: true, force: true }); } catch { /* best effort */ }
+        if (isIndeterminateAtomicWrite(failure)) {
+          try {
+            const authoritativeDirectory = this.readHeadDirectoryName();
+            failure.reconciled = authoritativeDirectory === previousDirectory;
+            failure.authoritativeDirectory = authoritativeDirectory;
+            failure.restoreCommitted = false;
+            delete failure.persistedGeneration;
+          } catch (reconciliationError) {
+            failure.reconciled = false;
+            failure.reconciliationError = reconciliationError;
+          }
+        }
+      }
+      for (const lock of workspaceLocks.reverse()) lock.release();
+      storeLock.release();
     }
-    faultInjector?.hit("before-restore-commit");
-    for (const workspaceId of this.workspaceIdsOnDisk()) {
-      if (!seen.has(workspaceId)) fs.rmSync(this.envelopePath(workspaceId), { force: true });
-    }
-    for (const workspace of snapshot.workspaces) this.writeEnvelope(workspace);
-    this.rebuildAliasIndex();
-    faultInjector?.hit("after-restore-commit");
-    return { workspaceCount: snapshot.workspaces.length };
   }
 
   injectCorruption(workspaceId, mode = "truncated") {
@@ -363,33 +546,64 @@ export class LocalCasWorkspaceStore {
   seedLegacy(legacyRecord) {
     this.ensureInitialized();
     if (!legacyRecord?.workspaceId) throw new TypeError("Legacy record needs a workspaceId");
-    writeFileAtomicSync(this.legacyPath(legacyRecord.workspaceId), JSON.stringify(legacyRecord));
+    const filePath = this.legacyPath(legacyRecord.workspaceId);
+    const serialized = JSON.stringify(legacyRecord);
+    try {
+      writeFileAtomicSync(
+        filePath,
+        serialized,
+        this.syncDirectory ? { syncDirectory: this.syncDirectory } : undefined,
+      );
+    } catch (error) {
+      if (isIndeterminateAtomicWrite(error)) {
+        try {
+          error.reconciled = fs.readFileSync(filePath, "utf8") === serialized;
+        } catch (reconciliationError) {
+          error.reconciled = false;
+          error.reconciliationError = reconciliationError;
+        }
+      }
+      throw error;
+    }
   }
 
   async migrate({ faultInjector = null } = {}) {
     this.ensureInitialized();
-    let migrated = 0;
-    for (const workspaceId of this.legacyIdsOnDisk()) {
-      const legacyFile = this.legacyPath(workspaceId);
-      let legacy;
-      try {
-        legacy = JSON.parse(fs.readFileSync(legacyFile, "utf8"));
-      } catch {
-        throw new CorruptWorkspaceStoreError(`Legacy record ${workspaceId} is not valid JSON`);
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    try {
+      let migrated = 0;
+      this.rebuildAliasIndex();
+      for (const workspaceId of this.legacyIdsOnDisk()) {
+        const legacyFile = this.legacyPath(workspaceId);
+        let legacy;
+        try {
+          legacy = JSON.parse(fs.readFileSync(legacyFile, "utf8"));
+        } catch {
+          throw new CorruptWorkspaceStoreError(`Legacy record ${workspaceId} is not valid JSON`);
+        }
+        const migratedWorkspace = migrateWorkspaceV0ToV1(legacy);
+        for (const alias of migratedWorkspace.aliases) {
+          const owner = this.aliasIndex.get(alias);
+          if (owner && owner !== workspaceId) {
+            throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+          }
+        }
+        if (!fs.existsSync(this.envelopePath(workspaceId))) {
+          faultInjector?.hit("before-migration-commit");
+          this.writeEnvelope(migratedWorkspace);
+          faultInjector?.hit("after-migration-commit");
+        }
+        fs.renameSync(legacyFile, path.join(this.migratedDir, `${workspaceId}.json`));
+        for (const alias of migratedWorkspace.aliases) this.aliasIndex.set(alias, workspaceId);
+        migrated++;
       }
-      // Fails closed on any unsupported source version; the legacy file is left intact.
-      const migratedWorkspace = migrateWorkspaceV0ToV1(legacy);
-      if (!fs.existsSync(this.envelopePath(workspaceId))) {
-        faultInjector?.hit("before-migration-commit");
-        this.writeEnvelope(migratedWorkspace);
-        faultInjector?.hit("after-migration-commit");
-      }
-      // Preserve the original by archiving rather than deleting.
-      fs.renameSync(legacyFile, path.join(this.migratedDir, `${workspaceId}.json`));
-      migrated++;
+      this.rebuildAliasIndex();
+      return { migrated, pending: this.legacyIdsOnDisk().length };
+    } finally {
+      storeLock.release();
     }
-    this.rebuildAliasIndex();
-    return { migrated, pending: this.legacyIdsOnDisk().length };
   }
 
   async importEnvelope(envelope, { faultInjector = null } = {}) {
@@ -401,19 +615,33 @@ export class LocalCasWorkspaceStore {
     checksumFormat(envelope, envelope.workspace.workspaceId);
     validateWorkspaceRecord(envelope.workspace);
     const workspaceId = envelope.workspace.workspaceId;
-    if (fs.existsSync(this.envelopePath(workspaceId))) {
-      throw new WorkspaceStoreError("Workspace already exists", "workspace_exists");
+    const storeLock = await acquireLock(this.storeLockPath(), {
+      timeoutMs: this.lockTimeoutMs,
+    });
+    try {
+      if (fs.existsSync(this.envelopePath(workspaceId))) {
+        throw new WorkspaceStoreError("Workspace already exists", "workspace_exists");
+      }
+      this.rebuildAliasIndex();
+      for (const alias of envelope.workspace.aliases) {
+        const owner = this.aliasIndex.get(alias);
+        if (owner && owner !== workspaceId) {
+          throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+        }
+      }
+      faultInjector?.hit("before-import-commit");
+      this.writeEnvelope(envelope.workspace);
+      for (const alias of envelope.workspace.aliases) this.aliasIndex.set(alias, workspaceId);
+      faultInjector?.hit("after-import-commit");
+      return {
+        receiptId: `syn-receipt-${workspaceId}-${envelope.workspace.generation}`,
+        workspaceId,
+        generation: envelope.workspace.generation,
+        importedAt: "2000-01-01T00:00:00.000Z",
+      };
+    } finally {
+      storeLock.release();
     }
-    faultInjector?.hit("before-import-commit");
-    this.writeEnvelope(envelope.workspace);
-    for (const alias of envelope.workspace.aliases) this.aliasIndex.set(alias, workspaceId);
-    faultInjector?.hit("after-import-commit");
-    return {
-      receiptId: `syn-receipt-${workspaceId}-${envelope.workspace.generation}`,
-      workspaceId,
-      generation: envelope.workspace.generation,
-      importedAt: "2000-01-01T00:00:00.000Z",
-    };
   }
 
   /** Redacted structural diagnostics: identity and health, never content. */

@@ -22,6 +22,7 @@ import {
   applyWorkspaceOperation,
   assertReconcilable,
   deepClone,
+  validateWorkspaceSnapshot,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
@@ -29,7 +30,7 @@ import { providerTargetHash } from "../preflight.mjs";
 import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
-import { ProviderTelemetry } from "./provider-telemetry.mjs";
+import { ProviderTelemetry, retryAfterMilliseconds } from "./provider-telemetry.mjs";
 
 const API = "https://api.github.com";
 const RUN_MARKER_PATH = ".tippani-s0-run";
@@ -38,6 +39,7 @@ function b64encode(text) { return Buffer.from(text, "utf8").toString("base64"); 
 function b64decode(text) { return Buffer.from(text, "base64").toString("utf8"); }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const RETRYABLE_NETWORK_CODES = new Set(["ECONNRESET", "ETIMEDOUT", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
+const MAX_RETRY_AFTER_MS = 30_000;
 
 export class GitHubRepoStore {
   constructor({
@@ -162,6 +164,7 @@ export class GitHubRepoStore {
         approval.targetHash !== targetHash ||
         typeof approval.approver !== "string" || !approval.approver.trim() ||
         typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        Date.parse(approval.approvedAt) > Date.now() ||
         typeof approval.reference !== "string" || !approval.reference.trim()) {
       throw new WorkspaceStoreError(
         "Effective GitHub target is not covered by a structured preflight approval",
@@ -289,11 +292,20 @@ export class GitHubRepoStore {
     if (!this._getToken) throw new WorkspaceStoreError("No GitHub token supplied", "no_token");
     if (!this.owner || !this.repo) throw new WorkspaceStoreError("owner/repo required for a live run", "no_coordinates");
     const fault = this._fault;
+    let injectedThrottle = null;
     if (fault && method !== "GET") {
       await this.telemetry.recordRequest(body);
       this.liveProviderCalls++;
       this._fault = null;
-      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "throttle") {
+        injectedThrottle = await this.telemetry.wrapResponse({
+          ok: false,
+          status: 429,
+          headers: new Headers({ "Retry-After": "1" }),
+          text: async () => "throttled",
+          json: async () => ({}),
+        }, { method, sent: false });
+      }
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) }, { method, sent: false });
@@ -323,15 +335,31 @@ export class GitHubRepoStore {
     for (let attempt = 0; ; attempt++) {
       let transportStarted = false;
       try {
-        await this.telemetry.recordRequest(body);
-        this.liveProviderCalls++;
-        transportStarted = true;
-        return await this.telemetry.wrapResponse(await this.fetchImpl(url, {
-          method,
-          headers: this.headers(token, headers),
-          body,
-          signal: this.signal,
-        }), { method });
+        let response;
+        if (attempt === 0 && injectedThrottle) {
+          response = injectedThrottle;
+        } else {
+          await this.telemetry.recordRequest(body);
+          this.liveProviderCalls++;
+          transportStarted = true;
+          response = await this.telemetry.wrapResponse(await this.fetchImpl(url, {
+            method,
+            headers: this.headers(token, headers),
+            body,
+            signal: this.signal,
+          }), { method });
+        }
+        if (response.status === 429 && attempt < 2) {
+          const retryAfterMs = retryAfterMilliseconds(response);
+          const delayMs = retryAfterMs ?? (250 * (attempt + 1));
+          if (delayMs <= MAX_RETRY_AFTER_MS) {
+            this.telemetry.recordRetry();
+            this.telemetry.recordBackoff(delayMs);
+            await sleep(delayMs);
+            continue;
+          }
+        }
+        return response;
       } catch (error) {
         if (error?.code === "indeterminate_write") throw error;
         if (method !== "GET" && transportStarted) {
@@ -480,18 +508,20 @@ export class GitHubRepoStore {
     this.ensureInitialized();
     this.record("list-contents");
     if (this.dryRun) return this.model.resolveAlias(alias);
-    for (const id of await this.listWorkspaces()) {
-      const { workspace } = await this.readItem(id);
-      if (workspace.aliases.includes(alias)) return workspace;
+    const tip = await this.tipSha();
+    const matches = [];
+    for (const id of await this.listWorkspacesAt(tip)) {
+      const { workspace } = await this.readItem(id, tip);
+      if (workspace.aliases.includes(alias)) matches.push(workspace);
     }
-    return null;
+    if (matches.length > 1) {
+      throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+    }
+    return matches[0] || null;
   }
 
-  async listWorkspaces() {
-    this.ensureInitialized();
-    this.record("list-contents");
-    if (this.dryRun) return this.model.listWorkspaces();
-    const resp = await this.gh("GET", `${this.repoBase()}/contents/?ref=${encodeURIComponent(await this.tipSha())}`);
+  async listWorkspacesAt(ref) {
+    const resp = await this.gh("GET", `${this.repoBase()}/contents/?ref=${encodeURIComponent(ref)}`);
     if (resp.status === 404) return [];
     if (!resp.ok) throw new CorruptWorkspaceStoreError(`list failed: ${resp.status}`);
     const body = await resp.json();
@@ -499,6 +529,13 @@ export class GitHubRepoStore {
       .filter((i) => i.type === "file" && i.name.endsWith(".json"))
       .map((i) => i.name.replace(/\.json$/, ""))
       .sort();
+  }
+
+  async listWorkspaces() {
+    this.ensureInitialized();
+    this.record("list-contents");
+    if (this.dryRun) return this.model.listWorkspaces();
+    return this.listWorkspacesAt(await this.tipSha());
   }
 
   async compareAndSwap({ workspaceId, expectedGeneration, operation }) {
@@ -550,9 +587,10 @@ export class GitHubRepoStore {
     this.ensureInitialized();
     this.record("list-contents");
     if (this.dryRun) return this.model.backup();
-    const ids = await this.listWorkspaces();
+    const tip = await this.tipSha();
+    const ids = await this.listWorkspacesAt(tip);
     const workspaces = [];
-    for (const id of ids) workspaces.push((await this.readItem(id)).workspace);
+    for (const id of ids) workspaces.push((await this.readItem(id, tip)).workspace);
     return { schemaVersion: 1, syntheticData: true, configurationId: this.configurationId, workspaces };
   }
 
@@ -560,23 +598,11 @@ export class GitHubRepoStore {
     this.ensureInitialized();
     this.record("put-contents", { changeType: "restore" });
     if (this.dryRun) return this.model.restore(snapshot);
-    if (snapshot?.schemaVersion !== 1 || snapshot?.syntheticData !== true || !Array.isArray(snapshot?.workspaces)) {
-      throw new CorruptWorkspaceStoreError("Backup is invalid");
-    }
-    for (const workspace of snapshot.workspaces) {
-      validateWorkspaceRecord(workspace);
-      await this.safetyBudget?.recordObjects(1);
-      let sha;
-      try { sha = (await this.readItem(workspace.workspaceId)).sha; } catch { sha = undefined; }
-      const resp = await this.gh("PUT", `${this.repoBase()}/contents/${workspace.workspaceId}.json`, {
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: `s0 restore ${workspace.workspaceId}`, content: b64encode(JSON.stringify(workspace)), branch: this.branch, ...(sha ? { sha } : {}) }),
-      });
-      if (!resp.ok) throw new WorkspaceStoreError(`restore ${workspace.workspaceId} failed: ${resp.status}`, "provider_error");
-      // Restore deliberately re-establishes a known head; reset the floor to it.
-      this._maxGen.set(workspace.workspaceId, workspace.generation);
-    }
-    return { workspaceCount: snapshot.workspaces.length };
+    validateWorkspaceSnapshot(snapshot);
+    throw new WorkspaceStoreError(
+      "GitHub Contents API writes cannot atomically replace the complete workspace set",
+      "restore_atomicity_unsupported",
+    );
   }
 
   async readGeneration(workspaceId, targetGeneration) {

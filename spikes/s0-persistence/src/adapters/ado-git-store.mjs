@@ -22,6 +22,7 @@ import {
   applyWorkspaceOperation,
   assertReconcilable,
   deepClone,
+  validateWorkspaceSnapshot,
   validateWorkspaceRecord,
 } from "../workspace-contract.mjs";
 import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-manifest.mjs";
@@ -29,13 +30,14 @@ import { providerTargetHash } from "../preflight.mjs";
 import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
-import { ProviderTelemetry } from "./provider-telemetry.mjs";
+import { ProviderTelemetry, retryAfterMilliseconds } from "./provider-telemetry.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const ZERO_OID = "0000000000000000000000000000000000000000";
 const API = "api-version=7.1";
 const RUN_MARKER_PATH = ".tippani-s0-run";
+const MAX_RETRY_AFTER_MS = 30_000;
 
 export class AdoGitStore {
   constructor({
@@ -188,6 +190,7 @@ export class AdoGitStore {
         approval.targetHash !== targetHash ||
         typeof approval.approver !== "string" || !approval.approver.trim() ||
         typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) ||
+        Date.parse(approval.approvedAt) > Date.now() ||
         typeof approval.reference !== "string" || !approval.reference.trim()) {
       throw new WorkspaceStoreError(
         "Effective ADO target is not covered by a structured preflight approval",
@@ -214,11 +217,20 @@ export class AdoGitStore {
     if (!this._getToken) throw new WorkspaceStoreError("No ADO token supplied", "no_token");
     if (!this.org || !this.project || !this.repo) throw new WorkspaceStoreError("org/project/repo required for a live run", "no_coordinates");
     const fault = this._fault;
+    let injectedThrottle = null;
     if (fault && method !== "GET") {
       await this.telemetry.recordRequest(body);
       this.liveProviderCalls++;
       this._fault = null;
-      if (fault.kind === "throttle") return this.telemetry.wrapResponse({ ok: false, status: 429, headers: new Headers({ "Retry-After": "1" }), text: async () => "throttled", json: async () => ({}) }, { method, sent: false });
+      if (fault.kind === "throttle") {
+        injectedThrottle = await this.telemetry.wrapResponse({
+          ok: false,
+          status: 429,
+          headers: new Headers({ "Retry-After": "1" }),
+          text: async () => "throttled",
+          json: async () => ({}),
+        }, { method, sent: false });
+      }
       if (fault.kind === "auth-expiry") return this.telemetry.wrapResponse({ ok: false, status: 401, text: async () => "unauthorized", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "permission-loss") return this.telemetry.wrapResponse({ ok: false, status: 403, text: async () => "forbidden", json: async () => ({}) }, { method, sent: false });
       if (fault.kind === "quota") return this.telemetry.wrapResponse({ ok: false, status: 507, text: async () => "quota exceeded", json: async () => ({}) }, { method, sent: false });
@@ -248,15 +260,31 @@ export class AdoGitStore {
     for (let attempt = 0; ; attempt++) {
       let transportStarted = false;
       try {
-        await this.telemetry.recordRequest(body);
-        this.liveProviderCalls++;
-        transportStarted = true;
-        return await this.telemetry.wrapResponse(await this.fetchImpl(url, {
-          method,
-          headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers },
-          body,
-          signal: this.signal,
-        }), { method });
+        let response;
+        if (attempt === 0 && injectedThrottle) {
+          response = injectedThrottle;
+        } else {
+          await this.telemetry.recordRequest(body);
+          this.liveProviderCalls++;
+          transportStarted = true;
+          response = await this.telemetry.wrapResponse(await this.fetchImpl(url, {
+            method,
+            headers: { Authorization: `Bearer ${token}`, Accept: accept, ...headers },
+            body,
+            signal: this.signal,
+          }), { method });
+        }
+        if (response.status === 429 && attempt < 2) {
+          const retryAfterMs = retryAfterMilliseconds(response);
+          const delayMs = retryAfterMs ?? (250 * (attempt + 1));
+          if (delayMs <= MAX_RETRY_AFTER_MS) {
+            this.telemetry.recordRetry();
+            this.telemetry.recordBackoff(delayMs);
+            await sleep(delayMs);
+            continue;
+          }
+        }
+        return response;
       } catch (error) {
         if (error?.code === "indeterminate_write") throw error;
         if (method !== "GET" && transportStarted) {
@@ -415,8 +443,14 @@ export class AdoGitStore {
     this.record("push", { changeType: "add", item: `${workspace.workspaceId}.json`, precondition: "oldObjectId=tip" });
     if (this.dryRun) return this.model.createWorkspace(workspace);
     const tip = await this.getTip();
+    await this.assertAliasesAvailable(workspace, tip);
     const resp = await this.pushChange(workspace.workspaceId, workspace, "add", tip);
     if (!resp.ok) {
+      try {
+        await this.assertAliasesAvailable(workspace, await this.getTip());
+      } catch (error) {
+        if (error?.code === "alias_conflict") throw error;
+      }
       const text = await resp.text();
       if (/exists|TF401019|already/i.test(text)) throw new WorkspaceStoreError("Workspace already exists", "workspace_exists");
       throw new WorkspaceStoreError(`create failed: ${resp.status}`, "provider_error");
@@ -435,19 +469,21 @@ export class AdoGitStore {
     this.ensureInitialized();
     this.record("list-items");
     if (this.dryRun) return this.model.resolveAlias(alias);
-    for (const id of await this.listWorkspaces()) {
-      const ws = await this.readAt(id, this.branch, "branch");
-      if (ws.aliases.includes(alias)) return ws;
+    const tip = await this.getTip();
+    const matches = [];
+    for (const id of await this.listWorkspacesAt(tip, "commit")) {
+      const workspace = await this.readAt(id, tip, "commit");
+      if (workspace.aliases.includes(alias)) matches.push(workspace);
     }
-    return null;
+    if (matches.length > 1) {
+      throw new WorkspaceStoreError(`Alias collision: ${alias}`, "alias_conflict");
+    }
+    return matches[0] || null;
   }
 
-  async listWorkspaces() {
-    this.ensureInitialized();
-    this.record("list-items");
-    if (this.dryRun) return this.model.listWorkspaces();
+  async listWorkspacesAt(version, versionType = "branch") {
     const url = `${this.base()}/items?scopePath=/&recursionLevel=OneLevel` +
-      `&versionDescriptor.version=${this.branch}&versionDescriptor.versionType=branch&${API}`;
+      `&versionDescriptor.version=${version}&versionDescriptor.versionType=${versionType}&${API}`;
     const resp = await this.ado("GET", url);
     if (resp.status === 404) return [];
     if (!resp.ok) throw new CorruptWorkspaceStoreError(`list failed: ${resp.status}`);
@@ -458,6 +494,24 @@ export class AdoGitStore {
       .sort();
   }
 
+  async listWorkspaces() {
+    this.ensureInitialized();
+    this.record("list-items");
+    if (this.dryRun) return this.model.listWorkspaces();
+    return this.listWorkspacesAt(this.branch, "branch");
+  }
+
+  async assertAliasesAvailable(workspace, tip) {
+    for (const id of await this.listWorkspacesAt(tip, "commit")) {
+      if (id === workspace.workspaceId) continue;
+      const candidate = await this.readAt(id, tip, "commit");
+      const collision = candidate.aliases.find((alias) => workspace.aliases.includes(alias));
+      if (collision) {
+        throw new WorkspaceStoreError(`Alias collision: ${collision}`, "alias_conflict");
+      }
+    }
+  }
+
   async compareAndSwap({ workspaceId, expectedGeneration, operation }) {
     this.ensureInitialized();
     if (this.dryRun) {
@@ -465,15 +519,21 @@ export class AdoGitStore {
       return this.model.compareAndSwap({ workspaceId, expectedGeneration, operation });
     }
     const tip = await this.getTip();
-    const current = await this.readAt(workspaceId, this.branch, "branch");
+    const current = await this.readAt(workspaceId, tip, "commit");
     if (current.generation !== expectedGeneration) {
       throw new WorkspaceConflictError(workspaceId, expectedGeneration, current.generation);
     }
     assertReconcilable(current, operation);
     const next = applyWorkspaceOperation(current, operation);
+    await this.assertAliasesAvailable(next, tip);
     this.record("push", { changeType: "edit", item: `${workspaceId}.json`, precondition: `oldObjectId=${tip}` });
     const resp = await this.pushChange(workspaceId, next, "edit", tip);
     if (!resp.ok) {
+      try {
+        await this.assertAliasesAvailable(next, await this.getTip());
+      } catch (error) {
+        if (error?.code === "alias_conflict") throw error;
+      }
       // A non-fast-forward push (the ref moved) is the stale-writer signal.
       let latest = null;
       try { latest = await this.readAt(workspaceId, this.branch, "branch"); } catch { /* fall through */ }
@@ -499,27 +559,33 @@ export class AdoGitStore {
     this.ensureInitialized();
     this.record("push", { changeType: "edit" });
     if (this.dryRun) return this.model.restore(snapshot);
-    if (snapshot?.schemaVersion !== 1 || snapshot?.syntheticData !== true || !Array.isArray(snapshot?.workspaces)) {
-      throw new CorruptWorkspaceStoreError("Backup is invalid");
-    }
+    const validated = validateWorkspaceSnapshot(snapshot);
     const tip = await this.getTip();
-    const existing = new Set(await this.listWorkspaces());
-    const changes = snapshot.workspaces.map((workspace) => {
-      validateWorkspaceRecord(workspace);
+    const existing = new Set(await this.listWorkspacesAt(tip, "commit"));
+    const changes = validated.workspaces.map((workspace) => {
       return {
         changeType: existing.has(workspace.workspaceId) ? "edit" : "add",
         item: { path: `/${workspace.workspaceId}.json` },
         newContent: { content: JSON.stringify(workspace), contentType: "rawtext" },
       };
     });
-    await this.safetyBudget?.recordObjects(snapshot.workspaces.length);
+    for (const workspaceId of existing) {
+      if (!validated.workspaceIds.has(workspaceId)) {
+        changes.push({
+          changeType: "delete",
+          item: { path: `/${workspaceId}.json` },
+        });
+      }
+    }
+    if (changes.length === 0) return { workspaceCount: 0 };
+    await this.safetyBudget?.recordObjects(changes.length);
     const body = JSON.stringify({
       refUpdates: [{ name: this.refName(), oldObjectId: tip ?? ZERO_OID }],
       commits: [{ comment: "s0 restore", changes }],
     });
     const resp = await this.ado("POST", `${this.base()}/pushes?${API}`, { headers: { "Content-Type": "application/json" }, body });
     if (!resp.ok) throw new WorkspaceStoreError(`restore failed: ${resp.status}`, "provider_error");
-    return { workspaceCount: snapshot.workspaces.length };
+    return { workspaceCount: validated.workspaces.length };
   }
 
   async readGeneration(workspaceId, targetGeneration) {

@@ -550,6 +550,16 @@ await check("separate sync comparison verifies the complete signed proof, approv
   };
   const run = {
     results: [aggregateBck],
+    campaignApprovals: [1, 2, 3].map((index) => ({
+      name: `campaign-${index}`,
+      effectiveTargetHash: `sha256:provider-target-${index}`,
+      approval: {
+        targetHash: `sha256:provider-target-${index}`,
+        approver: "Provider campaign approver",
+        approvedAt: new Date(base - 120000).toISOString(),
+        reference: `syn-provider-${index}`,
+      },
+    })),
     separateSync: {
       configurationId: "CFG-ONEDRIVE-SYNC",
       scenarioId: "S0-BCK-006",
@@ -562,7 +572,16 @@ await check("separate sync comparison verifies the complete signed proof, approv
       crossClientEvidence: proof,
     },
   };
+  assert.equal(config.sandbox.approval, undefined);
   assert.deepEqual(verifySeparateSync(run, config, { artifactPath: aggregatePath }), []);
+  const reusedProviderApproval = structuredClone(run);
+  reusedProviderApproval.campaignApprovals[1].effectiveTargetHash = targetHash;
+  reusedProviderApproval.campaignApprovals[1].approval.targetHash = targetHash;
+  assert(
+    verifySeparateSync(reusedProviderApproval, config, { artifactPath: aggregatePath })
+      .some((error) => /reuses the provider-API target hash/.test(error)),
+    "retained comparison must reject a sync proof authorized by the provider target hash",
+  );
 
   // Mutating the retained sync approval in both copies breaks the signed binding.
   const badApproval = structuredClone(run);

@@ -5,7 +5,7 @@
 
 import { applicableScenarioIds } from "./applicability.mjs";
 
-export function naApprovalErrors(result) {
+export function naApprovalErrors(result, { now = Date.now() } = {}) {
   if (result?.status !== "N/A") return [];
   const approval = result.approval;
   const errors = [];
@@ -26,6 +26,8 @@ export function naApprovalErrors(result) {
   if (typeof approval.approvedAt !== "string" ||
       !Number.isFinite(Date.parse(approval.approvedAt))) {
     errors.push("approval date is required");
+  } else if (Date.parse(approval.approvedAt) > now) {
+    errors.push("approval date cannot be in the future");
   }
   if (typeof approval.reference !== "string" || !approval.reference.trim()) {
     errors.push("approval reference is required");
@@ -33,8 +35,8 @@ export function naApprovalErrors(result) {
   return errors;
 }
 
-export function effectiveResult(result) {
-  const errors = naApprovalErrors(result);
+export function effectiveResult(result, options = {}) {
+  const errors = naApprovalErrors(result, options);
   if (!errors.length) return result;
   return {
     ...result,
@@ -52,6 +54,8 @@ export function gateSummary(run) {
   const absoluteCatalog = run.catalog.filter((scenario) => scenario.criterionType === "absolute");
   const applicableCatalog = absoluteCatalog.filter((scenario) => applicable.has(scenario.id));
   const byId = new Map(run.results.map((result) => [result.scenarioId, result]));
+  const recordedAt = Date.parse(run.completedAt || run.startedAt);
+  const approvalNow = Number.isFinite(recordedAt) ? recordedAt : Date.now();
 
   const failed = [];
   const unresolved = [];
@@ -63,7 +67,7 @@ export function gateSummary(run) {
 
   for (const scenario of applicableCatalog) {
     const rawResult = byId.get(scenario.id);
-    const result = rawResult ? effectiveResult(rawResult) : null;
+    const result = rawResult ? effectiveResult(rawResult, { now: approvalNow }) : null;
     if (!result) {
       missing.push(scenario);
     } else if (result.status === "Fail") {

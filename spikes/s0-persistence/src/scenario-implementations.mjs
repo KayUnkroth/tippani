@@ -101,6 +101,16 @@ async function atomicMutation(context) {
 }
 
 async function atomicAliasTransition(context) {
+  if (["onedrive", "github"].includes(context.adapter)) {
+    return {
+      skip: `${context.adapter} cannot atomically couple a workspace write to a store-wide alias index with the current spike transport.`,
+    };
+  }
+  if (context.adapter === "ado" && context.config.dryRun !== false) {
+    return {
+      skip: "ADO alias uniqueness is only emulated in-process in dry-run; the branch-wide CAS proof requires a fresh live campaign.",
+    };
+  }
   const { store, workspace } = await openStore(context);
   try {
     const alias = `syn-alias-pr-${context.config.runId}`;
@@ -461,14 +471,33 @@ async function corruptStateDetected(context) {
 }
 
 async function duplicateAliasRestoreRejected(context) {
-  const source = context.createStore();
+  if (["onedrive", "github"].includes(context.adapter)) {
+    return {
+      skip: `${context.adapter} has no atomic store-wide alias transaction in the current spike transport.`,
+    };
+  }
+  if (context.adapter === "ado" && context.config.dryRun !== false) {
+    return {
+      skip: "ADO global alias collision handling is only emulated in dry-run; a fresh live branch-CAS campaign is required.",
+    };
+  }
   const target = context.createStore({ fresh: true });
-  await source.initialize();
   await target.initialize();
   try {
     const left = createSyntheticWorkspace({ seed: `one-${context.config.runId}` });
     const right = createSyntheticWorkspace({ seed: `two-${context.config.runId}` });
     right.aliases = [left.aliases[0]];
+    const created = await Promise.allSettled([
+      target.createWorkspace(left),
+      target.createWorkspace(right),
+    ]);
+    const winners = created.filter((result) => result.status === "fulfilled");
+    const conflicts = created.filter((result) =>
+      result.status === "rejected" && result.reason?.code === "alias_conflict");
+    assert.equal(winners.length, 1);
+    assert.equal(conflicts.length, 1);
+    const winner = winners[0].value;
+    assert.equal((await target.resolveAlias(left.aliases[0])).workspaceId, winner.workspaceId);
     const snapshot = {
       schemaVersion: 1,
       syntheticData: true,
@@ -478,10 +507,17 @@ async function duplicateAliasRestoreRejected(context) {
       target.restore(snapshot),
       (error) => error.code === "alias_conflict",
     );
-    assert.deepEqual(await target.listWorkspaces(), []);
-    return { evidence: { partialRestoreVisible: false } };
+    assert.deepEqual(await target.listWorkspaces(), [winner.workspaceId]);
+    return {
+      evidence: {
+        concurrentDistinctWorkspaces: 2,
+        aliasWinners: 1,
+        aliasConflicts: 1,
+        unambiguousResolution: true,
+        partialRestoreVisible: false,
+      },
+    };
   } finally {
-    await close(source);
     await close(target);
   }
 }
@@ -561,6 +597,16 @@ async function consistentBackup(context) {
 }
 
 async function restoreExact(context) {
+  if (["onedrive", "github"].includes(context.adapter)) {
+    return {
+      skip: `${context.adapter} restore is fail-closed because its current transport cannot atomically replace the complete workspace set.`,
+    };
+  }
+  if (context.adapter === "ado" && context.config.dryRun !== false) {
+    return {
+      skip: "ADO restore exactness is only emulated in dry-run; one atomic branch-head replacement requires a fresh live campaign.",
+    };
+  }
   const source = context.createStore();
   const target = context.createStore({ fresh: true });
   await source.initialize();

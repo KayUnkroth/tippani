@@ -1,5 +1,7 @@
 # S0 Outcome: CFG-ADO-LIVE
 
+> **Historical evidence notice:** This retained report predates the merge-readiness repairs. Its statuses and recommendation are invalid for the current source and must not be used to select a persistence mapping. Fresh campaigns and independent sign-off are required.
+
 **Report date:** 2026-08-31
 **Harness revision:** s0-harness-v3-campaign-aggregate
 **Configuration ID:** CFG-ADO-LIVE

@@ -13,6 +13,7 @@ import {
 } from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 import { OperationBudget } from "../src/operation-budget.mjs";
+import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
 
 let pass = 0;
 let fail = 0;
@@ -26,10 +27,15 @@ const ZERO = "0000000000000000000000000000000000000000";
 function fakeAdoRepo() {
   let tip = null;                 // branch tip commit id (CAS token)
   let seq = 0;
+  let failNextPush = false;
+  let pushes = 0;
   const files = new Map();        // path -> content (current branch state)
   const history = [];             // { commitId, snapshot: Map }
   const okJson = (obj) => ({ ok: true, status: 200, json: async () => obj, text: async () => JSON.stringify(obj) });
   return {
+    files,
+    failPush() { failNextPush = true; },
+    pushCount() { return pushes; },
     async fetch(url, opts) {
       const u = new URL(url);
       const p = u.pathname;
@@ -64,6 +70,11 @@ function fakeAdoRepo() {
         return okJson({ value });
       }
       if (p.endsWith("/pushes") && method === "POST") {
+        pushes++;
+        if (failNextPush) {
+          failNextPush = false;
+          return { ok: false, status: 503, text: async () => "unavailable", json: async () => ({}) };
+        }
         const push = JSON.parse(opts.body);
         const old = push.refUpdates[0].oldObjectId;
         const expected = tip ?? ZERO;
@@ -83,6 +94,134 @@ function fakeAdoRepo() {
     },
   };
 }
+
+await check("ADO branch CAS enforces aliases globally across distinct workspace creates", async () => {
+  const repo = fakeAdoRepo();
+  const options = {
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId: "s0-ado-global-alias",
+    adoToken: "syn-token",
+    fetchImpl: (url, request) => repo.fetch(url, request),
+  };
+  const first = new AdoGitStore(options);
+  const second = new AdoGitStore(options);
+  await first.initialize();
+  await second.initialize();
+  const left = createSyntheticWorkspace({ seed: "ado-global-alias-left" });
+  const right = createSyntheticWorkspace({ seed: "ado-global-alias-right" });
+  right.aliases = [left.aliases[0]];
+  const settled = await Promise.allSettled([
+    first.createWorkspace(left),
+    second.createWorkspace(right),
+  ]);
+  assert.equal(settled.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(
+    settled.filter((result) =>
+      result.status === "rejected" && result.reason?.code === "alias_conflict").length,
+    1,
+  );
+  const winner = settled.find((result) => result.status === "fulfilled").value;
+  assert.equal((await first.resolveAlias(left.aliases[0])).workspaceId, winner.workspaceId);
+});
+
+await check("ADO branch CAS enforces aliases globally across distinct workspace updates", async () => {
+  const repo = fakeAdoRepo();
+  const options = {
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId: "s0-ado-global-alias-update",
+    adoToken: "syn-token",
+    fetchImpl: (url, request) => repo.fetch(url, request),
+  };
+  const first = new AdoGitStore(options);
+  const second = new AdoGitStore(options);
+  await first.initialize();
+  await second.initialize();
+  const left = createSyntheticWorkspace({ seed: "ado-global-update-left" });
+  const right = createSyntheticWorkspace({ seed: "ado-global-update-right" });
+  await first.createWorkspace(left);
+  await first.createWorkspace(right);
+  const alias = "syn-alias-ado-shared-update";
+  const settled = await Promise.allSettled([
+    first.compareAndSwap({
+      workspaceId: left.workspaceId,
+      expectedGeneration: 0,
+      operation: { addAliases: [alias] },
+    }),
+    second.compareAndSwap({
+      workspaceId: right.workspaceId,
+      expectedGeneration: 0,
+      operation: { addAliases: [alias] },
+    }),
+  ]);
+  assert.equal(settled.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(
+    settled.filter((result) =>
+      result.status === "rejected" && result.reason?.code === "alias_conflict").length,
+    1,
+  );
+  const winner = settled.find((result) => result.status === "fulfilled").value;
+  assert.equal((await first.resolveAlias(alias)).workspaceId, winner.workspaceId);
+});
+
+await check("ADO restore validates first and atomically removes stale workspaces", async () => {
+  const repo = fakeAdoRepo();
+  const store = new AdoGitStore({
+    dryRun: false,
+    org: "O",
+    project: "P",
+    repo: "R",
+    runId: "s0-ado-restore-exact",
+    adoToken: "syn-token",
+    fetchImpl: (url, request) => repo.fetch(url, request),
+  });
+  await store.initialize();
+  const retained = createSyntheticWorkspace({ seed: "ado-restore-retained" });
+  const stale = createSyntheticWorkspace({ seed: "ado-restore-stale" });
+  await store.createWorkspace(retained);
+  await store.createWorkspace(stale);
+  const snapshot = {
+    schemaVersion: 1,
+    syntheticData: true,
+    workspaces: [retained],
+  };
+  await store.restore(snapshot);
+  assert.deepEqual(await store.listWorkspaces(), [retained.workspaceId]);
+  await assert.rejects(
+    store.readWorkspace(stale.workspaceId),
+    (error) => error.code === "workspace_not_found",
+  );
+
+  const beforeFailure = await store.backup();
+  const replacement = createSyntheticWorkspace({ seed: "ado-restore-replacement" });
+  repo.failPush();
+  await assert.rejects(
+    store.restore({
+      schemaVersion: 1,
+      syntheticData: true,
+      workspaces: [replacement],
+    }),
+    (error) => error.code === "provider_error",
+  );
+  assert.deepEqual(await store.backup(), beforeFailure);
+
+  const pushesBeforeInvalid = repo.pushCount();
+  const duplicate = structuredClone(retained);
+  await assert.rejects(
+    store.restore({
+      schemaVersion: 1,
+      syntheticData: true,
+      workspaces: [retained, duplicate],
+    }),
+    (error) => error.code === "store_corrupt",
+  );
+  assert.equal(repo.pushCount(), pushesBeforeInvalid);
+});
 
 function liveContext(scenarioId) {
   const repo = fakeAdoRepo();
@@ -104,24 +243,30 @@ function liveContext(scenarioId) {
 }
 
 for (const [id, impl] of Object.entries(ONEDRIVE_GATE_IMPLEMENTATIONS)) {
-  await check(`gate ${id} passes against the fake ADO repo`, async () => {
+  await check(`gate ${id} reports evidence no stronger than the fake ADO execution`, async () => {
     const context = liveContext(id);
     try {
       const result = await impl(context);
+      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
+        assert.match(result.skip, /in-process/i);
+        assert.equal(result.evidence, undefined);
+        return;
+      }
       assert.ok(result && result.evidence, `${id} must return evidence, got ${JSON.stringify(result)}`);
       assert.ok(!result.blocked, `${id} must not be blocked in a live ADO context`);
-      if (["S0-COL-002", "S0-COL-003", "S0-COL-006"].includes(id)) {
-        assert.equal(result.evidence.accounts, 1);
-        assert.equal(result.evidence.clientProcesses, 2);
-      }
       if (id === "S0-BCK-005") {
         assert.deepEqual(result.evidence.faultsExercised,
-          ["throttle", "auth-expiry", "outage", "quota", "permission-loss"]);
+          ["auth-expiry", "outage", "quota", "permission-loss", "throttle"]);
         assert.equal(result.evidence.throttleResponses, 1);
+        assert.equal(result.evidence.throttleRecoveredByBoundedRetry, true);
+        assert.equal(result.evidence.retries, 1);
+        assert.deepEqual(result.evidence.retryAfterSeconds, [1]);
+        assert.ok(result.evidence.backoffMs >= 1000);
         assert.ok(result.evidence.transferredBytes > 0);
       }
       if (id === "S0-REC-003") {
         assert.equal(result.evidence.faultsExercised.includes("lost-response"), true);
+        assert.equal(result.evidence.throttleRecovery.boundedRetries, 1);
       }
       if (["S0-COL-005", "S0-REC-004"].includes(id)) {
         assert.equal(result.evidence.processRestartRecoveredQueue, true);

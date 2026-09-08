@@ -6,7 +6,11 @@ import {
   WorkspaceStoreError,
   deepClone,
 } from "../workspace-contract.mjs";
-import { acquireLock, writeFileAtomicSync } from "./fs-atomic.mjs";
+import {
+  acquireLock,
+  isIndeterminateAtomicWrite,
+  writeFileAtomicSync,
+} from "./fs-atomic.mjs";
 
 const SCHEMA_VERSION = 1;
 
@@ -79,11 +83,25 @@ export class PersistentPendingQueue {
       runId: this.runId,
       entries,
     };
-    writeFileAtomicSync(this.filePath, JSON.stringify({
-      schemaVersion: SCHEMA_VERSION,
-      checksum: checksum(payload),
-      payload,
-    }));
+    try {
+      writeFileAtomicSync(this.filePath, JSON.stringify({
+        schemaVersion: SCHEMA_VERSION,
+        checksum: checksum(payload),
+        payload,
+      }));
+    } catch (error) {
+      if (isIndeterminateAtomicWrite(error)) {
+        try {
+          const persisted = this.readUnlocked();
+          error.reconciled = JSON.stringify(persisted) === JSON.stringify(entries);
+          error.persistedEntryCount = persisted.length;
+        } catch (reconciliationError) {
+          error.reconciled = false;
+          error.reconciliationError = reconciliationError;
+        }
+      }
+      throw error;
+    }
   }
 
   async withLock(action) {

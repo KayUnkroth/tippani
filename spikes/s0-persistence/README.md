@@ -4,6 +4,12 @@ This folder contains the S0 specification and an isolated, provider-neutral
 test harness. It is not imported by Tippani's production runtime and is not
 included in the npm package.
 
+**Merge disposition:** PR #91 ships a hardened evaluation harness only. No
+persistence mapping is selected, and no production runtime integration is
+authorized. All checked-in local, cross-platform, synced-folder, and live
+provider results are historical and invalid/incomplete for the repaired source.
+Fresh campaigns plus independent review and ADR sign-off are follow-up work.
+
 ## Current scope
 
 The harness provides:
@@ -108,7 +114,8 @@ It is the only source of current result counts and contains:
 - The applicability-aware five-configuration matrix.
 - Per-configuration correctness, collaboration, recovery, performance, and
   complexity outcomes.
-- Candidate hybrid and all-envelope architecture mappings.
+- Candidate mapping definitions used only for future evidence rollup; neither
+  mapping is selected.
 - Exact failed, blocked, incomplete, and unexecuted gates, with owners and the
   evidence required to close each condition.
 - Provisional diagnostics or, once a complete mapping is eligible, comparable
@@ -146,10 +153,10 @@ mapping eligible.
   variability, environment, provider-cost, throttling, discovery-latency, and
   complexity protocol below for every configuration before performance affects
   the ADR.
-- [x] **Decision-ready handoff:** Publish the recommended mapping, exact
+- [ ] **Decision-ready handoff:** Publish the recommended mapping, exact
   conditions, named owners, required closing evidence, raw-evidence links, and
   sign-off table after the applicable gates close.
-- [x] **Human approval:** Record the ADR approver's acceptance of the selected
+- [ ] **Human approval:** Record the ADR approver's acceptance of the selected
   architecture mapping in the handoff and ADR.
 
 ### Harness and decision model
@@ -331,7 +338,7 @@ mapping eligible.
 - [x] Verify cleanup after success and failure: no run-owned branches, folders,
   files, repositories, locks, or temporary stores remain outside an approved
   diagnostic hold.
-- [x] Select the local-engine/provider-transport mapping in the ADR, list every
+- [ ] Select the local-engine/provider-transport mapping in the ADR, list every
   remaining condition and owner, and prepare implementer, independent-reviewer,
   cross-platform, provider-test, and ADR-approver sign-off.
 

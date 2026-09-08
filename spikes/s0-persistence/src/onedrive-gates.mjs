@@ -202,6 +202,7 @@ async function commitProviderClient(context, store, options) {
       return {
         ...last,
         report: {
+          pid: last.report?.pid,
           status: "committed",
           generation: current.generation,
           actor: options.actor,
@@ -225,6 +226,7 @@ async function reconcileProviderClient(context, store, options) {
       return {
         ...last,
         report: {
+          pid: last.report?.pid,
           status: "reconciled",
           conflict: { expected: options.expectedGeneration, actual: options.expectedGeneration + 1 },
           reloadedGeneration: options.expectedGeneration + 1,
@@ -257,6 +259,11 @@ async function raceProviderClients(context, workspaceId, actors, expectedGenerat
 
 async function twoClientNoSilentOverwrite(context) {
   if (!isLiveProvider(context)) return blocked(context);
+  if (context.inProcessProviderClients) {
+    return {
+      skip: "In-process provider client emulation cannot satisfy a gate requiring two independent client processes.",
+    };
+  }
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `col002-${context.config.runId}`);
@@ -270,6 +277,9 @@ async function twoClientNoSilentOverwrite(context) {
     assert.deepEqual(unexpected, [], "A provider client failed for an unexpected reason");
     assert.equal(committed.length, 1, "Exactly one client process must win the generation");
     assert.equal(conflicts.length, 1, "The other client process must receive a typed conflict");
+    const clientProcessIds = results.map((result) => result.report?.pid);
+    assert.equal(new Set(clientProcessIds).size, 2);
+    assert(clientProcessIds.every((pid) => Number.isInteger(pid) && pid !== process.pid));
     const durable = await store.readWorkspace(workspace.workspaceId);
     assert.equal(durable.generation, 1);
     assert.equal(durable.private.audit.length, 1);
@@ -277,6 +287,8 @@ async function twoClientNoSilentOverwrite(context) {
       evidence: {
         accounts: 1,
         clientProcesses: 2,
+        clientProcessIds,
+        executionMode: "independent-os-processes",
         logicalActors: actors.join(","),
         winners: 1,
         staleConflicts: 1,
@@ -291,6 +303,11 @@ async function twoClientNoSilentOverwrite(context) {
 
 async function twoClientReconnect(context) {
   if (!isLiveProvider(context)) return blocked(context);
+  if (context.inProcessProviderClients) {
+    return {
+      skip: "In-process provider client emulation cannot satisfy a gate requiring two independent client processes.",
+    };
+  }
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `col003-${context.config.runId}`);
@@ -312,6 +329,9 @@ async function twoClientReconnect(context) {
     assert.equal(second.report?.conflict?.expected, 0);
     assert.equal(second.report?.reloadedGeneration, 1);
     assert.equal(second.report?.generation, 2);
+    const clientProcessIds = [first.report?.pid, second.report?.pid];
+    assert.equal(new Set(clientProcessIds).size, 2);
+    assert(clientProcessIds.every((pid) => Number.isInteger(pid) && pid !== process.pid));
     const durable = await store.readWorkspace(workspace.workspaceId);
     assert.equal(durable.generation, 2);
     assert.deepEqual(
@@ -322,6 +342,8 @@ async function twoClientReconnect(context) {
       evidence: {
         accounts: 1,
         clientProcesses: 2,
+        clientProcessIds,
+        executionMode: "independent-os-processes",
         staleGeneration: 0,
         reloadedGeneration: 1,
         reconciledGeneration: 2,
@@ -336,6 +358,11 @@ async function twoClientReconnect(context) {
 
 async function collaboratorDiscoversGeneration(context) {
   if (!isLiveProvider(context)) return blocked(context);
+  if (context.inProcessProviderClients) {
+    return {
+      skip: "In-process provider client emulation cannot satisfy a gate requiring an independent observer process.",
+    };
+  }
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `col006-${context.config.runId}`);
@@ -354,10 +381,15 @@ async function collaboratorDiscoversGeneration(context) {
     });
     assert.equal(observer.report?.status, "observed");
     assert.ok(observer.report?.generation >= 1);
+    const clientProcessIds = [writer.report?.pid, observer.report?.pid];
+    assert.equal(new Set(clientProcessIds).size, 2);
+    assert(clientProcessIds.every((pid) => Number.isInteger(pid) && pid !== process.pid));
     return {
       evidence: {
         accounts: 1,
         clientProcesses: 2,
+        clientProcessIds,
+        executionMode: "independent-os-processes",
         changeMechanism: context.config.backingPath === "onedrive"
           ? "Graph drive-item polling"
           : context.config.backingPath === "ado"
@@ -410,7 +442,7 @@ async function noSuccessShapedOnFailure(context) {
   await store.initialize();
   const workspace = await seedWorkspace(store, `bck005-${context.config.runId}`);
   try {
-    const faults = ["throttle", "auth-expiry", "outage", "quota", "permission-loss"];
+    const faults = ["auth-expiry", "outage", "quota", "permission-loss"];
     for (const kind of faults) {
       store.injectFault(kind); // faults the compare-and-swap write
       await assert.rejects(
@@ -424,12 +456,20 @@ async function noSuccessShapedOnFailure(context) {
       const now = await store.readWorkspace(workspace.workspaceId);
       assert.equal(now.generation, 0, `${kind} must not produce success-shaped state`);
     }
+    store.injectFault("throttle");
+    const throttled = await store.compareAndSwap({
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      operation: { auditEvent: { actor: "Synthetic A", action: "throttle" } },
+    });
+    assert.equal(throttled.generation, 1);
     const telemetry = store.providerTelemetry?.() || {};
     return {
       evidence: {
         faultsRejected: faults.length,
-        faultsExercised: faults,
-        generationUnchanged: true,
+        faultsExercised: [...faults, "throttle"],
+        rejectedFaultGenerationUnchanged: true,
+        throttleRecoveredByBoundedRetry: true,
         throttleResponses: telemetry.throttleResponses,
         retries: telemetry.retries,
         retryAfterSeconds: telemetry.retryAfterSeconds,
@@ -617,6 +657,25 @@ async function recoverAfterFault(context) {
     for (const kind of faults) {
       const workspace = await seedWorkspace(store, `rec003-${kind}-${context.config.runId}`);
       store.injectFault(kind);
+      if (kind === "throttle") {
+        const before = store.providerTelemetry?.() || {};
+        const next = await store.compareAndSwap({
+          workspaceId: workspace.workspaceId,
+          expectedGeneration: 0,
+          operation: { auditEvent: { actor: "Synthetic A", action: "recover-throttle" } },
+        });
+        assert.equal(next.generation, 1);
+        const after = store.providerTelemetry?.() || {};
+        assert.equal(after.retries - before.retries, 1);
+        assert.deepEqual(
+          after.retryAfterSeconds.slice(before.retryAfterSeconds.length),
+          [1],
+        );
+        assert.ok(after.backoffMs - before.backoffMs >= 1000);
+        recovered.push(kind);
+        await store.deleteWorkspace(workspace.workspaceId);
+        continue;
+      }
       await assert.rejects(
         store.compareAndSwap({
           workspaceId: workspace.workspaceId,
@@ -661,6 +720,11 @@ async function recoverAfterFault(context) {
       evidence: {
         faultsExercised: [...faults, "lost-response"],
         recoveredFaults: recovered,
+        throttleRecovery: {
+          boundedRetries: 1,
+          retryAfterSeconds: 1,
+          minimumBackoffMs: 1000,
+        },
         lostResponseReconciled: true,
         blindRetryRejected: true,
       },
@@ -718,6 +782,12 @@ async function versionHistoryRecover(context) {
 
 async function restoredOneHead(context) {
   if (!isLiveProvider(context)) return blocked(context);
+  const adapter = context.adapter || context.config.adapter;
+  if (["onedrive", "github"].includes(adapter)) {
+    return {
+      skip: `${adapter} restore cannot establish one atomic authoritative head with the current spike transport.`,
+    };
+  }
   const store = context.createStore();
   await store.initialize();
   const workspace = await seedWorkspace(store, `bkp004-${context.config.runId}`);

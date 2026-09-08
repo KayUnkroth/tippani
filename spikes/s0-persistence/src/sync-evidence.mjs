@@ -309,9 +309,6 @@ export function assessSyncedFolderEvidence({
   };
 }
 
-// Comparison-side revalidation of a retained synced-folder proof. It uses the
-// independent retained authorization (its own syncTargetHash, full syncApproval,
-// config revision, signer fingerprint) and the original validation time — never
 // Comparison-side revalidation of a retained synced-folder proof. It requires the
 // linked-raw and separateSync copies to be canonically identical, requires the
 // retained authorization to be bound to (derived from) the signed proof, rejects a
@@ -323,7 +320,7 @@ export function verifyRetainedSyncProof({
   linkedCompletedAt = null,
   expectedConfigRevision = null,
   expectedSignerFingerprint = null,
-  providerApprovalTargetHash = null,
+  providerApprovalTargetHashes = [],
   now = Date.now(),
 } = {}) {
   const errors = [];
@@ -372,7 +369,12 @@ export function verifyRetainedSyncProof({
   if (expectedSignerFingerprint && authorization.signerFingerprint !== expectedSignerFingerprint) {
     errors.push("retained sync authorization signer fingerprint does not match the trusted signer");
   }
-  if (providerApprovalTargetHash && proof.approval?.targetHash === providerApprovalTargetHash) {
+  const providerHashes = new Set(
+    Array.isArray(providerApprovalTargetHashes)
+      ? providerApprovalTargetHashes.filter((value) => typeof value === "string" && value)
+      : [],
+  );
+  if (providerHashes.has(proof.approval?.targetHash)) {
     errors.push("retained sync approval reuses the provider-API target hash");
   }
   const validationTime = Date.parse(authorization.validatedAt);

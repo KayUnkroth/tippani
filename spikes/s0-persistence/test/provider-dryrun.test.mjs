@@ -187,6 +187,21 @@ await check("live preflight binds provider-derived identity and coordinates to a
   };
   const approved = withResolvedProviderIdentity(live, "github:syn-identity-001", approvedEnv);
   assert.deepEqual(validatePreflight(approved, { env: approvedEnv }), []);
+  const futureApproval = {
+    ...approvedEnv,
+    S0_PREFLIGHT_APPROVED_AT: "2026-09-09T20:00:00.000Z",
+  };
+  const futureApproved = withResolvedProviderIdentity(
+    live,
+    "github:syn-identity-001",
+    futureApproval,
+  );
+  assert(
+    validatePreflight(futureApproved, {
+      env: futureApproval,
+      now: new Date("2026-09-08T20:00:00.000Z"),
+    }).some((error) => /cannot be in the future/.test(error)),
+  );
 
   const mismatched = { ...approvedEnv, S0_GITHUB_REPO: "different-synthetic-repository" };
   const mismatchedTarget = withResolvedProviderIdentity(
@@ -519,6 +534,7 @@ await check("runner persists and meters cleanup under the shared approved deadli
   let identitySignal = null;
   let cleanupMutationSawManifest = false;
   let cleanupGetAttempts = 0;
+  let cleanupChildPresent = true;
   try {
     const live = structuredClone(onedriveLiveConfig);
     live.runId = runId;
@@ -555,6 +571,21 @@ await check("runner persists and meters cleanup under the shared approved deadli
             }),
           };
         }
+        if (url.includes(":/children")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              value: cleanupChildPresent
+                ? [{
+                  id: "marker-a",
+                  name: ".tippani-s0-run",
+                  eTag: "marker-etag-a",
+                }]
+                : [],
+            }),
+          };
+        }
         if (url.includes(".tippani-s0-run")) {
           return {
             ok: true,
@@ -575,10 +606,16 @@ await check("runner persists and meters cleanup under the shared approved deadli
         const persisted = CleanupManifest.load(manifestPath);
         assert.deepEqual(persisted.resources[0].condition, {
           expectedItemId: "folder-a",
-          expectedETag: "etag-a",
           expectedMarkerItemId: "marker-a",
           expectedMarkerDigest: persisted.resources[0].marker.digest,
+          expectedChildren: [{
+            id: "marker-a",
+            name: ".tippani-s0-run",
+            eTag: "marker-etag-a",
+          }],
         });
+        assert.equal(options.headers["If-Match"], "marker-etag-a");
+        cleanupChildPresent = false;
         cleanupMutationSawManifest = true;
         return { ok: true, status: 204 };
       }
@@ -597,7 +634,8 @@ await check("runner persists and meters cleanup under the shared approved deadli
     assert.equal(run.results[0].evidence.providerChildBudget.metered, true);
     assert.notEqual(run.results[0].evidence.providerChildBudget.childPid, process.pid);
     assert.equal(cleanupMutationSawManifest, true);
-    assert.equal(run.cleanup.status, "complete");
+    assert.equal(run.cleanup.status, "failed");
+    assert.equal(run.cleanup.error.code, "cleanup_precondition_unavailable");
     assert.equal(run.cleanup.budgeted, true);
     assert.equal(run.cleanup.budgetSource, "preflight.budgets");
     assert.equal(run.cleanup.sharedDeadline, true);
@@ -605,14 +643,14 @@ await check("runner persists and meters cleanup under the shared approved deadli
       run.cleanup.budgetBefore.deadlineAt,
       run.cleanup.budgetAfter.deadlineAt,
     );
-    assert.equal(run.cleanup.providerTelemetry.requests, 9);
+    assert.ok(run.cleanup.providerTelemetry.requests >= 9);
     assert.equal(run.cleanup.providerTelemetry.retries, 1);
     assert(run.cleanup.providerTelemetry.transferredBytes > 0);
-    assert.equal(run.cleanup.manifest.cleanedCount, 1);
-    assert.equal(run.cleanup.manifest.phases.cleaned, 1);
-    assert.equal(run.cleanup.manifest.revision, 5);
+    assert.equal(run.cleanup.manifest.cleanedCount, 0);
+    assert.equal(run.cleanup.manifest.phases.mutating, 1);
+    assert.equal(run.cleanup.manifest.revision, 3);
     assert.deepEqual(run.budgetTelemetry.final, run.safetyBudget);
-    assert.equal(run.safetyBudget.operations, 11);
+    assert.ok(run.safetyBudget.operations >= 11);
     assert.equal(artifacts.cleanupManifestPath, manifestPath);
     assert(
       fs.readFileSync(artifacts.reportPath, "utf8").includes(run.cleanup.manifest.digest),

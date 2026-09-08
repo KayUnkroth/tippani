@@ -10,26 +10,89 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { WorkspaceStoreError } from "../workspace-contract.mjs";
 
 let tempCounter = 0;
 
-export function writeFileAtomicSync(filePath, data, { onBeforeRename } = {}) {
+const UNSUPPORTED_DIRECTORY_FSYNC_CODES = new Set([
+  "EINVAL",
+  "ENOTSUP",
+  "EISDIR",
+  "EPERM",
+]);
+
+export class IndeterminateAtomicWriteError extends WorkspaceStoreError {
+  constructor(filePath, cause) {
+    super(
+      `Atomic replacement reached rename but parent-directory fsync failed: ${filePath}`,
+      "indeterminate_write",
+    );
+    this.filePath = filePath;
+    this.reason = "directory_fsync_failed";
+    this.commitPoint = "rename";
+    this.requiresReconciliation = true;
+    this.cause = cause;
+  }
+}
+
+export function isIndeterminateAtomicWrite(error) {
+  return error instanceof IndeterminateAtomicWriteError ||
+    (error?.code === "indeterminate_write" &&
+      error?.reason === "directory_fsync_failed" &&
+      error?.commitPoint === "rename");
+}
+
+export function fsyncDirectorySync(directory, fsImpl = fs) {
+  let handle;
+  try {
+    handle = fsImpl.openSync(directory, "r");
+    fsImpl.fsyncSync(handle);
+  } catch (error) {
+    if (process.platform === "win32" &&
+        UNSUPPORTED_DIRECTORY_FSYNC_CODES.has(error?.code)) {
+      return false;
+    }
+    throw error;
+  } finally {
+    if (handle !== undefined) fsImpl.closeSync(handle);
+  }
+  return true;
+}
+
+export function writeFileAtomicSync(filePath, data, {
+  onBeforeRename,
+  syncDirectory = fsyncDirectorySync,
+} = {}) {
   const directory = path.dirname(filePath);
   const temp = path.join(
     directory,
     `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${tempCounter++}.tmp`,
   );
-  const handle = fs.openSync(temp, "w");
+  let handle;
+  let renamed = false;
   try {
+    handle = fs.openSync(temp, "w");
     fs.writeFileSync(handle, data);
     fs.fsyncSync(handle);
-  } finally {
     fs.closeSync(handle);
+    handle = undefined;
+    onBeforeRename?.();
+    fs.renameSync(temp, filePath);
+    renamed = true;
+    try {
+      syncDirectory(directory);
+    } catch (error) {
+      throw new IndeterminateAtomicWriteError(filePath, error);
+    }
+  } catch (error) {
+    if (handle !== undefined) {
+      try { fs.closeSync(handle); } catch { /* preserve original error */ }
+    }
+    if (!renamed) {
+      try { fs.unlinkSync(temp); } catch { /* absent or retained after process death */ }
+    }
+    throw error;
   }
-  // The rename is the atomic commit point. A crash here leaves the fully written
-  // temp file behind and the previous target untouched.
-  onBeforeRename?.();
-  fs.renameSync(temp, filePath);
 }
 
 export function listTempArtifacts(directory) {
@@ -52,6 +115,9 @@ export function isPidAlive(pid) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const sleepSync = (ms) => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
 
 const OWNER_SUFFIX = ".owner";
 
@@ -230,6 +296,63 @@ export async function acquireLock(lockPath, {
       await sleep(pollMs);
     } finally {
       try { fs.rmSync(staging, { recursive: true, force: true }); } catch { /* already moved */ }
+    }
+  }
+}
+
+export function acquireLockSync(lockPath, {
+  timeoutMs = 10_000,
+  pollMs = 5,
+  onBeforeReapDelete = null,
+} = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let stolenStaleLock = false;
+  for (;;) {
+    const token = crypto.randomUUID();
+    const staging = `${lockPath}.${process.pid}.${tempCounter++}.claim`;
+    fs.mkdirSync(staging);
+    const ownerPath = path.join(staging, `${token}${OWNER_SUFFIX}`);
+    const handle = fs.openSync(ownerPath, "wx");
+    try {
+      fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, token, at: Date.now() }));
+      fs.fsyncSync(handle);
+    } finally {
+      fs.closeSync(handle);
+    }
+    try {
+      fs.renameSync(staging, lockPath);
+      cleanupReclaimArtifacts(lockPath);
+      return {
+        path: lockPath,
+        token,
+        stolenStaleLock,
+        release() {
+          return removeOwnedLock(lockPath, { pid: process.pid, token });
+        },
+      };
+    } catch (error) {
+      try {
+        fs.statSync(lockPath);
+      } catch (statError) {
+        if (statError?.code === "ENOENT") continue;
+        throw statError;
+      }
+      if (reapStaleLock(lockPath, { onBeforeDelete: onBeforeReapDelete })) {
+        stolenStaleLock = true;
+        continue;
+      }
+      if (Date.now() > deadline) {
+        const timeout = new Error(`Timed out acquiring lock: ${lockPath}`);
+        timeout.code = "lock_timeout";
+        throw timeout;
+      }
+      sleepSync(pollMs);
+    } finally {
+      try {
+        fs.rmSync(staging, { recursive: true, force: true });
+      } catch {
+        // The staging claim was moved or already removed.
+      }
     }
   }
 }
