@@ -20,6 +20,7 @@ export function registerControlApi(app, deps) {
     getThreads,         // () => Array<thread>
     getChangedFiles,    // () => Array<{path, changeType}>
     getTriage,          // async () => {counts, threads} (optional)
+    approvePr,          // async () => guarded current-user approval result (optional)
     readFileMarkdown,   // async (filePath) => string
     postReply,          // async (threadId, content) => {ok, status, body}
     resolveThread: doResolveDep, // async (threadId) => {ok, status, body}
@@ -119,6 +120,17 @@ export function registerControlApi(app, deps) {
       res.json(await getTriage());
     } catch (e) {
       res.status(500).json({ error: String(e?.message || e) });
+    }
+  });
+
+  app.post("/api/v1/review/approve", requireAuth({ mutation: true }), async (_req, res) => {
+    if (typeof approvePr !== "function") {
+      return res.status(501).json({ error: "PR approval is not wired in this deployment" });
+    }
+    try {
+      res.json(await approvePr());
+    } catch (e) {
+      res.status(502).json({ error: String(e?.message || e) });
     }
   });
 

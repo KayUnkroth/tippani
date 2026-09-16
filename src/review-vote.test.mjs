@@ -1,7 +1,14 @@
 // Tests for the review vote mapping + preconditions, plus the /api/review
 // orchestrator that decides whether the vote actually gets sent.
 import express from "express";
-import { VOTE, voteForReviewType, voteLabel, reviewPrecheck, handleReviewRequest } from "./review-vote.js";
+import {
+  VOTE,
+  voteForReviewType,
+  voteLabel,
+  reviewPrecheck,
+  handleReviewRequest,
+  approveIfNoThreadsWaiting,
+} from "./review-vote.js";
 
 let pass = 0, fail = 0;
 function check(name, cond) { if (cond) pass++; else { fail++; console.error("  FAIL: " + name); } }
@@ -147,6 +154,67 @@ try {
 } catch (e) {
   fail++;
   console.error("  FAIL: handleReviewRequest threw " + e.message);
+}
+
+// The MCP approval operation performs the thread check and vote in one server
+// call. A separate model-side precheck would permit stale state between calls.
+try {
+  {
+    const listThreads = spy(() => [
+      {
+        id: 1,
+        status: 1,
+        comments: [{ id: 10, commentType: 1, author: { id: "me", displayName: "Current User" } }],
+      },
+      {
+        id: 2,
+        status: 2,
+        comments: [{ id: 11, commentType: 1, author: { id: "other", displayName: "Reviewer" } }],
+      },
+      {
+        id: 3,
+        status: 1,
+        comments: [{ id: 12, commentType: 3, author: { id: "system", displayName: "System" } }],
+      },
+    ]);
+    const submitApproval = spy();
+    const result = await approveIfNoThreadsWaiting({
+      listThreads,
+      getCurrentUser: spy(() => ({ id: "me", displayName: "Current User" })),
+      submitApproval,
+    });
+    check("approveIfNoThreadsWaiting: clear review approves", result.approved === true && result.vote === VOTE.approve);
+    check("approveIfNoThreadsWaiting: fetches current threads once", listThreads.calls.length === 1);
+    check("approveIfNoThreadsWaiting: submits approval once", submitApproval.calls.length === 1);
+  }
+  {
+    const submitApproval = spy();
+    const result = await approveIfNoThreadsWaiting({
+      listThreads: spy(() => [{
+        id: 42,
+        status: 1,
+        threadContext: { filePath: "/spec.md", rightFileStart: { line: 9 } },
+        comments: [{ id: 20, commentType: 1, author: { id: "reviewer", displayName: "Reviewer" } }],
+      }]),
+      getCurrentUser: spy(() => ({ id: "me", displayName: "Current User" })),
+      submitApproval,
+    });
+    check("approveIfNoThreadsWaiting: reports blocking thread", result.approved === false && result.code === "threads-waiting-on-you" && result.waitingThreads[0].id === 42);
+    check("approveIfNoThreadsWaiting: blocker never votes", submitApproval.calls.length === 0);
+  }
+  {
+    const submitApproval = spy();
+    const result = await approveIfNoThreadsWaiting({
+      listThreads: spy(() => []),
+      getCurrentUser: spy(() => null),
+      submitApproval,
+    });
+    check("approveIfNoThreadsWaiting: missing identity blocks", result.approved === false && result.code === "identity-unavailable");
+    check("approveIfNoThreadsWaiting: missing identity never votes", submitApproval.calls.length === 0);
+  }
+} catch (e) {
+  fail++;
+  console.error("  FAIL: approveIfNoThreadsWaiting threw " + e.message);
 }
 
 // ===========================================================================

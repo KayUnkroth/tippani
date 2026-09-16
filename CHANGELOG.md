@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Guarded MCP pull-request approval.** `approve_pr` performs a fresh
+  server-side thread read, resolves the signed-in reviewer, and records that
+  reviewer's approval only when no unresolved human thread is waiting on them.
+  The check and vote are one operation; blockers return their thread identities
+  without voting.
+
+### Fixed
+
+- **Single portal link per entry action.** `open_pr` now requires callers to
+  display its freshly minted `portalUrl` as one clickable link and never launch
+  it through code or immediately call `get_portal_url`. Replacement links are
+  reserved for expired/consumed links or an explicit replacement request.
+
 ## 1.8.1 (2026-08-14)
 
 The local client boundary is now authenticated end to end: every browser page

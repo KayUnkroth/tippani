@@ -110,12 +110,14 @@ export function buildTools(http, session) {
       description:
         "Open a spec PR in the tippani review portal and load its comment " +
         "threads and changed files. The portal runs headless: this returns a " +
-        "`portalUrl` for the review — SHOW that URL to the user (a clickable " +
-        "link) or open it yourself in a code block so they can watch the " +
-        "review. The portalUrl is a SINGLE-USE sign-in link: share it only from " +
-        "the result that just minted it. Never repeat an older portalUrl from " +
-        "chat history; call get_portal_url immediately before sharing another " +
-        "link. This opens a specific PR for review; the PR-review reading and " +
+        "single `portalUrl` for the review. SHOW that URL to the user as one " +
+        "clickable link only; never launch it through a code block, shell " +
+        "command, browser automation, or another tool. The portalUrl is a " +
+        "SINGLE-USE sign-in link and the result just minted a fresh one. Do not " +
+        "call get_portal_url immediately. Use get_portal_url only when the user " +
+        "reports this link expired or was consumed, or explicitly requests a " +
+        "replacement link. Never repeat an older portalUrl from chat history. " +
+        "This opens a specific PR for review; the PR-review reading and " +
         "comment tools (list_threads, get_thread, get_spec, set_view, and the " +
         "reply/resolve tools) act on the PR opened here, so open the PR before " +
         "using them. It is not the only entry point: to browse first use " +
@@ -148,7 +150,7 @@ export function buildTools(http, session) {
           "Force re-fetch from ADO, ignoring any cache"),
         headless: z.boolean().optional().describe(
           "Default true: the portal is not opened on the host — you get the " +
-          "portalUrl back to show or open yourself. Set false ONLY if the user " +
+          "portalUrl back to show as one clickable link. Set false ONLY if the user " +
           "wants tippani to pop the portal in their OS default browser."),
       },
       handler: async ({
@@ -180,8 +182,8 @@ export function buildTools(http, session) {
         const browserOpened = !isHeadless && !!(bind && bind.opened);
         const linkNote =
           "The portalUrl is a single-use sign-in link that works once and expires quickly. " +
-          "Share it only from this result; call get_portal_url immediately before sharing " +
-          "another link instead of repeating an older URL.";
+          "Share this link directly and do not call get_portal_url immediately. Request a " +
+          "replacement only if this link expires, is consumed, or the user explicitly asks.";
         return {
           prId: Number(prId),
           portalUrl,
@@ -221,6 +223,17 @@ export function buildTools(http, session) {
         "ignored') and help the user decide which threads need staged replies or resolutions.",
       inputSchema: {},
       handler: () => http.get("/api/v1/triage"),
+    },
+    {
+      name: "approve_pr",
+      description:
+        "Approve the currently open PR only after Tippani performs its own fresh " +
+        "server-side thread check. In the same operation it resolves the signed-in " +
+        "reviewer, blocks without voting when any unresolved human thread is waiting " +
+        "on you, and otherwise records the current user's approval. Do not precheck " +
+        "with another tool and do not route the vote through a separate ADO client.",
+      inputSchema: {},
+      handler: () => ensuredPost("/api/v1/review/approve", {}),
     },
     {
       name: "open_thread",
@@ -917,7 +930,9 @@ export function buildTools(http, session) {
       description:
         "Return a fresh SINGLE-USE Tippani sign-in `portalUrl` and whether the " +
         "portal is currently `running`. Use this to reconnect a user whose link " +
-        "was already used, expired, or whose browser session ended — the portal " +
+        "was already used, expired, whose browser session ended, or who explicitly " +
+        "requested a replacement link. Never call it immediately after open_pr or " +
+        "another entry tool: those tools already return the one link to display. The portal " +
         "rejects an unauthenticated browser, so there is no reusable address to " +
         "hand out and an old link cannot be resent. This does NOT start the " +
         "portal: when `running` is false, `portalUrl` is null and you must call " +

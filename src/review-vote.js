@@ -86,3 +86,88 @@ export async function handleReviewRequest({ type, isOffline, hasConn, prId, conn
     return { status: 502, body: { ok: false, code: "ado-error", error: formatError(e, "submit review") } };
   }
 }
+
+function sameIdentity(author, currentUser) {
+  if (!author || !currentUser) return false;
+  for (const key of ["id", "uniqueName", "displayName"]) {
+    const left = String(author[key] || "").trim();
+    const right = String(currentUser[key] || "").trim();
+    if (left && right && left.localeCompare(right, undefined, { sensitivity: "accent" }) === 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function waitingThreadSummary(thread, lastComment) {
+  return {
+    id: thread.id,
+    file: thread.threadContext?.filePath || null,
+    line: thread.threadContext?.rightFileStart?.line || null,
+    lastCommentId: lastComment?.id || null,
+    lastBy: lastComment?.author?.displayName || null,
+  };
+}
+
+// One operation owns both the fresh thread read and the approval write. This
+// prevents an MCP caller from approving against a separate, stale precheck.
+export async function approveIfNoThreadsWaiting({
+  listThreads,
+  getCurrentUser,
+  submitApproval,
+} = {}) {
+  if (typeof listThreads !== "function"
+      || typeof getCurrentUser !== "function"
+      || typeof submitApproval !== "function") {
+    throw new TypeError("Approval requires thread, identity, and vote providers.");
+  }
+  const currentUser = await getCurrentUser();
+  if (!currentUser?.id) {
+    return {
+      approved: false,
+      code: "identity-unavailable",
+      error: "Could not resolve the current reviewer's identity, so the PR was not approved.",
+    };
+  }
+  const threads = await listThreads() || [];
+  const waitingThreads = [];
+  let openThreadCount = 0;
+  for (const thread of threads) {
+    if (thread.status === 2 || thread.status === 4) continue;
+    const comments = (thread.comments || []).filter(
+      (comment) => comment.commentType !== 3 && !comment.isDeleted);
+    if (comments.length === 0) continue;
+    openThreadCount++;
+    const lastComment = comments[comments.length - 1];
+    if (!sameIdentity(lastComment.author, currentUser)) {
+      waitingThreads.push(waitingThreadSummary(thread, lastComment));
+    }
+  }
+  if (waitingThreads.length > 0) {
+    return {
+      approved: false,
+      code: "threads-waiting-on-you",
+      error: "The PR was not approved because unresolved threads are waiting on you.",
+      currentUser: {
+        id: currentUser.id,
+        displayName: currentUser.displayName || "",
+      },
+      openThreadCount,
+      waitingThreadCount: waitingThreads.length,
+      waitingThreads,
+    };
+  }
+  await submitApproval(VOTE.approve);
+  return {
+    approved: true,
+    vote: VOTE.approve,
+    message: voteLabel(VOTE.approve),
+    currentUser: {
+      id: currentUser.id,
+      displayName: currentUser.displayName || "",
+    },
+    openThreadCount,
+    waitingThreadCount: 0,
+    waitingThreads: [],
+  };
+}

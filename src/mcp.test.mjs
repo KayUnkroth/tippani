@@ -84,6 +84,7 @@ async function fakeSetViewed(threadId, commentId) {
 }
 const customFileAdds = [];
 const customFileRemoves = [];
+const approvalCalls = [];
 const app = express();
 app.use(express.json());
 registerControlApi(app, {
@@ -96,6 +97,17 @@ registerControlApi(app, {
   resolveThread: fakeResolve,
   stageResolve: (threadId) => { stageResolveCalls.push(threadId); return { ok: true, status: 200, body: { ok: true, staged: true, synced: false } }; },
   setViewed: fakeSetViewed,
+  approvePr: async () => {
+    approvalCalls.push(1);
+    return {
+      approved: true,
+      vote: 10,
+      message: "Approved",
+      openThreadCount: 0,
+      waitingThreadCount: 0,
+      waitingThreads: [],
+    };
+  },
   specDrafts,
   listPrs: async (q) => ({ prs: [{ id: 7, title: "Demo PR", author: "Kay" }], mine: q.creator !== "any", status: 1 }),
   // Clickstop 2: open_local_file forwards here.
@@ -164,7 +176,7 @@ try {
   // --- Surface checks ---
   const expected = [
     "open_pr",
-    "list_threads", "triage_summary", "show_feedback",
+    "list_threads", "triage_summary", "approve_pr", "show_feedback",
     "open_thread", "open_file", "go_to_line", "get_thread", "focus_thread",
     "stage_draft", "clear_draft", "stage_resolve_thread", "get_spec",
     "get_spec_draft", "clear_spec_edit",
@@ -179,7 +191,7 @@ try {
     "add_reading_list_file", "remove_reading_list_file",
     "close_tippani",
   ];
-  check("tools: exactly 47 registered", tools.length === 47);
+  check("tools: exactly 48 registered", tools.length === 48);
   for (const n of expected) {
     check(`tools: includes ${n}`, !!byName[n]);
     check(`tools: ${n} has description`, typeof byName[n].description === "string" && byName[n].description.length > 20);
@@ -234,15 +246,28 @@ try {
       bootstrapCalls.length === bootstrapCount + 1 &&
       /\/auth\/bootstrap\?token=/.test(r.portalUrl));
     check("open_pr: marks the portal link single use", r.singleUse === true);
-    check("open_pr: result forbids reuse and directs a fresh-link call",
-      /single-use|one-time/.test(r.note) && /get_portal_url/.test(r.note) && /older/.test(r.note));
-    check("open_pr: description warns against reusing a portal link",
+    check("open_pr: returns exactly one displayed link without launching a browser",
+      bootstrapCalls.length === bootstrapCount + 1 && openUrlCalls.length === 0);
+    check("open_pr: result reserves replacement links for an expired or requested replacement",
+      /single-use|one-time/.test(r.note) && /do not call get_portal_url immediately/i.test(r.note));
+    check("open_pr: description requires one clickable link and no launch block",
       /SINGLE-USE|single-use|one-time/.test(byName.open_pr.description) &&
-      /get_portal_url/.test(byName.open_pr.description) &&
-      /Never repeat/.test(byName.open_pr.description));
+      /clickable link only/i.test(byName.open_pr.description) &&
+      /never launch/i.test(byName.open_pr.description) &&
+      /do not call get_portal_url immediately/i.test(byName.open_pr.description));
     check("open_pr: carries no embedded instructions (driving is via skills/instructions)",
       r.instructions === undefined);
     check("open_pr: reports open thread count", r.openThreadCount === 2);
+  }
+  {
+    const activeBefore = activePortalCalls.length;
+    const result = await byName.approve_pr.handler({});
+    check("approve_pr: keeps the current review portal active",
+      activePortalCalls.length === activeBefore + 1);
+    check("approve_pr: executes one guarded approval operation",
+      approvalCalls.length === 1 && result.approved === true && result.vote === 10);
+    check("approve_pr: description requires its own fresh thread verification",
+      /fresh/i.test(byName.approve_pr.description) && /waiting on you/i.test(byName.approve_pr.description));
   }
   {
     await byName.open_pr.handler({

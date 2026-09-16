@@ -283,7 +283,7 @@ Comments are written to a local queue first, then sent to the host. Offline, the
 
 Tippani exposes a [Model Context Protocol](https://modelcontextprotocol.io) server so LLM clients (Claude Desktop, GitHub Copilot, etc.) can drive the review workflow — open a PR, triage threads, stage replies and whole-file spec edits, resolve or mark threads viewed — while you watch in tippani's browser UI and approve each action. The design is tracked in issue [#42](https://github.com/mavaali/tippani/issues/42).
 
-**Self-bootstrapping — you don't start tippani first.** The shim launches (or adopts) a review portal per PR on demand via the `open_pr` tool, opening a visible browser window for you while the agent drives it. Multiple PRs can run at once on separate ports, discovered across processes via a per-port registry under `~/.tippani/instances/`.
+**Self-bootstrapping — you don't start tippani first.** The shim launches (or adopts) a headless review portal per PR on demand via the `open_pr` tool and returns one fresh sign-in link for you to open. Multiple PRs can run at once on separate ports, discovered across processes via a per-port registry under `~/.tippani/instances/`.
 
 **Setup (Claude Desktop):** install tippani globally (`npm i -g tippani`), then add to your `claude_desktop_config.json`. For work against a repository host, pass a read/write access token via `TIPPANI_ADO_TOKEN`; without one the shim still starts in local-only mode (local-clone review works, and the host tools ask for a token if used). Optionally set `TIPPANI_ADO_AUDIENCE` to have it verify the token's audience on startup:
 
@@ -303,11 +303,11 @@ token` works in the MCP server's environment). GitHub and ADO tokens are
 separate; a supplied ADO token still gets its existing fail-fast audience/type
 validation.
 
-**Tools (47):**
+**Tools (48):**
 
 - **Portal lifecycle** — `start_tippani` (explicit browse-mode start), `get_portal_url` (mint a fresh sign-in link / reconnect), `open_local_only` (local review, no ADO token), `close_tippani`.
 - **Portal & navigation** — `open_pr` (ADO by default; for GitHub pass `provider: "github"`, `owner`, and `repo`), `open_file`, `go_to_line` (scroll the already-open file to a line, no reopen), `open_thread` (selects a thread, scrolls both panes to its anchor, and returns its content), `show_feedback` (cross-PR triage page), `set_view`, `set_feedback_filter`, `refresh_spec`.
-- **Reading** — `list_threads`, `get_thread`, `get_spec`, `get_spec_draft`, `triage_summary`; focus with `focus_thread`.
+- **Reading and review** — `list_threads`, `get_thread`, `get_spec`, `get_spec_draft`, `triage_summary`; focus with `focus_thread`. `approve_pr` performs a fresh current-reviewer thread check and records approval only when no unresolved human thread is waiting on that reviewer.
 - **Stage-then-push** — stage review work with `stage_draft`, `edit_spec`, and `stage_resolve_thread`; stage authoring work with `stage_branch`, `stage_spec`, and `stage_spec_pr`. Nothing staged by MCP reaches your repository host until one explicit `push_staged_changes` call. Also `clear_draft` and `clear_spec_edit`.
 - **Discovery** — `list_prs` and `search_specs` support ADO or GitHub;
   `search_work_items` is ADO-only; `get_file_commits` reads either host.
@@ -319,9 +319,10 @@ Staged whole-file edits show up in the portal as a side-by-side Current/Proposed
 **Every `portalUrl` an MCP tool returns is a one-time sign-in link.** The portal
 rejects an unauthenticated browser, so a plain `http://localhost:<port>` address
 is never usable, and a link stops working once it has been opened or after it
-expires. Assistants should show the link as a clickable link and call
-`get_portal_url` again for a new one rather than resending an old one. You can
-also mint one yourself at any time with `tippani open`.
+expires. Assistants should show the entry tool's link as one clickable link,
+never launch it, and never immediately replace it. `get_portal_url` is only for
+a used/expired link or an explicit replacement request. You can also mint one
+yourself at any time with `tippani open`.
 
 The portal can also run standalone with `--headless` (assistant-only, no browser), `--port=<n>` (run several at once), and `--ado-token=<t>` (token-based sign-in, skipping the interactive login). The underlying HTTP control API is directly usable for scripts and IDE extensions — see `src/control-api.js`.
 

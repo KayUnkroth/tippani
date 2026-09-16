@@ -21,7 +21,7 @@ Start it as an MCP stdio server:
 tippani-mcp
 ```
 
-It registers **47 tools**. `open_pr` (or a Discovery tool like `list_prs` /
+It registers **48 tools**. `open_pr` (or a Discovery tool like `list_prs` /
 `search_specs`) launches a headless portal and returns a `portalUrl`; every
 other tool then operates on that open session. A parameter marked `*` is
 required.
@@ -29,16 +29,17 @@ required.
 **A `portalUrl` is a one-time sign-in link, not an address.** The portal refuses
 an unauthenticated browser, so a plain `http://localhost:<port>` will not open
 it, and a link stops working once it has been followed or after it expires
-(about two minutes). Show the returned link to the user as a clickable link, and
-call `get_portal_url` for a fresh one instead of resending a link you already
-gave out. Users can mint their own at any time with `tippani open`.
+(about two minutes). Show the link returned by the entry tool as one clickable
+link only; do not launch it or immediately replace it. Call `get_portal_url`
+only when that link expired or was consumed, or when the user explicitly asks
+for a replacement. Users can mint their own at any time with `tippani open`.
 
 ### Portal lifecycle
 
 | Tool | Purpose | Parameters |
 |---|---|---|
 | `start_tippani` | Start the portal in browse mode without opening a PR. Adopts a running portal. Returns a fresh single-use `portalUrl`. | — |
-| `get_portal_url` | Mint a fresh single-use `portalUrl` for the running portal — use this to reconnect a user whose link was used or expired. Does not start the portal: when `running` is false, `portalUrl` is `null`. | — |
+| `get_portal_url` | Mint a replacement single-use `portalUrl` for the running portal when the prior link was used/expired or the user explicitly requests another. Do not call immediately after an entry tool. Does not start the portal: when `running` is false, `portalUrl` is `null`. | — |
 | `open_local_only` | Start the portal in local-only mode (no ADO token). Returns a fresh single-use `portalUrl`. | — |
 | `close_tippani` | Steer the open tab to a closed page, then shut the portal down and clear its registry entry. | — |
 
@@ -56,11 +57,12 @@ report and stop if the retry also fails.
 
 | Tool | Purpose | Parameters |
 |---|---|---|
-| `open_pr` | Open a spec PR in the review portal and load its threads and changed files. ADO is the default; for GitHub pass `provider:"github"`, `owner`, and `repo`. Returns a `portalUrl`. | `prId*`, `provider`, `owner`, `org`, `project`, `repo`, `refresh`, `headless` |
+| `open_pr` | Open a spec PR in the review portal and load its threads and changed files. ADO is the default; for GitHub pass `provider:"github"`, `owner`, and `repo`. Returns one fresh `portalUrl` to display as a clickable link, never launch. | `prId*`, `provider`, `owner`, `org`, `project`, `repo`, `refresh`, `headless` |
 | `list_prs` | List PRs to review and open Discovery. Defaults to ADO; for GitHub pass `provider:"github"`, `owner`, and a repository anchor. | `provider`, `owner`, `repo`, `status`, `creator`, `reviewer`, `target`, `top` |
 | `list_threads` | List every comment thread on the open PR with status, file, line, and comment count. | — |
 | `get_thread` | Get the full content of one thread — every comment plus any staged draft. | `threadId` |
 | `triage_summary` | Categorized triage of every thread: counts of needs-your-reply / awaiting-reviewer / viewed / FYI / resolved, plus a per-thread list. | — |
+| `approve_pr` | Freshly read the open PR's threads, resolve the signed-in reviewer, and approve only when no unresolved human thread is waiting on that reviewer. The check and vote are one server operation; a blocker returns its thread ids without voting. | — |
 | `show_feedback` | Open the Feedback page — a cross-thread triage list for the whole PR. | — |
 | `set_feedback_filter` | Focus the Feedback page by state(s), reviewer, file, and/or text query. `clear=true` shows all. | `states`, `reviewer`, `file`, `query`, `clear` |
 | `open_thread` | Select one thread and return its full content plus any staged draft. File threads open in context and scroll both the thread pane and file contents to the anchor; PR-level threads open standalone. Navigation failure is reported as failure. | `threadId` |

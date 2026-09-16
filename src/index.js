@@ -78,7 +78,11 @@ import { branchesForRepo, repoOptions, branchNamePlaceholder, sortBranches, shor
 import { branchFileRows, visibleFileCount, mdPathsFromChanges, buildSpecHref, stagedFileComparison } from "./branch-files.js";
 import { validateLocalRepo, resolveGitDir, parseGitHead, parsePackedRefs, mergeLocalBranches, parseOriginHeadDefault, userCreatedBranches } from "./local-repo.js";
 import { baseCandidates, safeLocalPath } from "./local-git.js";
-import { handleReviewRequest } from "./review-vote.js";
+import {
+  approveIfNoThreadsWaiting,
+  handleReviewRequest,
+  reviewPrecheck,
+} from "./review-vote.js";
 import { newComment as pcNew, addComment as pcAdd, updateComment as pcUpdate, removeComment as pcRemove, findComment as pcFind, sortComments as pcSort, setResolved as pcSetResolved, addReply as pcAddReply, navTargetId as pcNavTarget, reanchorComments as pcReanchor } from "./personal-comments.js";
 import { personalCommentsKey as pcStoreKey, loadPersonalComments as pcStoreLoad, savePersonalComments as pcStoreSave, deletePersonalComments as pcStoreDelete, migrateKey as pcStoreMigrate } from "./personal-comments-store.js";
 import { createStagedInventory, normFolder, parentFolder } from "./staged-inventory.js";
@@ -647,6 +651,27 @@ async function resolveThread(conn, prId, threadId) {
 // authenticated user's id — an anonymous vote is not expressible.
 async function submitReviewVote(conn, prId, vote) {
   return reviewProvider(conn).submitReview(prId, vote);
+}
+
+async function approveOpenPr() {
+  const precheck = reviewPrecheck({
+    isOffline: _isOffline,
+    hasConn: !!_conn,
+    prId: _prId,
+  });
+  if (!precheck.ok) {
+    return {
+      approved: false,
+      code: precheck.code,
+      error: precheck.error,
+    };
+  }
+  const provider = reviewProvider(_conn);
+  return approveIfNoThreadsWaiting({
+    listThreads: () => provider.listThreads(_prId),
+    getCurrentUser: () => provider.getCurrentUser(),
+    submitApproval: (vote) => provider.submitReview(_prId, vote),
+  });
 }
 
 // Durable "viewed" state: ADO comment-thread properties are NOT updatable
@@ -9646,6 +9671,7 @@ if ($path) { [Console]::Out.Write($path) }
       }
       return { counts, threads: items };
     },
+    approvePr: approveOpenPr,
     readFileMarkdown: async (filePath) => {
       if (_cache?.fileContents?.[filePath]) return _cache.fileContents[filePath];
       if (!_isOffline && _conn) {
