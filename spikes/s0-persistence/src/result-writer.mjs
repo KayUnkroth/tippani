@@ -232,22 +232,22 @@ export function renderOutcomeReport(run) {
   }
   if (measurementCount === 0) lines.push("| - | No measurements emitted | - | - |");
 
-  if (run.campaigns?.length) {
+  if (run.runs?.length) {
     lines.push(
       "",
-      "## Repeated live campaigns",
+      "## Repeated live runs",
       "",
-      "| Campaign | Report | Raw evidence |",
+      "| Run | Report | Raw evidence |",
       "|---|---|---|",
-      ...run.campaigns.map((campaign) =>
-        `| ${campaign.name} | [report](${campaign.report}) | [JSON](${campaign.raw}) |`),
+      ...run.runs.map((run) =>
+        `| ${run.name} | [report](${run.report}) | [JSON](${run.raw}) |`),
       "",
-      "### Between-campaign variability",
+      "### Between-run variability",
       "",
       "| Metric | Samples | Minimum | p50 | p95 | Maximum | Mean | Std. dev. |",
       "|---|---:|---:|---:|---:|---:|---:|---:|",
     );
-    for (const [metric, summary] of Object.entries(run.campaignVariability || {})) {
+    for (const [metric, summary] of Object.entries(run.runVariability || {})) {
       lines.push(
         `| ${metric} | ${summary.count} | ${fixed(summary.min)} | ${fixed(summary.p50)} | ` +
         `${fixed(summary.p95)} | ${fixed(summary.max)} | ${fixed(summary.mean)} | ${fixed(summary.stddev)} |`,

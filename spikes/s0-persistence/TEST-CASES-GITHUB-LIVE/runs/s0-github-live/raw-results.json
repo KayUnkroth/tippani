@@ -1,0 +1,811 @@
+{
+  "schemaVersion": 2,
+  "syntheticData": true,
+  "harnessRevision": "s0-harness-v4",
+  "evidenceIdentity": {
+    "sourceRevision": "sha256:193085e84b603e45f4d00c97b049412f3078a053d43ae8f1315fba149da89998",
+    "catalogRevision": "sha256:a2d4052f88cde758aff0bccf62bebd380907b935259f9571dd8f1646740723e7",
+    "applicabilityRevision": "sha256:7d9b94e9ea7e7f38893230577d6b5aa26ab141e96e3d430244ec51f8c5849b4d",
+    "configRevision": "sha256:ac2d95c7178f186c26fd4f82f7a809dc087673646249de24eec281a00635282c"
+  },
+  "startedAt": "2026-09-20T18:01:54.818Z",
+  "completedAt": "2026-09-20T18:01:54.878Z",
+  "configuration": {
+    "configurationId": "CFG-GITHUB-LIVE",
+    "adapter": "github",
+    "backingPath": "github",
+    "platform": "windows-ntfs",
+    "scale": "small",
+    "runId": "s0-github-live",
+    "durable": false,
+    "host": "linux x64 node 22.23.2",
+    "applicabilityProfile": "github"
+  },
+  "preflight": {
+    "configurationId": "CFG-GITHUB-LIVE",
+    "runId": "s0-github-live",
+    "adapter": "github",
+    "backingPath": "github",
+    "syntheticDataOnly": true,
+    "sandbox": {
+      "approved": true,
+      "kind": "provider-live",
+      "identityLabel": "Live delegated identity (supplied at runtime)",
+      "identityVerified": true,
+      "providerIdentity": null,
+      "ownershipMarker": "tippani-s0:s0-github-live",
+      "namespace": "tippani-s0/s0-github-live",
+      "defaultBranchExcluded": true,
+      "corporateFallbackDisabled": true,
+      "dryRunOperations": [
+        "connect",
+        "put-run-marker",
+        "get-contents",
+        "put-contents",
+        "list-contents",
+        "list-commits",
+        "cleanup-unsupported"
+      ],
+      "cleanup": {
+        "manifestId": "syn-cleanup-s0-github-live",
+        "retentionHours": 24,
+        "expiresAt": "2026-09-21T18:01:54.818Z"
+      },
+      "effectiveTargetHash": null,
+      "approval": {}
+    },
+    "budgets": {
+      "maxOperations": 100,
+      "maxDurationMs": 300000,
+      "maxObjects": 10000,
+      "maxBytes": 104857600
+    }
+  },
+  "environment": {
+    "os": "linux 6.8.0-1064-azure",
+    "architecture": "x64",
+    "cpuModel": "AMD EPYC 7763 64-Core Processor",
+    "logicalCpuCount": 16,
+    "totalMemoryBytes": 67424985088,
+    "nodeVersion": "22.23.2",
+    "providerApiVersion": "GitHub REST 2022-11-28",
+    "configuredPlatform": "windows-ntfs",
+    "filesystem": "Not recorded",
+    "temporaryStoreRoot": "tippani-s0-s0-github-live-HXQ9Lc",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "Not recorded",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=22.23.2; sqlite=3.51.3",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "None recorded",
+    "processTopology": "Scenario-dependent: distinct child PIDs are required and recorded for collaboration gates"
+  },
+  "applicableScenarioIds": [
+    "S0-COL-002",
+    "S0-COL-003",
+    "S0-COL-004",
+    "S0-COL-005",
+    "S0-COL-006",
+    "S0-BCK-005",
+    "S0-MIG-004",
+    "S0-BKP-003",
+    "S0-BKP-004",
+    "S0-REC-003",
+    "S0-REC-004",
+    "S0-SEC-001",
+    "S0-SEC-002",
+    "S0-SEC-003",
+    "S0-SEC-004",
+    "S0-SEC-005",
+    "S0-SEC-006",
+    "S0-PER-004",
+    "S0-PER-005",
+    "S0-BCK-004"
+  ],
+  "catalogSize": 58,
+  "catalog": [
+    {
+      "id": "S0-ATM-001",
+      "criterionType": "absolute",
+      "title": "A multi-field workspace mutation commits completely or not at all",
+      "section": "1"
+    },
+    {
+      "id": "S0-ATM-002",
+      "criterionType": "absolute",
+      "title": "Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically",
+      "section": "1"
+    },
+    {
+      "id": "S0-ATM-003",
+      "criterionType": "absolute",
+      "title": "Failed mutation exposes no empty-body intent, mixed generation, or dangling alias",
+      "section": "1"
+    },
+    {
+      "id": "S0-CON-001",
+      "criterionType": "absolute",
+      "title": "Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-002",
+      "criterionType": "absolute",
+      "title": "Multiple headless/automation clients cannot overwrite a newer generation",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-003",
+      "criterionType": "absolute",
+      "title": "Independent workspaces progress concurrently without global serialization",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-004",
+      "criterionType": "absolute",
+      "title": "Concurrent staging during publication preserves the newer intent revision",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-005",
+      "criterionType": "absolute",
+      "title": "Lock/CAS contention is bounded, observable, and retryable",
+      "section": "2"
+    },
+    {
+      "id": "S0-JRN-001",
+      "criterionType": "absolute",
+      "title": "Frozen intent tuples and planned journal become durable atomically before any provider operation",
+      "section": "3"
+    },
+    {
+      "id": "S0-JRN-002",
+      "criterionType": "absolute",
+      "title": "No journal references a missing workspace, generation, or intent revision",
+      "section": "3"
+    },
+    {
+      "id": "S0-CRS-001",
+      "criterionType": "absolute",
+      "title": "Kill before/during/after commit recovers only the complete previous or committed generation",
+      "section": "4"
+    },
+    {
+      "id": "S0-CRS-002",
+      "criterionType": "absolute",
+      "title": "Kill during alias/index update never exposes a partially updated index",
+      "section": "4"
+    },
+    {
+      "id": "S0-CRS-003",
+      "criterionType": "absolute",
+      "title": "Kill during backup or migration leaves an unambiguous recoverable state",
+      "section": "4"
+    },
+    {
+      "id": "S0-COL-001",
+      "criterionType": "absolute",
+      "title": "Independent local actors observe one stable workspace/generation and equal concurrency rules",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-002",
+      "criterionType": "absolute",
+      "title": "Two concurrent clients on a shared backing path cannot silently overwrite each other",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-003",
+      "criterionType": "absolute",
+      "title": "Two clients reconnecting from different generations receive deterministic conflict/reload behavior",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-004",
+      "criterionType": "absolute",
+      "title": "Remote success with a lost response is reconciled without duplicate generation or false failure",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-005",
+      "criterionType": "absolute",
+      "title": "Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-006",
+      "criterionType": "absolute",
+      "title": "A second client discovers a committed generation through the backing path change mechanism",
+      "section": "5"
+    },
+    {
+      "id": "S0-BCK-001",
+      "criterionType": "absolute",
+      "title": "Local flush and atomic replace preserve file and index durability under supported filesystems",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-002",
+      "criterionType": "absolute",
+      "title": "OneDrive ETag/version preconditions reject stale updates and support version recovery",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-003",
+      "criterionType": "absolute",
+      "title": "ADO object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-004",
+      "criterionType": "absolute",
+      "title": "GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-005",
+      "criterionType": "absolute",
+      "title": "Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-006",
+      "criterionType": "relative",
+      "title": "Synced-folder conflict behavior is measured separately from provider-API CAS",
+      "section": "6"
+    },
+    {
+      "id": "S0-COR-001",
+      "criterionType": "absolute",
+      "title": "Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-002",
+      "criterionType": "absolute",
+      "title": "Missing/dangling aliases and duplicate identities fail closed",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-003",
+      "criterionType": "absolute",
+      "title": "Unsupported schema/provider-operation version fails closed with a typed state",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-004",
+      "criterionType": "absolute",
+      "title": "Permission-denied or unreadable existing state is never treated as an absent/new store",
+      "section": "7"
+    },
+    {
+      "id": "S0-HYD-001",
+      "criterionType": "absolute",
+      "title": "Startup enumerates and validates all workspaces/aliases before APIs open",
+      "section": "8"
+    },
+    {
+      "id": "S0-HYD-002",
+      "criterionType": "absolute",
+      "title": "Rehydration restores exact generation, intent order, private state, journal state, and last selection",
+      "section": "8"
+    },
+    {
+      "id": "S0-HYD-003",
+      "criterionType": "absolute",
+      "title": "Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted",
+      "section": "8"
+    },
+    {
+      "id": "S0-MIG-001",
+      "criterionType": "absolute",
+      "title": "Forward migration is transactional or resumable, idempotent, and preserves originals/audit",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-002",
+      "criterionType": "absolute",
+      "title": "Interrupted migration resumes or rolls back without ambiguity",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-003",
+      "criterionType": "absolute",
+      "title": "Unsupported source version and downgrade policy are explicit and fail closed",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-004",
+      "criterionType": "absolute",
+      "title": "Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt",
+      "section": "9"
+    },
+    {
+      "id": "S0-IMP-001",
+      "criterionType": "absolute",
+      "title": "Complete checksummed legacy envelope validates before atomic import",
+      "section": "10"
+    },
+    {
+      "id": "S0-IMP-002",
+      "criterionType": "absolute",
+      "title": "Failed/corrupt/duplicate legacy import preserves source and creates no partial destination",
+      "section": "10"
+    },
+    {
+      "id": "S0-BKP-001",
+      "criterionType": "absolute",
+      "title": "Active-store backup is internally consistent at one logical generation",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-002",
+      "criterionType": "absolute",
+      "title": "Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-003",
+      "criterionType": "absolute",
+      "title": "Shared-backing history/export recovers a known generation without rewriting newer valid history",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-004",
+      "criterionType": "absolute",
+      "title": "Restored shared workspace establishes one explicit authoritative head",
+      "section": "11"
+    },
+    {
+      "id": "S0-REC-001",
+      "criterionType": "absolute",
+      "title": "Clean and forced shutdown restart recover exact durable state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-002",
+      "criterionType": "absolute",
+      "title": "Stale lock recovery removes only provably owned stale state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-003",
+      "criterionType": "absolute",
+      "title": "Provider outage/auth/throttle/lost-response recovery reconciles authoritative state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-004",
+      "criterionType": "absolute",
+      "title": "Local offline cache reconciles against newer authority without silent overwrite",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-005",
+      "criterionType": "absolute",
+      "title": "Diagnostics identify recovery state without exposing content or credentials",
+      "section": "12"
+    },
+    {
+      "id": "S0-SEC-001",
+      "criterionType": "absolute",
+      "title": "Preflight rejects non-allow-listed, unmarked, default/protected, or production coordinates before provider calls",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-002",
+      "criterionType": "absolute",
+      "title": "Effective sandbox identity is verified and corporate-account fallback is impossible",
+      "section": "Prerequisites"
+    },
+    {
+      "id": "S0-SEC-003",
+      "criterionType": "absolute",
+      "title": "Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports",
+      "section": "Prerequisites"
+    },
+    {
+      "id": "S0-SEC-004",
+      "criterionType": "absolute",
+      "title": "Credentials remain brokered/redacted and absent from workspace state and evidence",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-005",
+      "criterionType": "absolute",
+      "title": "Cleanup/reaper deletes only run-owned resources recorded in the manifest",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-006",
+      "criterionType": "absolute",
+      "title": "Provider request/object/time/storage budgets stop unsafe or abusive runs",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-PER-001",
+      "criterionType": "relative",
+      "title": "Cold startup and enumeration are measured at small, medium, and stress scale",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-002",
+      "criterionType": "relative",
+      "title": "Alias-open, mutation, conflict, and journal p50/p95 are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-003",
+      "criterionType": "relative",
+      "title": "Backup/restore time, store size, memory, and write amplification are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-004",
+      "criterionType": "relative",
+      "title": "Provider requests, bytes, throttling, CAS latency, and collaborator discovery are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-005",
+      "criterionType": "relative",
+      "title": "Operational and implementation complexity is recorded using the same rubric",
+      "section": "Decision criteria"
+    }
+  ],
+  "results": [
+    {
+      "scenarioId": "S0-COL-002",
+      "title": "Two concurrent clients on a shared backing path cannot silently overwrite each other",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-COL-003",
+      "title": "Two clients reconnecting from different generations receive deterministic conflict/reload behavior",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-COL-004",
+      "title": "Remote success with a lost response is reconciled without duplicate generation or false failure",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-COL-005",
+      "title": "Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-COL-006",
+      "title": "A second client discovers a committed generation through the backing path change mechanism",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-BCK-005",
+      "title": "Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-MIG-004",
+      "title": "Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-BKP-003",
+      "title": "Shared-backing history/export recovers a known generation without rewriting newer valid history",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-BKP-004",
+      "title": "Restored shared workspace establishes one explicit authoritative head",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-REC-003",
+      "title": "Provider outage/auth/throttle/lost-response recovery reconciles authoritative state",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-REC-004",
+      "title": "Local offline cache reconciles against newer authority without silent overwrite",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-SEC-001",
+      "title": "Preflight rejects non-allow-listed, unmarked, default/protected, or production coordinates before provider calls",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.09698100000014165,
+      "evidence": {
+        "providerPreflightRejected": true,
+        "errorCount": 8
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-002",
+      "title": "Effective sandbox identity is verified and corporate-account fallback is impossible",
+      "criterionType": "absolute",
+      "status": "Fail",
+      "durationMs": 0.4713289999999688,
+      "evidence": {},
+      "measurements": {},
+      "error": {
+        "name": "AssertionError",
+        "code": "ERR_ASSERTION",
+        "message": "The sandbox config must pass its own preflight\n\u001b[32m+ actual\u001b[39m \u001b[31m- expected\u001b[39m\n\n\u001b[32m+\u001b[39m [\n\u001b[32m+\u001b[39m   'Live provider identity must be provider-derived and coordinates resolved before provider calls',\n\u001b[32m+\u001b[39m   'Structured preflight approval requires approver, approval date, and reference',\n\u001b[32m+\u001b[39m   'Preflight approval target hash does not match the effective provider target'\n\u001b[32m+\u001b[39m ]\n\u001b[31m-\u001b[39m []\n"
+      }
+    },
+    {
+      "scenarioId": "S0-SEC-003",
+      "title": "Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.187069000000065,
+      "evidence": {
+        "syntheticFixtureAccepted": true,
+        "actualDataRejected": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-004",
+      "title": "Credentials remain brokered/redacted and absent from workspace state and evidence",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.2616379999999481,
+      "evidence": {
+        "configSecretRejected": true,
+        "workspaceHasNoSecrets": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-005",
+      "title": "Cleanup/reaper deletes only run-owned resources recorded in the manifest",
+      "criterionType": "absolute",
+      "status": "Fail",
+      "durationMs": 0.13266699999985576,
+      "measurements": {},
+      "error": {
+        "name": "WorkspaceStoreError",
+        "code": "no_token",
+        "message": "No github credential supplied"
+      }
+    },
+    {
+      "scenarioId": "S0-SEC-006",
+      "title": "Provider request/object/time/storage budgets stop unsafe or abusive runs",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 53.223799999999756,
+      "evidence": {
+        "nonPositiveBudgetsRejected": true,
+        "operationLimitEnforced": true,
+        "objectLimitEnforced": true,
+        "byteLimitEnforced": true,
+        "deadlineEnforced": true,
+        "abortSignalEnforced": true,
+        "providerChildBudget": {
+          "metered": true,
+          "childPid": 112683,
+          "operationsBefore": 0,
+          "operationsAfter": 1
+        },
+        "cleanupBudgeted": true,
+        "cleanupSharedDeadline": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-PER-004",
+      "title": "Provider requests, bytes, throttling, CAS latency, and collaborator discovery are measured comparably",
+      "criterionType": "relative",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    },
+    {
+      "scenarioId": "S0-PER-005",
+      "title": "Operational and implementation complexity is recorded using the same rubric",
+      "criterionType": "relative",
+      "status": "Pass",
+      "durationMs": 0.027450999999928172,
+      "evidence": {
+        "scale": "1=trivial, 2=low, 3=moderate, 4=high, 5=very high",
+        "dependencies": 2,
+        "implementation": 4,
+        "test": 4,
+        "migration": 3,
+        "deployment": 3,
+        "maintenance": 4,
+        "diagnostics": 3,
+        "recovery": 3,
+        "rationale": {
+          "dependencies": "GitHub REST API and repository-scoped authentication",
+          "implementation": "Contents blob-SHA CAS, branch lifecycle, and bounded consistency reads",
+          "test": "Live repository, blob race, consistency, offline, history, and cleanup coverage",
+          "migration": "Receipt-gated local-to-repository rehome",
+          "deployment": "Repository-scoped credential, coordinates, and per-run branch",
+          "maintenance": "GitHub REST API, blob/ref semantics, and read-after-write consistency handling",
+          "diagnostics": "Provider responses, request telemetry, branch, blob, and generation state",
+          "recovery": "Commit history plus offline conflict reconciliation"
+        },
+        "total": 26,
+        "mean": 3.25
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-BCK-004",
+      "title": "GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "criterionType": "absolute",
+      "status": "Blocked",
+      "durationMs": 0,
+      "reason": "Live provider runtime variables not supplied: S0_GITHUB_TOKEN, S0_GITHUB_OWNER, S0_GITHUB_REPO, S0_PREFLIGHT_APPROVER, S0_PREFLIGHT_APPROVED_AT, S0_PREFLIGHT_APPROVAL_REFERENCE, S0_PREFLIGHT_TARGET_HASH"
+    }
+  ],
+  "safetyBudget": {
+    "operations": 1,
+    "objects": 0,
+    "bytes": 16,
+    "deadlineAt": 302932.404978,
+    "limits": {
+      "maxOperations": 100,
+      "maxDurationMs": 300000,
+      "maxObjects": 10000,
+      "maxBytes": 104857600
+    }
+  },
+  "budgetTelemetry": {
+    "identity": null,
+    "cleanup": {
+      "requests": 0,
+      "requestBytes": 0,
+      "responseBytes": 0,
+      "transferredBytes": 0,
+      "throttleResponses": 0,
+      "retries": 0,
+      "retryAfterSeconds": [],
+      "backoffMs": 0,
+      "failures": {},
+      "byteMethod": "UTF-8 application payload bytes submitted or consumed"
+    },
+    "final": {
+      "operations": 1,
+      "objects": 0,
+      "bytes": 16,
+      "deadlineAt": 302932.404978,
+      "limits": {
+        "maxOperations": 100,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    }
+  },
+  "cleanup": {
+    "required": true,
+    "status": "failed",
+    "error": {
+      "name": "WorkspaceStoreError",
+      "code": "no_token",
+      "message": "No github credential supplied"
+    },
+    "budgeted": true,
+    "budgetSource": "preflight.budgets",
+    "sharedDeadline": true,
+    "budgetBefore": {
+      "operations": 1,
+      "objects": 0,
+      "bytes": 16,
+      "deadlineAt": 302932.404978,
+      "limits": {
+        "maxOperations": 100,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    },
+    "budgetAfter": {
+      "operations": 1,
+      "objects": 0,
+      "bytes": 16,
+      "deadlineAt": 302932.404978,
+      "limits": {
+        "maxOperations": 100,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    },
+    "providerTelemetry": {
+      "requests": 0,
+      "requestBytes": 0,
+      "responseBytes": 0,
+      "transferredBytes": 0,
+      "throttleResponses": 0,
+      "retries": 0,
+      "retryAfterSeconds": [],
+      "backoffMs": 0,
+      "failures": {},
+      "byteMethod": "UTF-8 application payload bytes submitted or consumed"
+    },
+    "manifest": {
+      "artifact": "cleanup-manifest.json",
+      "manifestId": "syn-cleanup-s0-github-live",
+      "manifestNonce": "d1b86b39-e2e5-4a30-942a-52facc6efd53",
+      "digest": "sha256:035ae4a1275c14c7e8edaa4eb2d3f80e6d58df258599442a57eb344166a89103",
+      "schemaVersion": 4,
+      "revision": 1,
+      "resourceCount": 1,
+      "cleanedCount": 0,
+      "phases": {
+        "recorded": 1,
+        "prepared": 0,
+        "mutating": 0,
+        "deleted": 0,
+        "cleaned": 0
+      }
+    },
+    "manifestDocument": {
+      "schemaVersion": 4,
+      "syntheticData": true,
+      "revision": 1,
+      "runId": "s0-github-live",
+      "ownershipMarker": "tippani-s0:s0-github-live",
+      "manifestId": "syn-cleanup-s0-github-live",
+      "coordinatesHash": "sha256:50b1e695f73e2a6b9d1f16fe3068cd4dd3991611b0c51db4df5899301765932d",
+      "effectiveTargetHash": "dry-run-unapproved",
+      "manifestNonce": "d1b86b39-e2e5-4a30-942a-52facc6efd53",
+      "resources": [
+        {
+          "kind": "github-ref",
+          "id": "refs/heads/tippani-s0/s0-github-live",
+          "runId": "s0-github-live",
+          "ownershipMarker": "tippani-s0:s0-github-live",
+          "coordinatesHash": "sha256:50b1e695f73e2a6b9d1f16fe3068cd4dd3991611b0c51db4df5899301765932d",
+          "effectiveTargetHash": "dry-run-unapproved",
+          "manifestNonce": "d1b86b39-e2e5-4a30-942a-52facc6efd53",
+          "phase": "recorded",
+          "cleaned": false
+        }
+      ],
+      "manifestDigest": "sha256:035ae4a1275c14c7e8edaa4eb2d3f80e6d58df258599442a57eb344166a89103"
+    }
+  }
+}

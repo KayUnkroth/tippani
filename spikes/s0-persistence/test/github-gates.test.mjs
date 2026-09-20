@@ -8,6 +8,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
+import { conditionalDeleteGitHubRef } from "../src/adapters/github-ref-delete.mjs";
 import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
@@ -279,10 +280,14 @@ await check("GitHub initialize rejects a foreign preexisting run branch", async 
   assert.equal(repo.stats.markerWrites, 0);
 });
 
-await check("GitHub teardown fails closed when REST cannot delete by expected SHA", async () => {
+await check("GitHub teardown conditionally deletes the exact prepared ref", async () => {
   const runId = "s0-github-cleanup";
-  let deletes = 0;
-  const store = new GitHubRepoStore({
+  const expectedSha = "a".repeat(40);
+  const baseSha = "b".repeat(40);
+  let deleted = false;
+  let deleteInput;
+  let store;
+  store = new GitHubRepoStore({
     dryRun: false,
     owner: "O",
     repo: "R",
@@ -290,17 +295,31 @@ await check("GitHub teardown fails closed when REST cannot delete by expected SH
     cleanupManifestId: `syn-cleanup-${runId}`,
     effectiveTargetHash: "sha256:syn-target",
     githubToken: "syn-token",
-    fetchImpl: async (_url, options) => {
-      if (options.method === "GET") {
+    fetchImpl: async (url, options) => {
+      if (url.includes("/contents/.tippani-s0-run")) {
         return {
           ok: true,
           status: 200,
-          headers: new Headers({ ETag: "\"ref-v1\"" }),
-          json: async () => ({ object: { sha: "tip-1" } }),
+          headers: new Headers(),
+          json: async () => ({
+            content: b64(store.runMarkerContent(baseSha)),
+            sha: store.runMarkerBlobSha(baseSha),
+          }),
         };
       }
-      deletes++;
-      return { ok: true, status: 204, headers: new Headers() };
+      return deleted
+        ? { ok: false, status: 404, headers: new Headers(), json: async () => ({}) }
+        : {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({ object: { sha: expectedSha } }),
+        };
+    },
+    deleteRef: async (input) => {
+      deleteInput = input;
+      deleted = true;
+      return { ok: true };
     },
   });
   await assert.rejects(store.cleanup(), /manifest authorization/);
@@ -315,19 +334,23 @@ await check("GitHub teardown fails closed when REST cannot delete by expected SH
     },
   }, store);
   await store.prepareCleanup(authorization);
-  await assert.rejects(
-    store.cleanup(authorization),
-    (error) => error.code === "cleanup_unsupported",
-  );
-  assert.equal(deletes, 0);
-  assert.equal(authorization.manifest.authorize(authorization.resource), true);
+  await store.cleanup(authorization);
+  assert.equal(deleteInput.ref, `refs/heads/tippani-s0/${runId}`);
+  assert.equal(deleteInput.expectedSha, expectedSha);
+  assert.equal(deleteInput.token, "syn-token");
+  assert.equal(authorization.manifest.phase(authorization.resource), "cleaned");
+  assert.equal(authorization.manifest.authorize(authorization.resource), false);
+  assert.equal(JSON.stringify(store.providerOperationManifest()).includes("syn-token"), false);
 });
 
-await check("a moved GitHub ref survives unsupported cleanup and remains in the manifest", async () => {
+await check("a moved GitHub ref rejects the lease and remains in the manifest", async () => {
   const runId = "s0-github-cleanup-race";
-  let tip = "tip-1";
-  let deletes = 0;
-  const store = new GitHubRepoStore({
+  const preparedTip = "c".repeat(40);
+  const movedTip = "d".repeat(40);
+  const baseSha = "e".repeat(40);
+  let tip = preparedTip;
+  let store;
+  store = new GitHubRepoStore({
     dryRun: false,
     owner: "O",
     repo: "R",
@@ -335,17 +358,28 @@ await check("a moved GitHub ref survives unsupported cleanup and remains in the 
     cleanupManifestId: `syn-cleanup-${runId}`,
     effectiveTargetHash: "sha256:syn-target",
     githubToken: "syn-token",
-    fetchImpl: async (_url, options) => {
-      if (options.method === "GET") {
+    fetchImpl: async (url) => {
+      if (url.includes("/contents/.tippani-s0-run")) {
         return {
           ok: true,
           status: 200,
           headers: new Headers(),
-          json: async () => ({ object: { sha: tip } }),
+          json: async () => ({
+            content: b64(store.runMarkerContent(baseSha)),
+            sha: store.runMarkerBlobSha(baseSha),
+          }),
         };
       }
-      deletes++;
-      return { ok: true, status: 204, headers: new Headers() };
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ object: { sha: tip } }),
+      };
+    },
+    deleteRef: async ({ expectedSha }) => {
+      assert.equal(expectedSha, preparedTip);
+      return { ok: false, reason: "lease_rejected" };
     },
   });
   const authorization = createCleanupAuthorization({
@@ -359,10 +393,10 @@ await check("a moved GitHub ref survives unsupported cleanup and remains in the 
     },
   }, store);
   await store.prepareCleanup(authorization);
-  tip = "tip-2";
-  await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_unsupported");
-  assert.equal(deletes, 0);
-  assert.equal(tip, "tip-2");
+  tip = movedTip;
+  await assert.rejects(store.cleanup(authorization), (error) => error.code === "cleanup_conflict");
+  assert.equal(tip, movedTip);
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
   assert.equal(authorization.manifest.authorize(authorization.resource), true);
 });
 
@@ -403,6 +437,135 @@ await check("GitHub cleanup rechecks an absent ref and rejects concurrent creati
   );
   assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
   assert.equal(authorization.manifest.authorize(authorization.resource), true);
+});
+
+await check("native Git cleanup rejects unsafe input before spawning", async () => {
+  await assert.rejects(
+    conditionalDeleteGitHubRef({
+      owner: "O",
+      repository: "R",
+      ref: "refs/heads/.hidden",
+      expectedSha: "a".repeat(40),
+      token: "syn-token",
+    }),
+    TypeError,
+  );
+  await assert.rejects(
+    conditionalDeleteGitHubRef({
+      owner: "O",
+      repository: "R",
+      ref: "refs/heads/safe",
+      expectedSha: "a".repeat(40),
+      token: "unsafe\ntoken",
+    }),
+    TypeError,
+  );
+});
+
+await check("GitHub cleanup returns to prepared after a confirmed authentication failure", async () => {
+  const runId = "s0-github-cleanup-auth";
+  const expectedSha = "f".repeat(40);
+  const baseSha = "1".repeat(40);
+  let store;
+  store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "O",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    githubToken: "syn-token",
+    fetchImpl: async (url) => url.includes("/contents/.tippani-s0-run")
+      ? {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({
+          content: b64(store.runMarkerContent(baseSha)),
+          sha: store.runMarkerBlobSha(baseSha),
+        }),
+      }
+      : {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ object: { sha: expectedSha } }),
+      },
+    deleteRef: async () => ({ ok: false, reason: "authentication_failed" }),
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "github",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { owner: "O", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "provider_error" && error.reason === "authentication_failed",
+  );
+  assert.equal(authorization.manifest.phase(authorization.resource), "prepared");
+});
+
+await check("GitHub cleanup preserves mutating state when absence cannot be confirmed", async () => {
+  const runId = "s0-github-cleanup-reconcile";
+  const expectedSha = "2".repeat(40);
+  const baseSha = "3".repeat(40);
+  let deletionAttempted = false;
+  let store;
+  store = new GitHubRepoStore({
+    dryRun: false,
+    owner: "O",
+    repo: "R",
+    runId,
+    cleanupManifestId: `syn-cleanup-${runId}`,
+    effectiveTargetHash: "sha256:syn-target",
+    githubToken: "syn-token",
+    fetchImpl: async (url) => {
+      if (deletionAttempted) return { ok: false, status: 503, headers: new Headers() };
+      if (url.includes("/contents/.tippani-s0-run")) {
+        return {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: async () => ({
+            content: b64(store.runMarkerContent(baseSha)),
+            sha: store.runMarkerBlobSha(baseSha),
+          }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        headers: new Headers(),
+        json: async () => ({ object: { sha: expectedSha } }),
+      };
+    },
+    deleteRef: async () => {
+      deletionAttempted = true;
+      return { ok: true };
+    },
+  });
+  const authorization = createCleanupAuthorization({
+    runId,
+    backingPath: "github",
+    sandbox: {
+      ownershipMarker: `tippani-s0:${runId}`,
+      effectiveTargetHash: "sha256:syn-target",
+      coordinates: { owner: "O", repository: "R" },
+      cleanup: { manifestId: `syn-cleanup-${runId}` },
+    },
+  }, store);
+  await store.prepareCleanup(authorization);
+  await assert.rejects(
+    store.cleanup(authorization),
+    (error) => error.code === "cleanup_indeterminate" && error.requiresReconciliation === true,
+  );
+  assert.equal(authorization.manifest.phase(authorization.resource), "mutating");
 });
 
 console.log(`s0-github-gates: ${pass} passed, ${fail} failed`);

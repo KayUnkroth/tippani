@@ -22,9 +22,10 @@ import {
   naApprovalErrors,
 } from "./eligibility.mjs";
 import { runHarness } from "./runner.mjs";
-import { combineResults, campaignVariability } from "./aggregate-campaigns.mjs";
+import { combineResults, runVariability } from "./aggregate-runs.mjs";
 import { verifyRetainedSyncProof } from "./sync-evidence.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
+import { configurationDirectory, runDirectory, spikeRoot } from "./paths.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const RESULT_STATUSES = new Set(["Pass", "Fail", "Blocked", "Incomplete", "N/A"]);
@@ -93,12 +94,12 @@ function validateLinkedRunIdentity(linked, config, label) {
 }
 
 // A byte-hash proves the linked file is unmodified; it does not prove the file
-// belongs to this aggregate. This parses every linked campaign raw, validates
+// belongs to this aggregate. This parses every linked run raw, validates
 // its evidence identity and result schema, and recomputes the aggregate status
-// and per-campaign positions so a Pass cannot be claimed against an unrelated or
+// and per-run positions so a Pass cannot be claimed against an unrelated or
 // stale run.
 const NONDETERMINISTIC_RESULT_KEYS = new Set(["durationMs"]);
-const SYNC_AGGREGATE_ANNOTATIONS = new Set(["separateCompatibilityReport", "providerCampaigns"]);
+const SYNC_AGGREGATE_ANNOTATIONS = new Set(["separateCompatibilityReport", "providerRuns"]);
 
 // Strips only explicitly nondeterministic metadata so the complete recomputed
 // result (status, measurements, raw samples, throttle/retry totals, complexity,
@@ -120,51 +121,51 @@ function canonicalSyncResult(result) {
   return base;
 }
 
-export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {}) {
+export function verifyLinkedRuns(run, config, { artifactPath = null } = {}) {
   const errors = [];
   if (!artifactPath) return errors;
   const baseDirectory = path.dirname(artifactPath);
   const resultsRoot = path.dirname(baseDirectory);
-  const campaigns = Array.isArray(run?.campaigns) ? run.campaigns : [];
+  const runs = Array.isArray(run?.runs) ? run.runs : [];
   const approvalByName = new Map(
-    (Array.isArray(run?.campaignApprovals) ? run.campaignApprovals : []).map((item) => [item.name, item]),
+    (Array.isArray(run?.runApprovals) ? run.runApprovals : []).map((item) => [item.name, item]),
   );
-  const linkedCampaigns = [];
-  let recomputable = campaigns.length > 0;
-  for (const campaign of campaigns) {
-    const label = campaign?.name || "campaign";
-    const { run: linked, error } = readLinkedRun(baseDirectory, campaign?.raw, resultsRoot);
+  const linkedRuns = [];
+  let recomputable = runs.length > 0;
+  for (const run of runs) {
+    const label = run?.name || "run";
+    const { run: linked, error } = readLinkedRun(baseDirectory, run?.raw, resultsRoot);
     if (error) { errors.push(`${label} ${error}`); recomputable = false; continue; }
     const { errors: identityErrors } = validateLinkedRunIdentity(linked, config, label);
     if (identityErrors.length) { errors.push(...identityErrors); recomputable = false; }
-    if (linked?.configuration?.runId !== campaign?.runId) {
-      errors.push(`${label} linked raw runId does not match the aggregate campaign entry`);
+    if (linked?.configuration?.runId !== run?.runId) {
+      errors.push(`${label} linked raw runId does not match the aggregate run entry`);
       recomputable = false;
     }
     const linkedSandbox = linked?.preflight?.sandbox || {};
-    const claimedApproval = approvalByName.get(campaign?.name);
+    const claimedApproval = approvalByName.get(run?.name);
     if (!claimedApproval || claimedApproval.effectiveTargetHash !== linkedSandbox.effectiveTargetHash) {
       errors.push(`${label} approval target hash does not match the linked preflight`);
     }
     if (stableJson(claimedApproval?.approval) !== stableJson(linkedSandbox.approval)) {
       errors.push(`${label} approval record does not match the linked preflight`);
     }
-    linkedCampaigns.push({ name: campaign?.name, run: linked });
+    linkedRuns.push({ name: run?.name, run: linked });
   }
   const claimedResults = Array.isArray(run?.results) ? run.results : [];
-  const campaignVariabilityValue = run?.campaignVariability;
-  const campaignVariabilityIsObject = campaignVariabilityValue !== null &&
-    typeof campaignVariabilityValue === "object" &&
-    !Array.isArray(campaignVariabilityValue);
-  if (!run || !("campaignVariability" in run)) {
-    errors.push("aggregate is missing campaignVariability");
-  } else if (!campaignVariabilityIsObject) {
-    errors.push("aggregate campaignVariability must be a non-null plain object");
+  const runVariabilityValue = run?.runVariability;
+  const runVariabilityIsObject = runVariabilityValue !== null &&
+    typeof runVariabilityValue === "object" &&
+    !Array.isArray(runVariabilityValue);
+  if (!run || !("runVariability" in run)) {
+    errors.push("aggregate is missing runVariability");
+  } else if (!runVariabilityIsObject) {
+    errors.push("aggregate runVariability must be a non-null plain object");
   }
-  if (!recomputable || linkedCampaigns.length !== campaigns.length) {
+  if (!recomputable || linkedRuns.length !== runs.length) {
     for (const result of claimedResults) {
       if (result.scenarioId === "S0-BCK-006") continue;
-      errors.push(`${result.scenarioId} is not backed by every linked campaign raw`);
+      errors.push(`${result.scenarioId} is not backed by every linked run raw`);
     }
     return errors;
   }
@@ -172,27 +173,27 @@ export function verifyLinkedCampaigns(run, config, { artifactPath = null } = {})
     .filter((id) => id !== "S0-BCK-006");
   let recomputed;
   try {
-    recomputed = combineResults(linkedCampaigns, expectedIds);
+    recomputed = combineResults(linkedRuns, expectedIds);
   } catch (error) {
-    errors.push(`linked campaigns could not be recomputed: ${error.message}`);
+    errors.push(`linked runs could not be recomputed: ${error.message}`);
     return errors;
   }
   const recById = new Map(recomputed.map((result) => [result.scenarioId, result]));
   for (const result of claimedResults) {
     if (result.scenarioId === "S0-BCK-006") continue;
     const rec = recById.get(result.scenarioId);
-    if (!rec) { errors.push(`${result.scenarioId} is not backed by every linked campaign raw`); continue; }
+    if (!rec) { errors.push(`${result.scenarioId} is not backed by every linked run raw`); continue; }
     if (stableJson(canonicalResult(rec)) !== stableJson(canonicalResult(result))) {
-      errors.push(`${result.scenarioId} aggregate result does not match the recomputed linked-campaign result`);
+      errors.push(`${result.scenarioId} aggregate result does not match the recomputed linked-run result`);
     }
   }
-  // campaignVariability is always required as a non-null plain object and is
+  // runVariability is always required as a non-null plain object and is
   // compared directly (never coerced) with the recomputed object, which is an
-  // explicit empty object when no per-campaign variability exists.
-  const recomputedVariability = campaignVariability(linkedCampaigns) || {};
-  if (campaignVariabilityIsObject &&
-      stableJson(campaignVariabilityValue) !== stableJson(recomputedVariability)) {
-    errors.push("aggregate campaignVariability does not match the recomputed linked-campaign variability");
+  // explicit empty object when no per-run variability exists.
+  const recomputedVariability = runVariability(linkedRuns) || {};
+  if (runVariabilityIsObject &&
+      stableJson(runVariabilityValue) !== stableJson(recomputedVariability)) {
+    errors.push("aggregate runVariability does not match the recomputed linked-run variability");
   }
   return errors;
 }
@@ -248,8 +249,8 @@ export function verifySeparateSync(run, config, { artifactPath = null } = {}) {
             linkedCompletedAt: linked?.completedAt || null,
             expectedConfigRevision: decisionConfigRevision(config),
             expectedSignerFingerprint: config?.sandbox?.syncProfile?.trustedSignerFingerprint || null,
-            providerApprovalTargetHashes: (run?.campaignApprovals || [])
-              .map((campaign) => campaign?.effectiveTargetHash)
+            providerApprovalTargetHashes: (run?.runApprovals || [])
+              .map((run) => run?.effectiveTargetHash)
               .filter((value) => typeof value === "string" && value),
           });
           for (const issue of proofErrors) {
@@ -303,32 +304,32 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
     }
   }
   if (["onedrive", "ado", "github"].includes(config.backingPath) && config.dryRun === false) {
-    if (run?.configuration?.campaignCount !== 3 || run?.campaigns?.length !== 3) {
-      errors.push("provider aggregate must contain exactly three retained campaigns");
+    if (run?.configuration?.runCount !== 3 || run?.runs?.length !== 3) {
+      errors.push("provider aggregate must contain exactly three retained runs");
     }
-    const campaigns = run?.campaigns || [];
+    const runs = run?.runs || [];
     const unique = (values) => new Set(values).size === values.length;
-    if (!unique(campaigns.map((item) => item.name)) ||
-        !unique(campaigns.map((item) => item.runId)) ||
-        !unique(campaigns.map((item) => item.raw)) ||
-        !unique(campaigns.map((item) => item.rawSha256)) ||
-        !unique(campaigns.map((item) => item.report)) ||
-        !unique(campaigns.map((item) => item.reportSha256))) {
-      errors.push("provider campaigns must have distinct names, run IDs, and artifact paths/digests");
+    if (!unique(runs.map((item) => item.name)) ||
+        !unique(runs.map((item) => item.runId)) ||
+        !unique(runs.map((item) => item.raw)) ||
+        !unique(runs.map((item) => item.rawSha256)) ||
+        !unique(runs.map((item) => item.report)) ||
+        !unique(runs.map((item) => item.reportSha256))) {
+      errors.push("provider runs must have distinct names, run IDs, and artifact paths/digests");
     }
     if (artifactPath) {
       const baseDirectory = path.dirname(artifactPath);
-      for (const campaign of campaigns) {
+      for (const run of runs) {
         for (const issue of [
-          verifyLinkedArtifact(baseDirectory, campaign.raw, campaign.rawSha256),
-          verifyLinkedArtifact(baseDirectory, campaign.report, campaign.reportSha256),
+          verifyLinkedArtifact(baseDirectory, run.raw, run.rawSha256),
+          verifyLinkedArtifact(baseDirectory, run.report, run.reportSha256),
         ].filter(Boolean)) {
-          errors.push(`${campaign.name || "campaign"} ${issue}`);
+          errors.push(`${run.name || "run"} ${issue}`);
         }
       }
     }
-    if (run?.campaignApprovals?.length !== 3 ||
-        run.campaignApprovals.some((item) =>
+    if (run?.runApprovals?.length !== 3 ||
+        run.runApprovals.some((item) =>
           !item.effectiveTargetHash ||
           item.approval?.targetHash !== item.effectiveTargetHash ||
           typeof item.approval?.approver !== "string" || !item.approval.approver.trim() ||
@@ -336,18 +337,15 @@ export function validateExistingRun(run, config, { artifactPath = null } = {}) {
           !Number.isFinite(Date.parse(item.approval.approvedAt)) ||
           Date.parse(item.approval.approvedAt) > approvalNow ||
           typeof item.approval?.reference !== "string" || !item.approval.reference.trim())) {
-      errors.push("provider campaigns lack structured approvals for their effective target hashes");
+      errors.push("provider runs lack structured approvals for their effective target hashes");
     }
     for (const result of results) {
       if (result.scenarioId === "S0-BCK-006") continue;
-      if (Object.keys(result.evidence?.campaigns || {}).length !== 3) {
-        errors.push(`${result.scenarioId} does not contain all three campaign positions`);
+      if (Object.keys(result.evidence?.runs || {}).length !== 3) {
+        errors.push(`${result.scenarioId} does not contain all three run positions`);
       }
     }
-    errors.push(...verifyLinkedCampaigns(run, config, { artifactPath }));
-    if (config.backingPath === "onedrive") {
-      errors.push(...verifySeparateSync(run, config, { artifactPath }));
-    }
+    errors.push(...verifyLinkedRuns(run, config, { artifactPath }));
   }
   return errors;
 }
@@ -400,11 +398,11 @@ function evidence(run, scenarioId, name) {
 }
 
 function reportPath(configurationId) {
-  return `../${configurationId}/outcome.md`;
+  return `${path.basename(configurationDirectory(configurationId))}/outcome.md`;
 }
 
 function rawPath(configurationId) {
-  return `../${configurationId}/raw-results.json`;
+  return `${path.basename(configurationDirectory(configurationId))}/raw-results.json`;
 }
 
 function linked(configurationId, text) {
@@ -488,10 +486,15 @@ function renderComparison({ runs, mappings, decision, generatedAt, validationFai
     "candidate mappings. `N/A` requires approver identity, approval date, and a reference.",
     "Stale, identity-mismatched, or incomplete artifacts are rejected as incomplete evidence.",
     "",
-    "**Known structural finding:** SQLite fails the current absolute `S0-CON-003` criterion",
-    "because `BEGIN IMMEDIATE` serializes writers database-wide. A rerun alone cannot close",
-    "that condition; closure requires revising the criterion or an independently approved,",
-    "scenario-specific rationale-backed `N/A`.",
+    "**Local SQLite applicability:** this configuration covers exactly one workspace in one",
+    "database, so `S0-CON-003` is `Not applicable`. Multiple independent workspaces writing",
+    "one shared SQLite database are out of scope and ineligible because `BEGIN IMMEDIATE`",
+    "serializes writes database-wide. This applicability decision requires no waiver.",
+    "",
+    "**Local generation-CAS applicability:** this configuration covers a private local",
+    "workspace and same-workspace process conflicts. Linking, synchronizing, replicating,",
+    "or merging multiple local workspaces is out of scope. `S0-CON-003` and provider-only",
+    "security gates are `Not applicable`; `S0-REC-002` remains applicable.",
     "",
     decision.mapping
       ? "Relative metrics may support the selected eligible mapping; they do not override an absolute gate."
@@ -509,7 +512,7 @@ function renderComparison({ runs, mappings, decision, generatedAt, validationFai
         `| ${configurationId} | ${errors.join("; ").replaceAll("|", "\\|")} |`),
       "",
       "These artifacts must be regenerated from the current source. Provider artifacts require new",
-      "live campaigns with effective target identity/coordinates bound to an approved target hash.",
+      "live runs with effective target identity/coordinates bound to an approved target hash.",
       "",
     );
   }
@@ -639,8 +642,8 @@ function renderComparison({ runs, mappings, decision, generatedAt, validationFai
     "",
     "| Condition | Owner | Evidence required |",
     "|---|---|---|",
-    "| Current local evidence | S0 implementation owner | Regenerate local CAS. SQLite `S0-CON-003` is a structural fail; close it only by revising the criterion or approving a scenario-specific rationale-backed `N/A`. |",
-    "| Current provider evidence | S0 provider test owner | Three complete live campaigns per provider with approved target hash, persistent offline queue, full fault coverage, authorized conditional cleanup, and enforced budgets. |",
+    "| Current local evidence | S0 implementation owner | Regenerate Local CAS and Local SQLite against their dedicated applicability profiles. For both, exclude `S0-CON-003` and provider-only security gates through applicability metadata. |",
+    "| Current provider evidence | S0 provider test owner | Three complete live runs per provider with approved target hash, persistent offline queue, full fault coverage, authorized conditional cleanup, and enforced budgets. |",
     "| Performance evidence | Performance investigator | Fresh-process populated-store startup/enumeration, memory, and storage-layer write-amplification measurements. |",
     "| Architecture decision | Independent reviewer / ADR approver | Select an eligible mapping, review conditions, and record dated approval separately from generated evidence. |",
     "",
@@ -669,8 +672,9 @@ export async function buildComparison({
   const validationFailures = [];
   for (const configPath of selectedConfigs) {
     const config = JSON.parse(fs.readFileSync(configPath, "utf8"));
-    const existingPath = path.join(root, "results", config.configurationId, "raw-results.json");
+    const existingPath = path.join(configurationDirectory(config.configurationId), "raw-results.json");
     let run;
+    let artifactPath = existingPath;
     let validationErrors = [];
     if (useExisting) {
       if (!fs.existsSync(existingPath)) {
@@ -688,11 +692,13 @@ export async function buildComparison({
         run = invalidRun(config, validationErrors, generatedAt);
       }
     } else {
-      ({ run } = await runHarness({
+      const executed = await runHarness({
         config,
-        outputDir: path.join(root, "results", config.configurationId),
-      }));
-      validationErrors = validateExistingRun(run, config, { artifactPath: existingPath });
+        outputDir: runDirectory(config.configurationId, config.runId),
+      });
+      run = executed.run;
+      artifactPath = executed.artifacts.rawPath;
+      validationErrors = validateExistingRun(run, config, { artifactPath });
       if (validationErrors.length) {
         validationFailures.push({ configurationId: config.configurationId, errors: validationErrors });
         run = invalidRun(config, validationErrors, generatedAt);
@@ -740,7 +746,7 @@ async function main() {
   const selectedConfigs = configPaths.length ? configPaths : defaultConfigs;
   const outputDir = path.resolve(
     args.find((arg) => arg.startsWith("--output="))?.slice("--output=".length) ||
-    path.join(root, "results", "comparison"),
+    spikeRoot,
   );
   const selectedMappingId = args.find((arg) => arg.startsWith("--mapping="))
     ?.slice("--mapping=".length) || null;

@@ -123,9 +123,24 @@ await check("source identity is stable across LF and CRLF checkouts", () => {
 await check("applicability profiles cover the catalog and separate provider-specific gates", () => {
   assert(APPLICABILITY_PROFILES.local.includes("S0-BCK-001"));
   assert(!APPLICABILITY_PROFILES.local.includes("S0-BCK-002"));
+  assert(APPLICABILITY_PROFILES["local-sqlite"].includes("S0-SEC-003"));
+  for (const id of [
+    "S0-CON-003",
+    "S0-SEC-001", "S0-SEC-002", "S0-SEC-004", "S0-SEC-005", "S0-SEC-006",
+  ]) {
+    assert(!APPLICABILITY_PROFILES["local-sqlite"].includes(id));
+    assert(!APPLICABILITY_PROFILES["local-cas"].includes(id));
+  }
+  assert(APPLICABILITY_PROFILES["local-cas"].includes("S0-REC-002"));
+  assert(APPLICABILITY_PROFILES["local-cas"].includes("S0-SEC-003"));
   assert(APPLICABILITY_PROFILES.onedrive.includes("S0-BCK-002"));
   assert(!APPLICABILITY_PROFILES.onedrive.includes("S0-BCK-003"));
+  assert(!APPLICABILITY_PROFILES.onedrive.includes("S0-BCK-006"));
+  assert.deepEqual(APPLICABILITY_PROFILES["onedrive-sync"], ["S0-BCK-006"]);
   assert(APPLICABILITY_PROFILES.ado.includes("S0-BCK-003"));
+  assert(!APPLICABILITY_PROFILES.ado.includes("S0-BCK-002"));
+  assert(!APPLICABILITY_PROFILES.ado.includes("S0-BCK-004"));
+  assert(!APPLICABILITY_PROFILES.ado.includes("S0-BCK-006"));
   assert(APPLICABILITY_PROFILES.github.includes("S0-BCK-004"));
   assert.deepEqual(applicableScenarioIds(config), config.scenarioIds);
 });
@@ -1107,7 +1122,7 @@ await check("corrected local SQLite gates report checksum coverage, real migrati
   ));
   const { run } = await runHarness({
     config: sqliteConfig,
-    scenarioIds: ["S0-CON-003", "S0-CRS-003", "S0-COR-001", "S0-PER-001", "S0-PER-003"],
+    scenarioIds: ["S0-CON-003", "S0-CRS-003", "S0-COR-001", "S0-REC-002", "S0-PER-001", "S0-PER-003"],
     writeArtifacts: false,
   });
   const byId = new Map(run.results.map((result) => [result.scenarioId, result]));
@@ -1117,6 +1132,9 @@ await check("corrected local SQLite gates report checksum coverage, real migrati
   assert.equal(byId.get("S0-CRS-003").evidence.operation, "migration");
   assert.equal(byId.get("S0-COR-001").status, "Pass");
   assert.equal(byId.get("S0-COR-001").evidence.validJsonChecksumTamperRejected, true);
+  assert.equal(byId.get("S0-REC-002").status, "N/A");
+  assert.equal(byId.get("S0-REC-002").approval.reference,
+    "REVISION-PLAN.md#local-sqlite-applicability-decision");
   assert.equal(byId.get("S0-PER-001").status, "Incomplete");
   assert.equal(byId.get("S0-PER-003").status, "Incomplete");
 });

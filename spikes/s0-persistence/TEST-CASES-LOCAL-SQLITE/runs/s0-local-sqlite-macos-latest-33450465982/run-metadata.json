@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "configurationId": "CFG-LOCAL-SQLITE",
+  "runId": "s0-local-sqlite-macos-latest-33450465982",
+  "startedAt": "2026-08-31T23:23:29.170Z",
+  "completedAt": "2026-08-31T23:23:30.523Z",
+  "evidenceIdentity": null,
+  "environment": {
+    "os": "darwin 25.5.0",
+    "architecture": "arm64",
+    "cpuModel": "Apple M1 (Virtual)",
+    "logicalCpuCount": 3,
+    "totalMemoryBytes": 7516192768,
+    "nodeVersion": "24.18.0",
+    "providerApiVersion": "N/A",
+    "configuredPlatform": "macOS/APFS",
+    "filesystem": "APFS",
+    "temporaryStoreRoot": "tippani-s0-s0-local-sqlite-macos-latest-33450465982-pdpFh8",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "GitHub-hosted runner workspace on APFS",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=24.18.0; sqlite=3.53.1",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "Ephemeral GitHub-hosted runner",
+    "processTopology": "Independent OS child processes for concurrency and kill tests"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 4,
+  "syntheticData": true,
+  "revision": 1,
+  "runId": "s0-ado-live",
+  "ownershipMarker": "tippani-s0:s0-ado-live",
+  "manifestId": "syn-cleanup-s0-ado-live",
+  "coordinatesHash": "sha256:5460cb10e698a93a3ee3c37214c8f923c87703ba72f8c49f9e5f2cea9b04c6e3",
+  "effectiveTargetHash": "dry-run-unapproved",
+  "manifestNonce": "61d9d93f-03a3-4817-afa4-ae00ac67a0bb",
+  "resources": [
+    {
+      "kind": "ado-ref",
+      "id": "refs/heads/tippani-s0/s0-ado-live",
+      "runId": "s0-ado-live",
+      "ownershipMarker": "tippani-s0:s0-ado-live",
+      "coordinatesHash": "sha256:5460cb10e698a93a3ee3c37214c8f923c87703ba72f8c49f9e5f2cea9b04c6e3",
+      "effectiveTargetHash": "dry-run-unapproved",
+      "manifestNonce": "61d9d93f-03a3-4817-afa4-ae00ac67a0bb",
+      "marker": {
+        "kind": "ado-git-item",
+        "id": ".tippani-s0-run",
+        "digest": "sha256:6495be5b5267c98a56ebcb5a3dac17dbabb55010ec0bdf674fcfd51512bbb6f8"
+      },
+      "phase": "recorded",
+      "cleaned": false
+    }
+  ],
+  "manifestDigest": "sha256:170a9054848e5aa7c897dcaa30e7f3ab39e546b3daa557c47d2d883037dd79e2"
+}

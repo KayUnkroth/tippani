@@ -8,7 +8,18 @@ included in the npm package.
 persistence mapping is selected, and no production runtime integration is
 authorized. All checked-in local, cross-platform, synced-folder, and live
 provider results are historical and invalid/incomplete for the repaired source.
-Fresh campaigns plus independent review and ADR sign-off are follow-up work.
+Fresh runs plus independent review and ADR sign-off are follow-up work.
+
+## Documentation structure
+
+- This README is the reviewer entry point and navigation guide.
+- [The spike specification](2026-08-14-s0-windows-persistence-spike.md) owns requirements, scenarios, and applicability.
+- [The revision plan](REVISION-PLAN.md) owns remediation work and the evidence protocol.
+- Each `TEST-CASES-<configuration>/` package owns its generated case index,
+  retained `runs/<run-id>/` evidence, and configuration outcome.
+- [The comparison](comparison.md) is the generated configuration and mapping handoff.
+- [The ADR](ADR-s0-persistence-architecture.md) records only the decision and
+  references validated evidence.
 
 ## Current scope
 
@@ -107,8 +118,8 @@ still fail closed and only dry-run.
 
 `spike:s0:compare` can execute configurations, while `compare.mjs
 --use-existing` only validates retained artifacts and never silently reruns a
-provider. The current [architecture-mapping handoff](results/comparison/comparison.md)
-rejects the checked-in campaigns as stale/incomplete after the review fixes.
+  provider. The current [architecture-mapping handoff](comparison.md)
+rejects the checked-in runs as stale/incomplete after the review fixes.
 It is the only source of current result counts and contains:
 
 - The applicability-aware five-configuration matrix.
@@ -123,12 +134,12 @@ It is the only source of current result counts and contains:
 - Links to each outcome report, redacted preflight, and raw JSON evidence.
 - Cross-platform, synced-folder, ADR-approval, and sign-off conditions.
 
-The README intentionally makes no historical live-result claim. Wiping or
-regenerating `results/` cannot leave a contradictory summary here.
+The README intentionally makes no historical live-result claim. Replacing or
+regenerating configuration-owned `runs/` cannot leave a contradictory summary here.
 
-## Superseded campaign checklist
+## Superseded run checklist
 
-The checked boxes below describe the pre-review campaign and are retained only
+The checked boxes below describe the pre-review runs and are retained only
 as history. They are not current evidence and do not make either architecture
 mapping eligible.
 
@@ -173,9 +184,9 @@ mapping eligible.
 - [x] Implement the measurement and reporting hooks required by the detailed
   performance protocol below.
 - [x] Run the full harness, detection-power suites, and report-integrity tests
-  immediately before each evidence campaign.
+  immediately before each evidence run.
 
-### Live-campaign preflight
+### Live-run preflight
 
 - [x] Allocate a fresh run ID, ownership marker, provider namespace, cleanup
   manifest, and unexpired cleanup deadline for each live provider run.
@@ -212,15 +223,15 @@ mapping eligible.
 - [x] **Provider-operation warm-up and repetitions:** For `PER-004`, perform
   three discarded provider reads, then collect 6 small, 4 medium, and 2 stress
   samples per provider for remote CAS and collaborator discovery.
-- [x] **Campaign repetition:** Run the complete provider performance campaign
+- [x] **Run repetition:** Run the complete provider performance suite
   at least three times per provider under the recorded environment. Retain each
-  campaign separately so between-run variation is visible rather than merged
+  run separately so between-run variation is visible rather than merged
   into one sample set.
 - [x] **Timing method:** Measure elapsed time with the monotonic
   `performance.now()` clock around only the operation under test; exclude setup,
   warm-up, and cleanup from operation latency.
 - [x] **Non-operation timing:** Record setup, warm-up, cleanup, retry-backoff,
-  and injected-delay time separately where those durations affect campaign
+  and injected-delay time separately where those durations affect run
   interpretation.
 - [x] **Reported statistics:** Retain every raw sample and report sample count,
   minimum, p50, p95, maximum, mean, and standard deviation for each metric and
@@ -229,7 +240,7 @@ mapping eligible.
   OS/filesystem, runtime and dependency versions, network path/region, provider
   API version, sync-client state where applicable, repository protections and
   permissions, process topology, and known environmental limitations for every
-  measured campaign.
+  measured run.
 - [x] **Provider requests and bytes:** Record total requests, requests per
   mutation, application payload bytes sent and received, retries, and operation
   manifests. State explicitly that HTTP/TLS headers are excluded from the
@@ -328,7 +339,7 @@ mapping eligible.
 - [x] Remove stale outcome artifacts and regenerate reports from the current
   applicability-aware harness.
 - [x] Regenerate all five configuration reports and the architecture-mapping
-  handoff from one reviewed campaign revision.
+  handoff from one reviewed run revision.
 - [x] Verify every applicable scenario has a result and every summary cell
   links to its configuration report and raw JSON evidence.
 - [x] Keep relative measurements provisional and unranked until at least one
@@ -347,13 +358,16 @@ mapping eligible.
 - [x] Implement the source-level review fixes and deterministic negative tests.
 - [x] Regenerate the comparison in fail-closed mode so stale evidence is
   explicitly rejected and no mapping is selected.
-- [ ] Regenerate local CAS and SQLite results from the current source. SQLite is
-  not eligible under the current absolute `S0-CON-003` criterion because
-  `BEGIN IMMEDIATE` serializes writers database-wide. This is a known structural
-  failure: a rerun alone cannot close it. Closure requires revising the criterion
-  or an independently approved, scenario-specific rationale-backed `N/A`.
-- [ ] Run three new live campaigns for OneDrive, ADO, and GitHub with effective
+- [ ] Regenerate local CAS and SQLite results from the current source. Evaluate
+  each against its dedicated applicability profile. For Local CAS, linking,
+  synchronizing, replicating, or merging multiple local workspaces is out of
+  scope. For Local SQLite, multiple independent workspaces writing one shared
+  database are out of scope and ineligible because writes serialize database-wide.
+- [ ] Run at least three new live runs for OneDrive, ADO, and GitHub with effective
   identity and coordinates bound to a dated approved target hash.
+- [ ] Provision one approved two-VM Azure Windows campaign, run all provider
+  configurations against it with isolated approvals and namespaces, then verify
+  provider cleanup and resource-group deletion.
 - [ ] Rerun native cross-platform evidence because the shared contract,
   checksum, locking, migration, and result schema changed.
 - [ ] Implement the corrected fresh-process startup/enumeration, memory, and
@@ -366,7 +380,8 @@ mapping eligible.
 npm run spike:s0:test        # harness, detection-power, durable-detection, provider-dryrun, onedrive, and provider-gate (onedrive/ado/github) suites
 npm run spike:s0:selftest    # reference adapter self-test
 npm run spike:s0:compare     # run all five configurations and emit the mapping handoff
-npm run spike:s0:aggregate   # combine only three complete, revision-compatible campaigns
+npm run spike:s0:aggregate   # combine complete, revision-compatible runs
+npm run spike:s0:docs        # regenerate configuration READMEs and case indexes
 node spikes\s0-persistence\src\compare.mjs --use-existing  # validate retained evidence; currently exits nonzero/incomplete
 node spikes\s0-persistence\src\compare.mjs --use-existing --mapping=MAP-ENVELOPE  # only after this mapping is eligible
 npm run spike:s0:preflight   # emit the provider preflight sheet + dry-run manifest
@@ -374,8 +389,8 @@ node spikes\s0-persistence\src\cli.mjs --list
 node spikes\s0-persistence\src\cli.mjs --config spikes\s0-persistence\config\local-cas.json --dry-run
 ```
 
-Generated results go under `spikes\s0-persistence\results\`. The checked-in
-provider campaigns are historical and currently rejected by the comparison
+Generated results go under each `spikes\s0-persistence\TEST-CASES-*\runs\<run-id>\`
+directory. The checked-in provider runs are historical and currently rejected by the comparison
 validator. Publish replacements only after confirming that they are complete,
 synthetic, credential-free, revision-compatible, and produced under an approved
 effective-target receipt.
@@ -384,8 +399,34 @@ Identity tokens for live provider runs are supplied externally at runtime and
 never stored in configuration or reports. Other runtime inputs, including
 provider coordinates and optional performance-environment details, follow the
 same external-supply rule. Missing runtime inputs produce `Blocked` evidence
-when a campaign can be recorded safely; an unresolved or mismatched approved
+when a run can be recorded safely; an unresolved or mismatched approved
 target prevents the live run before any provider call.
+
+### Planned shared Azure VM campaign
+
+Live provider evidence will run from one shared campaign environment containing
+two independently isolated Azure Windows VMs. Provisioning and bootstrap are
+preparation steps for the complete provider campaign, rather than repeated for
+each provider. One client process runs on each VM for OneDrive API, Azure DevOps,
+GitHub, and the separate OneDrive synced-folder evaluation. Provider runs remain
+independent: each has its own target approval, namespace, budget, cleanup
+manifest, and evidence package, all bound to one sanitized deployment receipt.
+
+The Azure subscription identity provisions infrastructure only. Provider
+identities are supplied separately at runtime. A personal Microsoft account,
+including a Hotmail account with OneDrive Personal, may be the approved OneDrive
+identity; OneDrive for Business is not required. The Graph application must
+support personal Microsoft accounts and delegated `Files.ReadWrite`. The VMs do
+not need corporate-network membership. Entra join or Intune enrollment is an
+optional, separately approved prerequisite only when Conditional Access demands
+it.
+
+The campaign deploys one VM first for login and client compatibility validation,
+then deploys the second VM. After all provider runs, it removes provider-owned
+resources, deletes the run-owned synced folder, deprovisions the Azure resource
+group, and records confirmed absence. VM deployment automation and the stronger
+two-client signed-receipt format are planned work; the commands below do not yet
+provision this environment.
 
 The live environment is:
 
@@ -404,8 +445,8 @@ supply the four shared approval variables. Changing the credential identity, any
 coordinate, run ID, or namespace requires a new approval. `onedrive-live-smoke.mjs`
 additionally requires `S0_RUN_ID`.
 
-The synced-folder `S0-BCK-006` case runs separately on a Windows host with a
-running OneDrive sync client; it does not use the provider-API CAS token,
+The synced-folder `S0-BCK-006` case runs separately across both campaign VMs,
+each with an independent running OneDrive sync client; it does not use the provider-API CAS token,
 drive, or folder coordinates and never substitutes provider-API CAS evidence
 for synced-folder behavior. It carries a **distinct sync-approval record** whose
 `S0_SYNC_TARGET_HASH` must equal the computed sync target hash and must never be
@@ -416,29 +457,21 @@ identity are stored on the OneDrive aggregate and independently re-verified duri
 comparison.
 
 A synced-folder **Pass cannot come from an environment client count or an
-arbitrary/self-signed JSON self-report.** The only credible closure is a retained
-cross-client evidence artifact whose **detached Ed25519 signature covers the whole
-authorization context** — `syncTargetHash`, config revision, signer fingerprint,
-the sync approval (`targetHash`/approver/date/reference), the `validatedAt` time,
-and the clients/outcomes — verified by Node's `crypto` against the trusted signer
-whose SPKI fingerprint is pinned into `syncProfile` (and therefore the config
-revision). The signed proof approval must canonically equal the runtime sync
-approval (approver/date/reference/targetHash) validated before the probe/write, so
-a proof approved for a different approval is rejected before any mutation. RSA/EC
-keys are rejected before verification, and an unkeyed SHA is forgeable and is not
-accepted. If no trusted key is configured, `Pass` is
-unreachable and the result is `Incomplete`. The signed authorization is retained
-**canonically identically** on both the raw run and the aggregate `separateSync`
-record; comparison requires the two copies to match, requires the retained
-authorization to be derived from (bound to) the signed proof, requires a valid
-finite linked-run `completedAt` for every retained Pass, and rejects any
-`validatedAt` after that `completedAt` or the current time. Because the
-temporal bounds use the signed `validatedAt` capped by the current clock, waiting
-can never make future-dated (e.g. a 2099 proof with a fabricated 2100 receipt)
-evidence valid. Until credible automatic proof exists, the **required future
-probe** is two independent OneDrive sync clients on separate devices that produce
-and sign such an artifact; a same-device handle probe only measures local
-compatibility and cannot close the gate.
+arbitrary/self-signed JSON self-report.** The planned credible closure requires
+each VM to sign its own receipt and the trusted coordinator to sign the combined
+cross-client artifact. The signatures bind the deployment receipt, sync target,
+config revision, signer fingerprints, sync approval
+(`targetHash`/approver/date/reference), validation time, ordered operations,
+generations, content hashes, conflict artifacts, recovery, final convergence,
+and cleanup. Node's `crypto` verifies the receipts against approved Ed25519 keys;
+RSA/EC keys and unkeyed hashes are not accepted.
+
+The signed approval must canonically equal the runtime sync approval validated
+before mutation. Raw-run and aggregate copies must remain canonically identical,
+and comparison rejects stale revisions or timestamps after run completion or the
+current time. Until the per-VM receipt producer and verifier are implemented,
+`S0-BCK-006` remains `Incomplete`; the existing same-device handle probe cannot
+close the gate.
 
 ## Detection power
 

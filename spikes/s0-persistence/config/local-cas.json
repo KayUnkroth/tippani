@@ -2,7 +2,7 @@
   "configurationId": "CFG-LOCAL-CAS",
   "adapter": "local-cas",
   "backingPath": "local",
-  "applicabilityProfile": "local",
+  "applicabilityProfile": "local-cas",
   "platform": "windows-ntfs",
   "scale": "small",
   "runId": "s0-local-cas-windows",

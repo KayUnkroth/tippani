@@ -26,6 +26,18 @@ const liveConfig = JSON.parse(fs.readFileSync(
   path.join(root, "config", "provider-onedrive-live.json"),
   "utf8",
 ));
+liveConfig.configurationId = "CFG-ONEDRIVE-SYNC";
+liveConfig.scenarioIds = ["S0-BCK-006"];
+liveConfig.sandbox.syncProfile = {
+  syncRootEnv: "S0_ONEDRIVE_SYNC_ROOT",
+  clientIdentityEnv: "S0_SYNC_CLIENT_IDENTITY",
+  clientStateEnv: "S0_SYNC_CLIENT_STATE",
+  requiredClientState: "verified-signed-in",
+  requireIndependentClients: true,
+  retainedEvidenceEnv: "S0_SYNC_CONFLICT_EVIDENCE",
+  signerPublicKeyEnv: "S0_SYNC_SIGNER_PUBLIC_KEY",
+  trustedSignerFingerprint: "sha256:REPLACE-WITH-APPROVED-SIGNER-SPKI-FINGERPRINT",
+};
 
 const approvedEnv = {
   S0_ONEDRIVE_SYNC_ROOT: "/approved/OneDrive/tippani-s0",

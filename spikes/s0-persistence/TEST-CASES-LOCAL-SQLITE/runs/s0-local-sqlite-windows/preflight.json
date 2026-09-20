@@ -1,0 +1,28 @@
+{
+  "configurationId": "CFG-LOCAL-SQLITE",
+  "runId": "s0-local-sqlite-windows",
+  "adapter": "local-sqlite",
+  "backingPath": "local",
+  "syntheticDataOnly": true,
+  "sandbox": {
+    "approved": true,
+    "kind": "local-temp",
+    "identityLabel": "Synthetic Local Harness",
+    "identityVerified": false,
+    "providerIdentity": null,
+    "ownershipMarker": "tippani-s0:s0-local-sqlite-windows",
+    "namespace": null,
+    "defaultBranchExcluded": false,
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [],
+    "cleanup": null,
+    "effectiveTargetHash": null,
+    "approval": null
+  },
+  "budgets": {
+    "maxOperations": 100,
+    "maxDurationMs": 300000,
+    "maxObjects": 10000,
+    "maxBytes": 104857600
+  }
+}

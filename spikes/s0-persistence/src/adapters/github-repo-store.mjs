@@ -29,6 +29,7 @@ import { assertCleanupAuthorized, cleanupCoordinatesHash } from "../cleanup-mani
 import { providerTargetHash } from "../preflight.mjs";
 import { ProviderCredentialBinding } from "../provider-identity.mjs";
 import { ReferenceMemoryWorkspaceStore } from "./reference-memory-store.mjs";
+import { conditionalDeleteGitHubRef } from "./github-ref-delete.mjs";
 import { PersistentPendingQueue } from "./persistent-pending-queue.mjs";
 import { ProviderTelemetry, retryAfterMilliseconds } from "./provider-telemetry.mjs";
 
@@ -61,6 +62,7 @@ export class GitHubRepoStore {
     ownershipMarker,
     cleanupManifestId = null,
     cleanupManifestNonce = null,
+    deleteRef = conditionalDeleteGitHubRef,
   } = {}) {
     this.dryRun = dryRun !== false;
     this.owner = owner || process.env.S0_GITHUB_OWNER || null;
@@ -82,6 +84,7 @@ export class GitHubRepoStore {
     this.ownershipMarker = ownershipMarker || `tippani-s0:${this.runId}`;
     this.cleanupManifestId = cleanupManifestId;
     this.cleanupManifestNonce = cleanupManifestNonce;
+    this.deleteRef = deleteRef;
     this.operations = [];
     this.liveProviderCalls = 0;
     this.telemetry = new ProviderTelemetry({ safetyBudget });
@@ -773,14 +776,84 @@ export class GitHubRepoStore {
       manifest.markCleaned(resource);
       return { deleted: this.branch, absent: true };
     }
-    this.record("cleanup-unsupported", {
-      ref: `refs/heads/${this.branch}`,
-      reason: "GitHub REST ref deletion has no expected-SHA precondition",
-    });
-    throw new WorkspaceStoreError(
-      "GitHub REST cleanup is unsupported without an atomic expected-SHA ref delete",
-      "cleanup_unsupported",
+    if (this.dryRun) {
+      manifest.markMutating(resource);
+      this.record("delete-ref-with-lease", {
+        ref: `refs/heads/${this.branch}`,
+        expectedSha: resource.condition.expectedSha,
+      });
+      manifest.markDeleted(resource);
+      manifest.markCleaned(resource);
+      return { deleted: this.branch, dryRun: true };
+    }
+    const expectedSha = resource.condition.expectedSha;
+    if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/i.test(expectedSha || "")) {
+      throw new WorkspaceStoreError("cleanup expected SHA is invalid", "cleanup_precondition_unavailable");
+    }
+    const ref = `refs/heads/${this.branch}`;
+    const reconcile = async () => {
+      const current = await this.gh("GET", `${this.repoBase()}/git/ref/heads/${this.branch}`);
+      if (current.status === 404) return { absent: true };
+      if (!current.ok) {
+        throw new WorkspaceStoreError(`cleanup reconciliation failed: ${current.status}`, "cleanup_indeterminate");
+      }
+      return { absent: false, sha: (await current.json())?.object?.sha };
+    };
+    if (phase === "mutating") {
+      const current = await reconcile();
+      if (current.absent) {
+        manifest.markDeleted(resource);
+        manifest.markCleaned(resource);
+        return { deleted: this.branch, reconciled: true };
+      }
+      if (current.sha !== expectedSha) {
+        manifest.markPrepared(resource);
+        throw new WorkspaceStoreError("cleanup ref changed after preparation", "cleanup_conflict");
+      }
+    } else if (phase !== "prepared") {
+      throw new WorkspaceStoreError(`cleanup resource phase is ${phase}`, "cleanup_precondition_unavailable");
+    }
+    await this.verifyRunMarker();
+    await this.telemetry.recordRequest();
+    const token = await this.credentialToken();
+    manifest.markMutating(resource);
+    this.record("delete-ref-with-lease", { ref, expectedSha });
+    this.liveProviderCalls++;
+    let result;
+    try {
+      result = await this.deleteRef({
+        owner: this.owner,
+        repository: this.repo,
+        ref,
+        expectedSha,
+        token,
+        signal: this.signal,
+      });
+    } catch {
+      result = { ok: false, reason: this.signal?.aborted ? "aborted" : "transport_failure" };
+    }
+    let current;
+    try {
+      current = await reconcile();
+    } catch (error) {
+      error.requiresReconciliation = true;
+      throw error;
+    }
+    if (current.absent) {
+      manifest.markDeleted(resource);
+      manifest.markCleaned(resource);
+      return { deleted: this.branch };
+    }
+    manifest.markPrepared(resource);
+    if (current.sha !== expectedSha || result.reason === "lease_rejected") {
+      throw new WorkspaceStoreError("cleanup ref changed after preparation", "cleanup_conflict");
+    }
+    const error = new WorkspaceStoreError(
+      `conditional GitHub cleanup failed (${result.reason || "unknown"})`,
+      result.reason === "aborted" ? "safety_budget_exceeded" : "provider_error",
     );
+    error.reason = result.reason || "unknown";
+    throw error;
   }
 
   providerOperationManifest() {

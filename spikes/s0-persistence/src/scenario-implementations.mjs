@@ -108,7 +108,7 @@ async function atomicAliasTransition(context) {
   }
   if (context.adapter === "ado" && context.config.dryRun !== false) {
     return {
-      skip: "ADO alias uniqueness is only emulated in-process in dry-run; the branch-wide CAS proof requires a fresh live campaign.",
+      skip: "ADO alias uniqueness is only emulated in-process in dry-run; the branch-wide CAS proof requires a fresh live run.",
     };
   }
   const { store, workspace } = await openStore(context);
@@ -478,7 +478,7 @@ async function duplicateAliasRestoreRejected(context) {
   }
   if (context.adapter === "ado" && context.config.dryRun !== false) {
     return {
-      skip: "ADO global alias collision handling is only emulated in dry-run; a fresh live branch-CAS campaign is required.",
+      skip: "ADO global alias collision handling is only emulated in dry-run; a fresh live branch-CAS run is required.",
     };
   }
   const target = context.createStore({ fresh: true });
@@ -604,7 +604,7 @@ async function restoreExact(context) {
   }
   if (context.adapter === "ado" && context.config.dryRun !== false) {
     return {
-      skip: "ADO restore exactness is only emulated in dry-run; one atomic branch-head replacement requires a fresh live campaign.",
+      skip: "ADO restore exactness is only emulated in dry-run; one atomic branch-head replacement requires a fresh live run.",
     };
   }
   const source = context.createStore();
@@ -776,9 +776,11 @@ async function restartRecovery(context) {
 async function staleLockRecovery(context) {
   if (!context.durable) return { skip: NOT_DURABLE };
   if (context.adapter === "local-sqlite") {
+    const decision = context.config.naApprovals?.["S0-REC-002"];
     return {
-      skip: "SQLite owns locking internally; treating the external stale-lock-file " +
-        "scenario as N/A requires a structured independent approval that has not been recorded.",
+      na: "SQLite owns locking internally; the external stale-lock-file scenario form does not apply.",
+      contractRationale: decision?.contractRationale,
+      naApproval: decision?.approval,
     };
   }
   if (context.adapter !== "local-cas") {

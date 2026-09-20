@@ -10,13 +10,13 @@ does not integrate persistence into the production runtime or select a local,
 provider, hybrid, or all-envelope mapping.
 
 The review fixes are implemented in source and deterministic tests. The
-[architecture-mapping handoff](results/comparison/comparison.md) now rejects the
+[architecture-mapping handoff](comparison.md) now rejects the
 retained local and provider artifacts because they predate the corrected result
 schema, source/catalog/applicability/config identity, structured `N/A`,
 provider-safety, queue, teardown, fault, and performance semantics.
 
 No mapping is currently eligible or selected. The persistence ADR is reopened.
-Local, provider, performance, and cross-platform campaigns must be regenerated
+Local, provider, performance, and cross-platform runs must be regenerated
 before the plan can return to completed status.
 
 ## Problem
@@ -93,6 +93,39 @@ Each configuration report must distinguish these states:
 
 `N/A` requires a recorded rationale and independent-review approval. `Not applicable` follows catalog metadata and must not require a waiver.
 
+### Local SQLite applicability decision
+
+Approved on 2026-09-20 by the S0 decision owner as part of the canonical Local
+SQLite plan: `S0-REC-002` is `N/A` because SQLite owns locking internally and
+recovers interrupted writers through its transaction journal and WAL on open;
+the external stale-lock-file scenario form does not apply. This section is the
+stable approval reference consumed by Local SQLite run evidence and does not
+require a second approval decision.
+
+### Local generation-CAS applicability decision
+
+The Local generation-CAS configuration covers a private local workspace,
+including multiple local processes and typed stale-writer conflicts within that
+workspace. Linking, synchronizing, replicating, or merging multiple local
+workspaces is out of scope. `S0-CON-003` and provider-only security gates are
+therefore `Not applicable`; `S0-REC-002` remains applicable because this engine
+directly owns and recovers its local lock files.
+
+### GitHub configuration and cleanup boundary
+
+The GitHub configuration uses one GitHub identity across multiple concurrent
+processes. Cross-user permission behavior and multiple GitHub identities are
+out of scope. Every run owns one disposable `tippani-s0/<runId>` branch; the
+default, protected, and non-disposable branches remain excluded.
+
+Cleanup records the branch tip SHA in the authorized manifest, verifies the
+run ownership marker, and deletes the ref with native Git using
+`--force-with-lease=<ref>:<expected-sha>`. Credentials are supplied through an
+isolated askpass environment and never placed in command arguments or retained
+output. A moved ref produces `cleanup_conflict` and remains authorized for
+reconciliation. Cleanup is marked complete only after the GitHub API confirms
+that the ref is absent.
+
 ## Eligibility and architecture mappings
 
 Evaluate eligibility in two stages.
@@ -118,13 +151,13 @@ The report must not recommend a mapping while no mapping is eligible. Once eligi
 
 The following pre-revision results are historical inputs only. No current
 decision may use these counts; all affected configurations require newly
-generated applicability-aware campaigns.
+generated applicability-aware runs.
 
 Historical reports claimed the following counts, but none is a current pass or
 decision input:
 
-- Local envelope: 38 reported absolute passes in the superseded Windows run.
-- Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`. One of those reported passes, `S0-CON-003`, is now a known **structural failure**: `BEGIN IMMEDIATE` serializes writers database-wide even across independent workspaces, so it cannot satisfy the current no-global-serialization criterion. A rerun alone cannot close it; closure requires revising the absolute `S0-CON-003` criterion or an independently approved, scenario-specific rationale-backed `N/A`.
+- Local envelope: 38 reported absolute passes in the superseded Windows run. Its historical `S0-CON-003` and provider-only security results are not current evidence because those gates are now `Not applicable` to this configuration.
+- Local SQLite: 37 reported absolute passes plus an unstructured `N/A` for the external stale-lock-file form of `S0-REC-002`. The historical `S0-CON-003` pass is not current evidence: Local SQLite is evaluated only as exactly one workspace in one database, making independent-workspace concurrency `Not applicable`. Multiple independent workspaces writing one shared SQLite database are out of scope and ineligible because `BEGIN IMMEDIATE` serializes writes database-wide. No waiver applies to that excluded topology.
 - OneDrive: nine provider gates passed.
 - Azure DevOps: nine provider gates passed.
 - GitHub: nine provider gates passed.
@@ -153,7 +186,6 @@ The applicable configurations must prove:
 
 - Multi-field workspace mutation commits completely or not at all.
 - Alias transitions, indexes, state, intent revisions, and journal records cannot become partially visible.
-- Independent workspaces progress without global serialization.
 - Concurrent staging preserves newer intent revisions.
 - Publication intent tuples and planned journals become durable before provider publication begins.
 - No journal references a missing workspace, generation, or intent revision.
@@ -201,22 +233,59 @@ OneDrive, ADO, and GitHub must each prove, independently:
 - Local-to-provider rehome preserves `WorkspaceId` and switches authority only after a durable receipt.
 - Branch, namespace, ownership, cleanup, request, object, time, and byte budgets remain enforced.
 
-### Multi-user testing
+### Shared Azure provider campaign environment
 
-Run the multi-user suite separately on OneDrive, ADO, and GitHub. Passing one provider does not satisfy another provider's collaboration gates.
+Provisioning and configuration of the provider test clients are part of the
+evidence plan. One approved campaign provisions two independently isolated
+Azure Windows VMs before any live provider run. The same VM pair may then run
+the OneDrive API, Azure DevOps, GitHub, and OneDrive synced-folder evaluations
+sequentially for efficiency, but every provider retains its own approval,
+namespace, operation budget, cleanup manifest, and evidence package.
+
+Each VM must have its own Windows installation, filesystem, client process
+state, and OneDrive sync database. The VMs must not share a VHD or host-mounted
+OneDrive directory. Separate physical machines are not required; availability
+zones or fault domains should be used when the selected region supports them,
+and shared-host limitations must be recorded. A sanitized, immutable deployment
+receipt binds the VM image, region class, VM size, bootstrap revision, opaque VM
+identities, network policy, creation time, expiry, and run ownership marker.
+Every provider result references that receipt.
+
+The Azure infrastructure identity and provider storage identities are separate.
+The infrastructure identity may only provision and remove the approved campaign
+resources. Provider credentials remain runtime-supplied and are never placed in
+deployment parameters, VM extensions, command arguments, logs, or retained
+evidence. The VMs use ordinary Azure networking and public provider endpoints;
+joining a corporate network is out of scope. Optional Entra join or Intune
+enrollment is permitted only through a separately approved tenant process when
+Conditional Access requires it.
+
+Provisioning must fail closed without an approved subscription, region, image,
+SKU, network policy, cost ceiling, expiry, and target hash. The campaign first
+deploys and validates one VM, then creates the second only after provider login
+and client compatibility succeed. After all provider runs, provider-owned
+resources are cleaned before the VM resource group is deleted. Final evidence
+must confirm that no run-owned provider or Azure resources remain.
+
+### Concurrent-client testing
+
+Run the concurrent-client suite separately on OneDrive, ADO, and GitHub from the
+two campaign VMs. Passing one provider does not satisfy another provider's
+collaboration gates. Each provider uses one provider identity across the two
+clients; cross-user permission behavior and multiple provider identities are out
+of scope.
 
 Each provider run must:
 
-- Use two independent client processes. Both may authenticate with the same
-	externally supplied sandbox account; the storage layer has no requirement for
-	two provider identities.
+- Use one independent client process on each VM. Both authenticate with the same
+  externally supplied sandbox account for that provider.
 - Use independent process state and logical client actors. Reconnect coverage
 	starts the clients from distinct observed generations.
-- Have both users open the same `WorkspaceId` at the same authoritative generation.
+- Have both clients open the same `WorkspaceId` at the same authoritative generation.
 - Release simultaneous writes from a common barrier and observe exactly one committed next generation and one typed stale conflict.
-- Verify that the stale user reloads or reconciles without silent overwrite.
-- Create divergent offline work, advance authority from the other user, reconnect, and observe deterministic pending/conflict behavior.
-- Verify `S0-COL-002`, `S0-COL-003`, and `S0-COL-006` with raw per-user, per-client, and authoritative final-state evidence.
+- Verify that the stale client reloads or reconciles without silent overwrite.
+- Create divergent offline work, advance authority from the other client, reconnect, and observe deterministic pending/conflict behavior.
+- Verify `S0-COL-002`, `S0-COL-003`, and `S0-COL-006` with raw per-client and authoritative final-state evidence.
 - Measure acknowledgement-to-discovery latency when the second collaborator observes the committed generation through the provider's change mechanism.
 - Exercise delayed notification and lost-response behavior without duplicating a generation or fabricating success or failure.
 - Exercise permission removal or loss and prove inaccessible state is not treated as absent.
@@ -225,7 +294,40 @@ Each provider run must:
 
 ### OneDrive synced-folder compatibility
 
-Test a locally synced OneDrive folder separately from the OneDrive API-CAS configuration. Record conflict artifacts, ordering, recovery, and user-visible behavior. `S0-BCK-006` is compatibility evidence and must not be used as proof of provider-API multi-writer safety.
+Test a locally synced OneDrive folder separately from the OneDrive API-CAS
+configuration. OneDrive Personal, including an approved personal Microsoft
+account, is sufficient; OneDrive for Business is not required. The Azure
+subscription identity may differ from the OneDrive identity. The Graph
+application used for API testing must accept personal Microsoft accounts and
+must receive delegated `Files.ReadWrite` consent from the approved identity.
+
+Both VMs sign in to the OneDrive desktop client with the same approved Microsoft
+identity and sync the same synthetic run-owned folder. Establish one baseline
+generation and content hash on both clients, disconnect or pause both clients,
+write distinct next-generation payloads, reconnect them in a recorded order,
+and wait for both clients to settle. Record ordered operations, UTC and monotonic
+timestamps, opaque client and VM IDs, OneDrive versions and states, generation
+and content hashes, conflict artifacts, final files, recovery actions, and
+convergence. A pass requires both observed conflict handling and successful
+recovery; a same-device probe, arbitrary operation strings, or an unsigned
+self-report cannot close the gate.
+
+Each VM signs its client receipt and the trusted campaign coordinator signs the
+combined artifact. The artifact binds both receipts, the deployment receipt,
+sync target, config revision, approval, operation sequence, hashes, conflict
+artifacts, final state, and cleanup result. Delete the run-owned synced folder
+from one client and verify absence from both before campaign teardown.
+`S0-BCK-006` remains compatibility evidence and must not be used as proof of
+provider-API multi-writer safety.
+
+### Azure DevOps configuration boundary
+
+The Azure DevOps configuration uses one Azure DevOps identity across multiple
+concurrent client processes and one approved disposable repository target. Each
+run writes only to its owned disposable branch and uses Git object/ref
+preconditions for authoritative CAS. Cross-user permission behavior, multiple
+provider identities, and writes to default, protected, production, or
+non-disposable branches are out of scope.
 
 ### Security and operational safety
 
@@ -253,7 +355,7 @@ Use one common documented method across every applicable configuration:
 - Local operation latency: three discarded warm-ups followed by 40 small, 20
 	medium, and 8 stress samples.
 - Provider operation latency: three discarded warm-up reads followed by 6
-	small, 4 medium, and 2 stress samples, repeated in three complete campaigns
+	small, 4 medium, and 2 stress samples, repeated in at least three complete runs
 	per provider.
 - Identical small, medium, and stress fixtures and workload ordering.
 - Monotonic timing around fully awaited operations.
@@ -321,6 +423,7 @@ The comparison must contain:
 
 | Condition | Owner | Evidence required to close |
 |---|---|---|
+| Shared Azure provider campaign | Provider test operator | Approved deployment receipt, two isolated configured Windows VM receipts, cost/expiry controls, and verified resource-group teardown |
 | Applicability and report-generator correction | Spike implementer | Unit tests plus regenerated five-row matrix with all six states represented correctly |
 | `S0-COL-002` on OneDrive, ADO, and GitHub | Provider test operator | Two-client-process simultaneous-write runs showing one winner, one typed conflict, and one authoritative generation per provider |
 | `S0-COL-003` on OneDrive, ADO, and GitHub | Provider test operator | Two-client-process divergent-generation reconnect runs with deterministic reload or conflict per provider |
@@ -357,14 +460,16 @@ Add tests that prove:
 2. Run the full credential-free harness and detection-power suites.
 3. Regenerate local outcomes; keep `PER-001` and `PER-003` incomplete until the
    corrected fresh-process/memory/bytes-written method exists.
-4. Run three new live provider campaigns per provider; do not import the
+4. Provision and validate the shared two-VM Azure provider campaign.
+5. Run at least three new live provider runs per provider; do not import the
    superseded outcomes as current evidence.
-5. Run the new provider performance suite.
-6. Run the two-client-process collaboration suite on OneDrive, ADO, and GitHub.
-7. Run the separate OneDrive synced-folder compatibility probe.
-8. Regenerate all five outcomes and the mapping comparison from reviewed raw evidence.
-9. Scan every staged artifact and commit message for prohibited material.
-10. Obtain implementer and independent-review sign-off.
+6. Run the new provider performance suite.
+7. Run the two-VM collaboration suite on OneDrive, ADO, and GitHub.
+8. Run the separate two-VM OneDrive synced-folder compatibility probe.
+9. Clean provider resources, then deprovision and verify the Azure campaign.
+10. Regenerate all five outcomes and the mapping comparison from reviewed raw evidence.
+11. Scan every staged artifact and commit message for prohibited material.
+12. Obtain implementer and independent-review sign-off.
 
 ## Done when
 
@@ -375,6 +480,8 @@ S0 is decision-ready when:
 - Every applicable absolute gate is `Pass` or an `N/A` with approver identity,
   approval date, and reference for at least one complete mapping.
 - Multi-user collaboration evidence exists independently for OneDrive, ADO, and GitHub.
+- Every provider result references an approved two-VM deployment receipt, and
+	final teardown evidence shows no campaign resources remain.
 - Performance and operability evidence follows one repeated, documented method.
 - Relative evidence is used only after mapping eligibility exists.
 - Every condition has an owner and linked closure evidence.

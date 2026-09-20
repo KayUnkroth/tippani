@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "configurationId": "CFG-LOCAL-CAS",
+  "runId": "s0-local-cas-ubuntu-latest-33450465982",
+  "startedAt": "2026-08-31T23:23:32.346Z",
+  "completedAt": "2026-08-31T23:23:35.749Z",
+  "evidenceIdentity": null,
+  "environment": {
+    "os": "linux 6.17.0-1022-azure",
+    "architecture": "x64",
+    "cpuModel": "AMD EPYC 9V74 80-Core Processor",
+    "logicalCpuCount": 2,
+    "totalMemoryBytes": 8323973120,
+    "nodeVersion": "24.19.0",
+    "providerApiVersion": "N/A",
+    "configuredPlatform": "Linux/ext2/ext3",
+    "filesystem": "ext2/ext3",
+    "temporaryStoreRoot": "tippani-s0-s0-local-cas-ubuntu-latest-33450465982-KcUlVu",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "GitHub-hosted runner workspace on ext2/ext3",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=24.19.0; sqlite=3.53.3",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "Ephemeral GitHub-hosted runner",
+    "processTopology": "Independent OS child processes for concurrency and kill tests"
+  }
+}

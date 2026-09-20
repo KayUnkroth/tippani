@@ -15,7 +15,7 @@ import {
   verifySeparateSync,
 } from "../src/compare.mjs";
 import { buildEvidenceIdentity, decisionConfigRevision, sha256 } from "../src/evidence-identity.mjs";
-import { combineResults, campaignVariability } from "../src/aggregate-campaigns.mjs";
+import { combineResults, runVariability } from "../src/aggregate-runs.mjs";
 import {
   EVIDENCE_KIND,
   evidenceSigningPayload,
@@ -25,8 +25,8 @@ import { SCENARIOS } from "../src/scenario-catalog.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.dirname(here);
-const comparisonPath = path.join(root, "results", "comparison", "comparison.md");
-const comparisonJsonPath = path.join(root, "results", "comparison", "comparison.json");
+const comparisonPath = path.join(root, "comparison.md");
+const comparisonJsonPath = path.join(root, "comparison.json");
 const comparison = fs.readFileSync(comparisonPath, "utf8");
 const comparisonJson = JSON.parse(fs.readFileSync(comparisonJsonPath, "utf8"));
 const configPaths = [
@@ -44,14 +44,17 @@ async function check(name, action) {
   catch (error) { fail++; console.error(`  FAIL: ${name}`); console.error(`        ${error.stack || error}`); }
 }
 
-await check("generated comparison rejects the checked-in stale campaigns", () => {
+await check("generated comparison remains incomplete and rejects invalid evidence", () => {
   assert(comparison.includes("## Rejected existing evidence"));
   assert(comparison.includes("**Final ADR readiness:** Incomplete"));
   assert(comparison.includes("**ADR approval:** Pending"));
   assert(!comparison.includes("**Final ADR status:** Accepted"));
   assert.equal(comparisonJson.decision.status, "Incomplete");
   assert.equal(comparisonJson.decision.mapping, null);
-  assert.equal(comparisonJson.validationFailures.length, 5);
+  assert.deepEqual(
+    comparisonJson.validationFailures.map(({ configurationId }) => configurationId).sort(),
+    ["CFG-ADO-LIVE", "CFG-GITHUB-LIVE", "CFG-ONEDRIVE-LIVE"],
+  );
 });
 
 await check("comparison contains all configurations and both mappings without a fabricated selection", () => {
@@ -65,7 +68,7 @@ await check("comparison contains all configurations and both mappings without a 
 });
 
 await check("comparison links still resolve to retained historical artifacts", () => {
-  const links = [...comparison.matchAll(/\]\((\.\.\/[^)]+)\)/g)].map((match) => match[1]);
+  const links = [...comparison.matchAll(/\]\((TEST-CASES-[^)]+)\)/g)].map((match) => match[1]);
   assert(links.length > 0);
   for (const link of new Set(links)) {
     assert(fs.existsSync(path.resolve(path.dirname(comparisonPath), link)), `Broken evidence link: ${link}`);
@@ -105,7 +108,7 @@ await check("existing-run validation binds source, catalog, applicability, confi
   assert(validateExistingRun(wrongConfig, config).some((error) => /identity does not match/.test(error)));
 });
 
-await check("comparison recomputes complete aggregate claims from linked campaign raws", () => {
+await check("comparison recomputes complete aggregate claims from linked run raws", () => {
   const config = JSON.parse(fs.readFileSync(
     path.join(root, "config", "provider-github-live.json"),
     "utf8",
@@ -163,8 +166,8 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     applicableScenarioIds: applicable,
     results: applicable.map((scenarioId) => resultFor(scenarioId, statusFor, index)),
   });
-  const writeCampaign = (index, run) => {
-    const name = `campaign-${index}`;
+  const writeRun = (index, run) => {
+    const name = `run-${index}`;
     fs.mkdirSync(path.join(directory, name), { recursive: true });
     const raw = `${name}/raw-results.json`;
     const report = `${name}/outcome.md`;
@@ -181,15 +184,15 @@ await check("comparison recomputes complete aggregate claims from linked campaig
       reportSha256: `sha256:${sha256(reportBytes)}`,
     };
   };
-  const linkedCampaigns = [];
-  const campaigns = [];
+  const linkedRuns = [];
+  const runs = [];
   const approvals = [];
   for (let index = 1; index <= 3; index++) {
     const linked = linkedRun(index);
-    linkedCampaigns.push({ name: `campaign-${index}`, run: linked });
-    campaigns.push(writeCampaign(index, linked));
+    linkedRuns.push({ name: `run-${index}`, run: linked });
+    runs.push(writeRun(index, linked));
     approvals.push({
-      name: `campaign-${index}`,
+      name: `run-${index}`,
       effectiveTargetHash: `sha256:target-${index}`,
       approval: {
         approver: "Synthetic Reviewer",
@@ -199,7 +202,7 @@ await check("comparison recomputes complete aggregate claims from linked campaig
       },
     });
   }
-  const aggregateResults = combineResults(linkedCampaigns, applicable);
+  const aggregateResults = combineResults(linkedRuns, applicable);
   const run = {
     schemaVersion: 2,
     evidenceIdentity: buildEvidenceIdentity(config),
@@ -208,14 +211,14 @@ await check("comparison recomputes complete aggregate claims from linked campaig
       adapter: config.adapter,
       backingPath: config.backingPath,
       applicabilityProfile: applicabilityProfile(config),
-      campaignCount: 3,
+      runCount: 3,
     },
     catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
     applicableScenarioIds: applicable,
     results: aggregateResults,
-    campaigns,
-    campaignApprovals: approvals,
-    campaignVariability: campaignVariability(linkedCampaigns),
+    runs,
+    runApprovals: approvals,
+    runVariability: runVariability(linkedRuns),
   };
   const aggregatePath = path.join(directory, "raw-results.json");
   assert.deepEqual(validateExistingRun(run, config, { artifactPath: aggregatePath }), []);
@@ -225,7 +228,7 @@ await check("comparison recomputes complete aggregate claims from linked campaig
   zeroed.results.find((result) => result.scenarioId === "S0-PER-004").measurements.remoteCasP50Ms_small = 0;
   assert(
     validateExistingRun(zeroed, config, { artifactPath: aggregatePath })
-      .some((error) => /S0-PER-004 aggregate result does not match the recomputed linked-campaign result/.test(error)),
+      .some((error) => /S0-PER-004 aggregate result does not match the recomputed linked-run result/.test(error)),
     "a fabricated 0ms measurement must be rejected",
   );
 
@@ -247,14 +250,14 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     "a fabricated complexity total must be rejected",
   );
 
-  // Bogus campaign position keys must be rejected.
+  // Bogus run position keys must be rejected.
   const bogusKeys = structuredClone(run);
-  bogusKeys.results.find((result) => result.scenarioId === "S0-PER-004").evidence.campaigns =
-    { "campaign-forged": { status: "Pass", evidence: {}, measurements: {} } };
+  bogusKeys.results.find((result) => result.scenarioId === "S0-PER-004").evidence.runs =
+    { "run-forged": { status: "Pass", evidence: {}, measurements: {} } };
   assert(
     validateExistingRun(bogusKeys, config, { artifactPath: aggregatePath })
-      .some((error) => /does not match the recomputed linked-campaign result/.test(error)),
-    "bogus campaign keys must be rejected",
+      .some((error) => /does not match the recomputed linked-run result/.test(error)),
+    "bogus run keys must be rejected",
   );
 
   // A status not supported by the linked raws must be rejected.
@@ -266,35 +269,35 @@ await check("comparison recomputes complete aggregate claims from linked campaig
     "an unsupported aggregate status must be rejected",
   );
 
-  // A mutated campaignVariability must be rejected.
+  // A mutated runVariability must be rejected.
   const variabilityTampered = structuredClone(run);
-  variabilityTampered.campaignVariability = { remoteCasP50Ms_small: { count: 3, min: 0, p50: 0, p95: 0, max: 0, mean: 0, stddev: 0 } };
+  variabilityTampered.runVariability = { remoteCasP50Ms_small: { count: 3, min: 0, p50: 0, p95: 0, max: 0, mean: 0, stddev: 0 } };
   assert(
     validateExistingRun(variabilityTampered, config, { artifactPath: aggregatePath })
-      .some((error) => /campaignVariability does not match/.test(error)),
-    "a mutated campaignVariability must be rejected",
+      .some((error) => /runVariability does not match/.test(error)),
+    "a mutated runVariability must be rejected",
   );
 
-  // A missing campaignVariability field must be rejected.
+  // A missing runVariability field must be rejected.
   const variabilityMissing = structuredClone(run);
-  delete variabilityMissing.campaignVariability;
+  delete variabilityMissing.runVariability;
   assert(
     validateExistingRun(variabilityMissing, config, { artifactPath: aggregatePath })
-      .some((error) => /aggregate is missing campaignVariability/.test(error)),
-    "a missing campaignVariability field must be rejected",
+      .some((error) => /aggregate is missing runVariability/.test(error)),
+    "a missing runVariability field must be rejected",
   );
 
   // An approval that does not match the linked preflight must be rejected.
   const approvalMismatch = structuredClone(run);
-  approvalMismatch.campaignApprovals[0].approval.reference = "syn-forged";
+  approvalMismatch.runApprovals[0].approval.reference = "syn-forged";
   assert(
     validateExistingRun(approvalMismatch, config, { artifactPath: aggregatePath })
       .some((error) => /approval record does not match the linked preflight/.test(error)),
-    "a campaign approval mismatch must be rejected",
+    "a run approval mismatch must be rejected",
   );
 
   // A modified linked artifact breaks the byte digest.
-  fs.appendFileSync(path.join(directory, campaigns[0].raw), "\n");
+  fs.appendFileSync(path.join(directory, runs[0].raw), "\n");
   assert(
     validateExistingRun(run, config, { artifactPath: aggregatePath })
       .some((error) => /digest mismatch/.test(error)),
@@ -306,8 +309,8 @@ await check("comparison recomputes complete aggregate claims from linked campaig
   const staleRun = linkedRun(1, {
     evidenceIdentity: { ...buildEvidenceIdentity(config), sourceRevision: "sha256:stale-unrelated" },
   });
-  campaigns[0] = { ...campaigns[0], ...writeCampaign(1, staleRun) };
-  run.campaigns = campaigns;
+  runs[0] = { ...runs[0], ...writeRun(1, staleRun) };
+  run.runs = runs;
   assert(
     validateExistingRun(run, config, { artifactPath: aggregatePath })
       .some((error) => /identity does not match/.test(error)),
@@ -341,19 +344,31 @@ await check("--use-existing produces incomplete comparison data without rerunnin
 });
 
 await check("invalid performance evidence is excluded from architecture rationale", () => {
-  assert(comparison.includes("No current decision-grade performance measurement is eligible"));
+  assert(comparison.includes("Relative metrics are provisional diagnostics only"));
+  assert(!comparison.includes("Concrete mapping recommendation:** Hybrid"));
   assert(!comparison.includes("lower measured mutation/open/backup/restore latency"));
 });
 
-await check("comparison and ADR identify SQLite serialization as structural", () => {
+await check("comparison and ADR enforce the Local SQLite applicability boundary", () => {
   const adr = fs.readFileSync(
     path.join(root, "ADR-s0-persistence-architecture.md"),
     "utf8",
   );
-  assert(comparison.includes("Known structural finding"));
-  assert(comparison.includes("A rerun alone cannot close"));
-  assert(adr.includes("structural failure"));
-  assert(adr.includes("rerun alone cannot close"));
+  for (const source of [comparison, adr]) {
+    const document = source.replace(/\s+/g, " ");
+    assert(document.includes("exactly one workspace in one database"));
+    assert(document.includes("`S0-CON-003` is `Not applicable`"));
+    assert(document.includes("Multiple independent workspaces writing one shared SQLite database"));
+    assert(document.includes("requires no waiver"));
+  }
+});
+
+await check("comparison enforces the Local CAS applicability boundary", () => {
+  const document = comparison.replace(/\s+/g, " ");
+  assert(document.includes("Local generation-CAS applicability"));
+  assert(document.includes("Linking, synchronizing, replicating, or merging multiple local workspaces is out of scope"));
+  assert(document.includes("`S0-CON-003` and provider-only security gates are `Not applicable`"));
+  assert(document.includes("`S0-REC-002` remains applicable"));
 });
 
 await check("comparison resolves and verifies the separate synced-folder (S0-BCK-006) evidence", () => {
@@ -361,6 +376,9 @@ await check("comparison resolves and verifies the separate synced-folder (S0-BCK
     path.join(root, "config", "provider-onedrive-live.json"),
     "utf8",
   ));
+  config.sandbox.syncProfile = {
+    trustedSignerFingerprint: "sha256:synthetic-sync-signer",
+  };
   const stateRoot = path.join(root, ".test-state", "sync-verify");
   const resultsRoot = path.join(stateRoot, "results");
   const aggregateDir = path.join(resultsRoot, "CFG-ONEDRIVE-LIVE");
@@ -468,6 +486,7 @@ await check("separate sync comparison verifies the complete signed proof, approv
     path.join(root, "config", "provider-onedrive-live.json"),
     "utf8",
   ));
+  config.sandbox.syncProfile = {};
   const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
   const fingerprint = publicKeyFingerprint(publicKey);
   config.sandbox.syncProfile.trustedSignerFingerprint = fingerprint;
@@ -545,17 +564,17 @@ await check("separate sync comparison verifies the complete signed proof, approv
     evidence: {
       ...bckEvidence,
       separateCompatibilityReport: "../CFG-ONEDRIVE-SYNC/outcome.md",
-      providerCampaigns: "Not part of provider-API CAS campaigns",
+      providerRuns: "Not part of provider-API CAS runs",
     },
   };
   const run = {
     results: [aggregateBck],
-    campaignApprovals: [1, 2, 3].map((index) => ({
-      name: `campaign-${index}`,
+    runApprovals: [1, 2, 3].map((index) => ({
+      name: `run-${index}`,
       effectiveTargetHash: `sha256:provider-target-${index}`,
       approval: {
         targetHash: `sha256:provider-target-${index}`,
-        approver: "Provider campaign approver",
+        approver: "Provider run approver",
         approvedAt: new Date(base - 120000).toISOString(),
         reference: `syn-provider-${index}`,
       },
@@ -575,8 +594,8 @@ await check("separate sync comparison verifies the complete signed proof, approv
   assert.equal(config.sandbox.approval, undefined);
   assert.deepEqual(verifySeparateSync(run, config, { artifactPath: aggregatePath }), []);
   const reusedProviderApproval = structuredClone(run);
-  reusedProviderApproval.campaignApprovals[1].effectiveTargetHash = targetHash;
-  reusedProviderApproval.campaignApprovals[1].approval.targetHash = targetHash;
+  reusedProviderApproval.runApprovals[1].effectiveTargetHash = targetHash;
+  reusedProviderApproval.runApprovals[1].approval.targetHash = targetHash;
   assert(
     verifySeparateSync(reusedProviderApproval, config, { artifactPath: aggregatePath })
       .some((error) => /reuses the provider-API target hash/.test(error)),
@@ -611,7 +630,7 @@ await check("separate sync comparison verifies the complete signed proof, approv
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });
 });
 
-await check("campaignVariability must be a non-null plain object even when recomputed variability is empty", () => {
+await check("runVariability must be a non-null plain object even when recomputed variability is empty", () => {
   const config = JSON.parse(fs.readFileSync(
     path.join(root, "config", "provider-github-live.json"),
     "utf8",
@@ -640,8 +659,8 @@ await check("campaignVariability must be a non-null plain object even when recom
     applicableScenarioIds: applicable,
     results: applicable.map((scenarioId) => ({ scenarioId, status: "Pass", durationMs: 1, evidence: {}, measurements: {} })),
   });
-  const writeCampaign = (index, run) => {
-    const name = `campaign-${index}`;
+  const writeRun = (index, run) => {
+    const name = `run-${index}`;
     fs.mkdirSync(path.join(directory, name), { recursive: true });
     const raw = `${name}/raw-results.json`;
     const report = `${name}/outcome.md`;
@@ -651,16 +670,16 @@ await check("campaignVariability must be a non-null plain object even when recom
     fs.writeFileSync(path.join(directory, report), reportBytes);
     return { name, runId: `s0-run-${index}`, raw, rawSha256: `sha256:${sha256(rawBytes)}`, report, reportSha256: `sha256:${sha256(reportBytes)}` };
   };
-  const linkedCampaigns = [];
-  const campaigns = [];
+  const linkedRuns = [];
+  const runs = [];
   const approvals = [];
   for (let index = 1; index <= 3; index++) {
     const linked = linkedRun(index);
-    linkedCampaigns.push({ name: `campaign-${index}`, run: linked });
-    campaigns.push(writeCampaign(index, linked));
-    approvals.push({ name: `campaign-${index}`, effectiveTargetHash: `sha256:t-${index}`, approval: { approver: "R", approvedAt: "2026-09-03T20:00:00.000Z", reference: `syn-${index}`, targetHash: `sha256:t-${index}` } });
+    linkedRuns.push({ name: `run-${index}`, run: linked });
+    runs.push(writeRun(index, linked));
+    approvals.push({ name: `run-${index}`, effectiveTargetHash: `sha256:t-${index}`, approval: { approver: "R", approvedAt: "2026-09-03T20:00:00.000Z", reference: `syn-${index}`, targetHash: `sha256:t-${index}` } });
   }
-  assert.deepEqual(campaignVariability(linkedCampaigns), {}, "this setup must recompute an empty variability object");
+  assert.deepEqual(runVariability(linkedRuns), {}, "this setup must recompute an empty variability object");
   const baseRun = {
     schemaVersion: 2,
     evidenceIdentity: buildEvidenceIdentity(config),
@@ -669,25 +688,25 @@ await check("campaignVariability must be a non-null plain object even when recom
       adapter: config.adapter,
       backingPath: config.backingPath,
       applicabilityProfile: applicabilityProfile(config),
-      campaignCount: 3,
+      runCount: 3,
     },
     catalog: SCENARIOS.map((scenario) => ({ ...scenario })),
     applicableScenarioIds: applicable,
-    results: combineResults(linkedCampaigns, applicable),
-    campaigns,
-    campaignApprovals: approvals,
+    results: combineResults(linkedRuns, applicable),
+    runs,
+    runApprovals: approvals,
   };
   const aggregatePath = path.join(directory, "raw-results.json");
   assert.deepEqual(
-    validateExistingRun({ ...baseRun, campaignVariability: {} }, config, { artifactPath: aggregatePath }),
+    validateExistingRun({ ...baseRun, runVariability: {} }, config, { artifactPath: aggregatePath }),
     [],
-    "an explicit empty campaignVariability object must pass",
+    "an explicit empty runVariability object must pass",
   );
   for (const bad of [null, false, 0, "variability", []]) {
     assert(
-      validateExistingRun({ ...baseRun, campaignVariability: bad }, config, { artifactPath: aggregatePath })
-        .some((error) => /campaignVariability must be a non-null plain object/.test(error)),
-      `campaignVariability=${JSON.stringify(bad)} must be rejected even with empty recomputed variability`,
+      validateExistingRun({ ...baseRun, runVariability: bad }, config, { artifactPath: aggregatePath })
+        .some((error) => /runVariability must be a non-null plain object/.test(error)),
+      `runVariability=${JSON.stringify(bad)} must be rejected even with empty recomputed variability`,
     );
   }
   fs.rmSync(path.join(root, ".test-state"), { recursive: true, force: true });

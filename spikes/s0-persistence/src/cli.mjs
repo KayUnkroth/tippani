@@ -7,6 +7,7 @@ import { assertPreflight } from "./preflight.mjs";
 import { runHarness } from "./runner.mjs";
 import { SCENARIOS } from "./scenario-catalog.mjs";
 import { buildPreflightSheet, renderPreflightSheet } from "./provider-preflight-sheet.mjs";
+import { runDirectory } from "./paths.mjs";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const args = process.argv.slice(2);
@@ -63,7 +64,7 @@ if (args.includes("--preflight-sheet")) {
 }
 
 const outputDir = path.resolve(
-  valueOf("--output", path.join(root, "results", config.configurationId)),
+  valueOf("--output", runDirectory(config.configurationId, config.runId)),
 );
 const { run, artifacts } = await runHarness({ config, outputDir, scenarioIds });
 for (const result of run.results) {

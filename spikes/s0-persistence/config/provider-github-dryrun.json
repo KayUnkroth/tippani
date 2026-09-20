@@ -35,7 +35,7 @@
       "get-contents",
       "put-contents",
       "list-contents",
-      "cleanup-unsupported"
+      "delete-ref-with-lease"
     ],
     "cleanup": {
       "manifestId": "syn-cleanup-s0-provider-github-dryrun",

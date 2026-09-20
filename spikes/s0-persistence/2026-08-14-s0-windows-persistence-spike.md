@@ -7,7 +7,7 @@
 
 > **Current disposition:** PR #91 delivers this specification's hardened S0
 > evaluation harness only. Retained evidence is invalid/incomplete for the
-> repaired source. No persistence mapping is selected; fresh campaigns and
+> repaired source. No persistence mapping is selected; fresh runs and
 > independent ADR sign-off remain follow-up work.
 
 ## Purpose
@@ -32,7 +32,7 @@ Under this architecture:
 - **Local** backing runs through the same backing-path facade as every provider — it is not a bypass or a special case. The facade delegates to a durable local engine (generation-CAS envelope or SQLite) and executes every operation as private authority; no sandbox is required.
 - **Provider** backing (OneDrive/ADO/GitHub) runs the same facade over a provider-native transport (OneDrive version/ETag, ADO object/ref, GitHub Contents blob-sha). It is preflight-gated: without an approved sandbox it makes **zero** network calls, dry-running by recording the exact operation manifest it would issue and refusing any live call with a typed, fail-closed error. With an approved synthetic-only sandbox it issues real provider CAS.
 
-S0's job is therefore twofold: prove the local backing path on Windows/NTFS and evaluate the provider architecture behind the same contract. The local candidates run through the facade, and all three provider transports are implemented. Result claims must come from the current applicability-aware comparison, not stale or partial outcome files. The two-user collaboration gates (`COL-002/003/006`) use two independent client processes and may authenticate with the same sandbox account. Treating a second provider identity as a storage-layer prerequisite was a **wrong assumption**; the clients identify logical user 1 and user 2. Synced-folder behavior (`BCK-006`) and provider performance (`PER-004`) retain their separate prerequisites.
+S0's job is therefore twofold: prove the local backing path on Windows/NTFS and evaluate the provider architecture behind the same contract. The local candidates run through the facade, and all three provider transports are implemented. Result claims must come from the current applicability-aware comparison, not stale or partial outcome files. The concurrent-client collaboration gates (`COL-002/003/006`) use one independent client process on each of two provisioned Azure Windows VMs, authenticated with one approved sandbox identity per provider. Cross-user permission behavior and multiple provider identities are out of scope. Synced-folder behavior (`BCK-006`) and provider performance (`PER-004`) retain their separate prerequisites.
 
 ## Supported configuration matrix
 
@@ -100,10 +100,21 @@ This rule applies even when a sandbox account is private, disposable, or accessi
 
 The harness must fail closed if the effective identity, tenant/organization, or repository differs from the supplied sandbox configuration. It must never search other cached accounts or silently fall back to Kay's Microsoft corporate identity.
 
+#### Shared Azure provider campaign
+
+- Provision and configure two isolated Azure Windows VMs once before the live provider campaign; reuse that pair sequentially for OneDrive API, ADO, GitHub, and OneDrive synced-folder runs.
+- Give each VM its own operating system, filesystem, provider client state, and OneDrive sync database. Do not share a VHD or host-mounted OneDrive directory. Separate physical hosts are preferred when available but are not required.
+- Keep the Azure infrastructure identity separate from every provider identity. The infrastructure identity receives only the approved resource-group permissions.
+- Bind every provider result to one sanitized deployment receipt containing opaque VM identities, image/bootstrap revisions, region class, VM size, network policy, creation time, expiry, ownership marker, and teardown status.
+- Use public provider endpoints. Corporate-network membership is out of scope; optional Entra join or Intune enrollment requires separate tenant approval.
+- Deploy and validate one VM before creating the second. Enforce an approved subscription, region, image, SKU, network policy, cost ceiling, expiry, and target hash before creating resources.
+- Clean all provider-owned resources before deleting the campaign resource group, then verify that neither provider nor Azure resources remain.
+
 #### Azure DevOps sandbox
 
 Kay must provide:
 
+- One Azure DevOps identity used by all concurrent client processes. Cross-user permission behavior and multiple provider identities are out of scope.
 - Sandbox ADO organization URL created or accessed through the Visual Studio subscription identity.
 - Sandbox project name or immutable project ID.
 - Permission either to create a disposable S0 repository or the coordinates of an empty disposable repository.
@@ -125,7 +136,8 @@ Kay must provide:
 
 Kay must provide:
 
-- A non-production OneDrive or SharePoint document-library location accessible to the approved sandbox account. Multi-user collaboration is exercised by two independent client processes acting as logical user 1 and user 2; the storage layer does not require multiple provider accounts.
+- A non-production OneDrive or SharePoint document-library location accessible to one Microsoft identity. OneDrive Personal under an approved personal Microsoft account is sufficient; OneDrive for Business is not required. Concurrent-client behavior is exercised from the two campaign VMs using that identity; cross-user permission behavior and multiple provider identities are out of scope.
+- For OneDrive Personal API runs, a Graph application that accepts personal Microsoft accounts and has delegated `Files.ReadWrite` consent.
 - Confirmation that the location contains no production or personal content.
 - Permission to create, version, restore, and delete synthetic S0 files.
 - The approved quota, retention, sharing, and cleanup settings.
@@ -186,13 +198,15 @@ The harness must require explicit sandbox coordinates and reject defaults. It mu
 
 #### Provisioning and cleanup
 
-1. Provision a fresh repository or a fresh isolated namespace for each test campaign.
-2. Write a machine-readable ownership marker containing the campaign/run ID, creator, creation time, expiry, and cleanup policy.
-3. Seed only synthetic Markdown, workspace envelopes, identities, and histories. Never copy production documents, comments, names, repository coordinates, or credentials.
-4. Record every created repository, ref, path, commit, and workspace in a cleanup manifest before mutating it.
-5. Delete only resources present in that manifest and still carrying the matching ownership marker.
-6. Run cleanup after success and failure; retain failed-run resources only under an explicit diagnostic hold with an expiry.
-7. Run a scheduled reaper that reports and removes expired S0 resources using the same ownership checks.
+1. Provision the approved two-VM Azure campaign and retain its sanitized deployment receipt.
+2. Provision a fresh repository or a fresh isolated namespace for each provider test run.
+3. Write a machine-readable ownership marker containing the run ID, creator, creation time, expiry, and cleanup policy.
+4. Seed only synthetic Markdown, workspace envelopes, identities, and histories. Never copy production documents, comments, names, repository coordinates, or credentials.
+5. Record every created repository, ref, path, commit, and workspace in a cleanup manifest before mutating it.
+6. Delete only resources present in that manifest and still carrying the matching ownership marker.
+7. Run provider cleanup after success and failure; retain failed-run resources only under an explicit diagnostic hold with an expiry.
+8. After all provider cleanup succeeds, delete the Azure campaign resource group and verify absence.
+9. Run a scheduled reaper that reports and removes expired S0 provider and Azure resources using the same ownership checks.
 
 #### Provider-safe fault injection
 
@@ -242,7 +256,6 @@ Every backing path, including the local filesystem, must prove:
 - Two independent actors or clients can read the same stable `WorkspaceId` and generation. Locally, this includes the user/portal and Copilot/MCP operating concurrently; remotely, it also includes multiple users and devices.
 - A write carries an expected provider version/object/ref and cannot silently overwrite a newer generation.
 - One winning mutation advances the generation; stale writers receive a typed conflict with enough state to reload or reconcile.
-- Independent workspaces can progress concurrently.
 - Provider outage, throttling, expired authentication, lost responses, and delayed change notification never produce success-shaped local state.
 - Reconnect discovers every committed remote generation before accepting another write.
 - Offline work remains explicitly pending and is never labeled shared until provider CAS confirms it.
@@ -323,11 +336,11 @@ Categories:
 | `S0-CRS-002` | Kill during alias/index update never exposes a partially updated index | 4 |
 | `S0-CRS-003` | Kill during backup or migration leaves an unambiguous recoverable state | 4 |
 | `S0-COL-001` | Independent local actors observe one stable workspace/generation and equal concurrency rules | 5 |
-| `S0-COL-002` | Two users on a shared backing path cannot silently overwrite each other | 5 |
-| `S0-COL-003` | Two devices reconnecting from different generations receive deterministic conflict/reload behavior | 5 |
+| `S0-COL-002` | Two concurrent clients on a shared backing path cannot silently overwrite each other | 5 |
+| `S0-COL-003` | Two clients reconnecting from different generations receive deterministic conflict/reload behavior | 5 |
 | `S0-COL-004` | Remote success with a lost response is reconciled without duplicate generation or false failure | 5 |
 | `S0-COL-005` | Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite | 5 |
-| `S0-COL-006` | Another collaborator discovers a committed generation through the backing path's change mechanism | 5 |
+| `S0-COL-006` | A second client discovers a committed generation through the backing path's change mechanism | 5 |
 | `S0-BCK-001` | Local flush and atomic replace preserve file and index durability under supported filesystems | 6 |
 | `S0-BCK-002` | OneDrive ETag/version preconditions reject stale updates and support version recovery | 6 |
 | `S0-BCK-003` | ADO object/ref preconditions reject stale updates and preserve one auditable generation commit | 6 |
@@ -778,11 +791,11 @@ The ADR must link every summary cell to a completed configuration report and raw
 S0 is complete only when the viable local SQLite, local envelope, OneDrive envelope, ADO envelope, and GitHub envelope configurations run the applicable automated correctness and collaboration harnesses; cross-platform local/cache results are recorded; measured results and failures are published; and an approved ADR selects the persistence architecture and implementation mapping behind one workspace-store contract. The ADR must also record authoritative-head, offline, rehome, and support policies. R1 design must not begin before that approval.
 
 The exit condition is **not met**. The previous hybrid SQLite plus
-provider-native generation-CAS acceptance is withdrawn. The retained campaigns
+provider-native generation-CAS acceptance is withdrawn. The retained runs
 predate corrected evidence identity, safety-budget, offline-queue, cleanup,
-fault, and performance semantics. In addition, SQLite structurally fails the
-current absolute `S0-CON-003` no-global-serialization criterion because
-`BEGIN IMMEDIATE` serializes writers database-wide. Closing that condition
-requires changing the criterion or an independently approved, scenario-specific
-`N/A` rationale; rerunning SQLite alone cannot turn the current behavior into a
-pass. R1 design must wait for current campaigns and a newly approved ADR.
+fault, and performance semantics. Local SQLite is evaluated only as exactly one
+workspace in one database, so `S0-CON-003` is `Not applicable` to that
+configuration. Multiple independent workspaces writing one shared SQLite
+database remain out of scope and ineligible because `BEGIN IMMEDIATE` serializes
+writes database-wide. This applicability decision requires no waiver. R1 design
+must wait for current runs and a newly approved ADR.

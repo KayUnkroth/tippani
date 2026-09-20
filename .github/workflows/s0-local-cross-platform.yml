@@ -14,8 +14,25 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
-        adapter: [local-cas, local-sqlite]
+        include:
+          - os: windows-latest
+            adapter: local-cas
+            testCases: TEST-CASES-LOCAL-CAS
+          - os: ubuntu-latest
+            adapter: local-cas
+            testCases: TEST-CASES-LOCAL-CAS
+          - os: macos-latest
+            adapter: local-cas
+            testCases: TEST-CASES-LOCAL-CAS
+          - os: windows-latest
+            adapter: local-sqlite
+            testCases: TEST-CASES-LOCAL-SQLITE
+          - os: ubuntu-latest
+            adapter: local-sqlite
+            testCases: TEST-CASES-LOCAL-SQLITE
+          - os: macos-latest
+            adapter: local-sqlite
+            testCases: TEST-CASES-LOCAL-SQLITE
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -46,14 +63,13 @@ jobs:
       - name: Run local S0 configuration
         shell: bash
         run: |
-          mkdir -p "spikes/s0-persistence/results/${{ matrix.os }}-${{ matrix.adapter }}"
+          run_id="s0-${{ matrix.adapter }}-${{ matrix.os }}-${{ github.run_id }}"
           node spikes/s0-persistence/src/cli.mjs \
             --config "spikes/s0-persistence/config/${{ matrix.adapter }}.json" \
-            --run-id "s0-${{ matrix.adapter }}-${{ matrix.os }}-${{ github.run_id }}" \
-            --output "spikes/s0-persistence/results/${{ matrix.os }}-${{ matrix.adapter }}"
+            --run-id "$run_id"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: s0-${{ matrix.os }}-${{ matrix.adapter }}
-          path: spikes/s0-persistence/results/${{ matrix.os }}-${{ matrix.adapter }}
+          path: spikes/s0-persistence/${{ matrix.testCases }}/runs/s0-${{ matrix.adapter }}-${{ matrix.os }}-${{ github.run_id }}
           if-no-files-found: error

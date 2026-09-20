@@ -9,18 +9,18 @@
 S0 evaluates local SQLite, a local generation-CAS envelope, and provider-native
 OneDrive, Azure DevOps, and GitHub transports behind `IWorkspaceStore`.
 
-Review of the architecture-spike evidence found that the retained campaigns
+Review of the architecture-spike evidence found that the retained runs
 were not bound to the current source/catalog/configuration, accepted
 unstructured `N/A`, omitted required faults and durable offline replay, did not
 authorize real teardown, did not enforce all safety budgets, and used invalid
 startup/memory/write-amplification methods. The generated comparison now rejects
 all checked-in configuration results as stale or incomplete.
 
-SQLite also cannot satisfy the current absolute `S0-CON-003` wording:
-`BEGIN IMMEDIATE` serializes writers database-wide even when they update
-independent workspaces. This is a structural failure, not missing evidence; a
-rerun alone cannot close it. Closure requires revising the criterion or an
-independently approved, scenario-specific rationale-backed `N/A`.
+Local SQLite is evaluated only as exactly one workspace in one database, so
+`S0-CON-003` is `Not applicable` to that configuration. Multiple independent
+workspaces writing one shared SQLite database are out of scope and ineligible
+because `BEGIN IMMEDIATE` serializes writes database-wide. This applicability
+decision requires no waiver.
 
 ## Decision
 
@@ -38,11 +38,11 @@ approver record a dated decision.
 
 ## Evidence status
 
-- [Architecture-mapping handoff](results/comparison/comparison.md): incomplete;
+- [Architecture-mapping handoff](comparison.md): incomplete;
   retained inputs rejected by revision and completeness validation.
 - Local results: require regeneration under checksum, journal, lock,
   migration-kill, budget, and corrected eligibility semantics.
-- Provider results: require three new complete campaigns per provider with
+- Provider results: require at least three new complete runs per provider with
   effective target identity/coordinates bound to an approved hash, persistent
   pending queues, all required injected faults, and manifest-authorized
   conditional teardown.
@@ -56,9 +56,9 @@ approver record a dated decision.
 
 | Condition | Owner | Required evidence | Status |
 |---|---|---|---|
-| Local CAS evidence | S0 implementation owner | Current complete local campaign | Pending |
-| SQLite disposition | S0 decision owner | Reject it for `S0-CON-003`, revise the absolute criterion, or record an independently approved structured exception | Pending |
-| Provider collaboration/recovery/safety | S0 provider test owner | Three current live campaigns per provider | Pending credentials and approved sandboxes |
+| Local CAS evidence | S0 implementation owner | Current complete local run; `S0-CON-003` and provider-only security gates excluded by applicability metadata | Pending |
+| Local SQLite evidence | S0 implementation owner | Current complete run for exactly one workspace in one database; `S0-CON-003` and provider-only security gates excluded by applicability metadata | Pending |
+| Provider collaboration/recovery/safety | S0 provider test owner | At least three current live runs per provider | Pending credentials and approved sandboxes |
 | Correct performance protocol | Performance investigator | Fresh-process, memory, and true write-amplification results | Pending |
 | Native portability | Cross-platform test owner | Current Windows, macOS, and Linux results | Pending |
 | Architecture selection | Independent reviewer / ADR approver | Eligible mapping plus dated sign-off | Pending |

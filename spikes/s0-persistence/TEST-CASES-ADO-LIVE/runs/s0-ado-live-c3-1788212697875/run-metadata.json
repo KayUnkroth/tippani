@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "configurationId": "CFG-ADO-LIVE",
+  "runId": "s0-ado-live-c3-1788212697875",
+  "startedAt": "2026-08-31T23:03:17.789Z",
+  "completedAt": "2026-08-31T23:04:01.076Z",
+  "evidenceIdentity": null,
+  "environment": {
+    "os": "win32 10.0.26200",
+    "architecture": "x64",
+    "cpuModel": "Intel(R) Core(TM) Ultra 7 165H",
+    "logicalCpuCount": 22,
+    "totalMemoryBytes": 33983225856,
+    "nodeVersion": "24.14.0",
+    "providerApiVersion": "Azure DevOps Git REST 7.1",
+    "configuredPlatform": "windows-ntfs",
+    "temporaryStoreRoot": "tippani-s0-s0-ado-live-c3-1788212697875-JDZozU",
+    "networkCharacteristics": "Local Windows client to provider service over current network path",
+    "providerRegion": "Provider-managed; client region not asserted",
+    "storageCharacteristics": "Provider-authoritative envelope plus local Windows client cache",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Default branch excluded; all mutations use a per-run branch",
+    "dependencyVersions": "node=24.14.0; sqlite=3.51.2",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "Single physical Windows machine; two independent client processes share one provider identity",
+    "processTopology": "Independent OS child processes sharing one provider account for collaboration gates"
+  }
+}

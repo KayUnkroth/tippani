@@ -18,7 +18,7 @@
     "kind": "provider-live",
     "approved": true,
     "allowListed": true,
-    "identityLabel": "Live delegated identity (supplied at runtime)",
+    "identityLabel": "One Azure DevOps identity (supplied at runtime)",
     "identityVerified": true,
     "corporateFallbackDisabled": true,
     "defaultBranchExcluded": true,

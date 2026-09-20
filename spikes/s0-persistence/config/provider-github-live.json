@@ -18,7 +18,7 @@
     "kind": "provider-live",
     "approved": true,
     "allowListed": true,
-    "identityLabel": "Live delegated identity (supplied at runtime)",
+    "identityLabel": "One GitHub identity (supplied at runtime)",
     "identityVerified": true,
     "corporateFallbackDisabled": true,
     "defaultBranchExcluded": true,
@@ -35,7 +35,7 @@
       "put-contents",
       "list-contents",
       "list-commits",
-      "cleanup-unsupported"
+      "delete-ref-with-lease"
     ],
     "cleanup": {
       "manifestId": "syn-cleanup-s0-github-live",

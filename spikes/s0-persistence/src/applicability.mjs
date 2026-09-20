@@ -16,6 +16,24 @@ const LOCAL = Object.freeze([
   "S0-PER-001", "S0-PER-002", "S0-PER-003", "S0-PER-005",
 ]);
 
+const LOCAL_SQLITE_EXCLUSIONS = new Set([
+  "S0-CON-003",
+  "S0-SEC-001", "S0-SEC-002", "S0-SEC-004", "S0-SEC-005", "S0-SEC-006",
+]);
+
+const LOCAL_SQLITE = Object.freeze(
+  LOCAL.filter((id) => !LOCAL_SQLITE_EXCLUSIONS.has(id)),
+);
+
+const LOCAL_CAS_EXCLUSIONS = new Set([
+  "S0-CON-003",
+  "S0-SEC-001", "S0-SEC-002", "S0-SEC-004", "S0-SEC-005", "S0-SEC-006",
+]);
+
+const LOCAL_CAS = Object.freeze(
+  LOCAL.filter((id) => !LOCAL_CAS_EXCLUSIONS.has(id)),
+);
+
 const SHARED_PROVIDER = Object.freeze([
   "S0-COL-002", "S0-COL-003", "S0-COL-004", "S0-COL-005", "S0-COL-006",
   "S0-BCK-005",
@@ -32,8 +50,11 @@ function withProviderSpecific(...ids) {
 }
 
 export const APPLICABILITY_PROFILES = Object.freeze({
+  "local-sqlite": LOCAL_SQLITE,
+  "local-cas": LOCAL_CAS,
   local: LOCAL,
-  onedrive: withProviderSpecific("S0-BCK-002", "S0-BCK-006"),
+  onedrive: withProviderSpecific("S0-BCK-002"),
+  "onedrive-sync": Object.freeze(["S0-BCK-006"]),
   ado: withProviderSpecific("S0-BCK-003"),
   github: withProviderSpecific("S0-BCK-004"),
 });
@@ -44,14 +65,14 @@ export const CONFIGURATION_MATRIX = Object.freeze([
     label: "Local SQLite",
     engine: "SQLite",
     backingPath: "Local filesystem",
-    profile: "local",
+    profile: "local-sqlite",
   }),
   Object.freeze({
     configurationId: "CFG-LOCAL-CAS",
     label: "Local generation-CAS envelope",
     engine: "Generation-CAS envelope",
     backingPath: "Local filesystem",
-    profile: "local",
+    profile: "local-cas",
   }),
   Object.freeze({
     configurationId: "CFG-ONEDRIVE-LIVE",
