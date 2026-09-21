@@ -1,7 +1,7 @@
 # S0 architecture-mapping handoff
 
-**Generated:** 2026-09-21T16:02:27.721Z
-**Host:** not executed
+**Generated:** 2026-09-21T16:57:35.124Z
+**Host:** win32 x64 node 24.14.0
 **Final ADR readiness:** Incomplete
 **ADR approval:** Pending; this generated comparison does not record human acceptance.
 **Concrete mapping recommendation:** Deferred until a selected mapping passes every applicable absolute gate.
@@ -22,22 +22,12 @@ security gates are `Not applicable`; `S0-REC-002` remains applicable.
 
 **Relative metrics are provisional diagnostics only. No ranking or architecture decision is produced.**
 
-## Rejected existing evidence
-
-| Configuration | Validation errors |
-|---|---|
-| CFG-LOCAL-SQLITE | unsupported or missing result schemaVersion; sourceRevision is stale or missing; catalogRevision is stale or missing; applicabilityRevision is stale or missing; configRevision is stale or missing; adapter/backing-path/applicability identity does not match; catalog snapshot does not match the current catalog; applicable scenario set does not match the current profile; unexpected results: S0-CON-003, S0-SEC-001, S0-SEC-002, S0-SEC-004, S0-SEC-005, S0-SEC-006; S0-REC-002 N/A lacks scenario-specific contract rationale is required, structured independent approval |
-| CFG-LOCAL-CAS | unsupported or missing result schemaVersion; sourceRevision is stale or missing; catalogRevision is stale or missing; applicabilityRevision is stale or missing; configRevision is stale or missing; adapter/backing-path/applicability identity does not match; catalog snapshot does not match the current catalog; applicable scenario set does not match the current profile; unexpected results: S0-CON-003, S0-SEC-001, S0-SEC-002, S0-SEC-004, S0-SEC-005, S0-SEC-006 |
-
-These artifacts must be regenerated from the current source. Provider artifacts require new
-live runs with effective target identity/coordinates bound to an approved target hash.
-
 ## Applicability-aware configuration matrix
 
 | Configuration | Engine | Backing path | Applicable absolute | Pass | Fail | Blocked / incomplete | N/A | Not executed | Not applicable (absolute) | Eligibility | Evidence |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---|---|
-| Local SQLite | SQLite | Local filesystem | 32 | 0 | 0 | 0 | 0 | 32 | 20 | Incomplete | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local generation-CAS envelope | Generation-CAS envelope | Local filesystem | 32 | 0 | 0 | 0 | 0 | 32 | 20 | Incomplete | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
+| Local SQLite | SQLite | Local filesystem | 32 | 31 | 0 | 0 | 1 | 0 | 20 | Yes | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
+| Local generation-CAS envelope | Generation-CAS envelope | Local filesystem | 32 | 32 | 0 | 0 | 0 | 0 | 20 | Yes | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
 | OneDrive generation-CAS envelope | Generation-CAS envelope | OneDrive | 18 | 16 | 1 | 1 | 0 | 0 | 34 | No | [report](TEST-CASES-ONEDRIVE-LIVE/outcome.md) · [raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json) |
 | ADO generation-CAS envelope | Generation-CAS envelope | Azure DevOps repository | 18 | 18 | 0 | 0 | 0 | 0 | 34 | Yes | [report](TEST-CASES-ADO-LIVE/outcome.md) · [raw](TEST-CASES-ADO-LIVE/raw-results.json) |
 | GitHub generation-CAS envelope | Generation-CAS envelope | GitHub repository | 18 | 17 | 0 | 1 | 0 | 0 | 34 | Incomplete | [report](TEST-CASES-GITHUB-LIVE/outcome.md) · [raw](TEST-CASES-GITHUB-LIVE/raw-results.json) |
@@ -46,8 +36,8 @@ live runs with effective target identity/coordinates bound to an approved target
 
 | Configuration | Correctness | Collaboration | Recovery | Performance | Complexity | Recommendation | Conditions |
 |---|---|---|---|---|---|---|---|
-| [Local SQLite](TEST-CASES-LOCAL-SQLITE/outcome.md) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Not executed](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [`S0-ATM-001`, `S0-ATM-002`, `S0-ATM-003`, `S0-CON-001`, `S0-CON-002`, `S0-CON-004`, `S0-CON-005`, `S0-JRN-001`, `S0-JRN-002`, `S0-CRS-001`, `S0-CRS-002`, `S0-CRS-003`, `S0-COL-001`, `S0-BCK-001`, `S0-COR-001`, `S0-COR-002`, `S0-COR-003`, `S0-COR-004`, `S0-HYD-001`, `S0-HYD-002`, `S0-HYD-003`, `S0-MIG-001`, `S0-MIG-002`, `S0-MIG-003`, `S0-IMP-001`, `S0-IMP-002`, `S0-BKP-001`, `S0-BKP-002`, `S0-REC-001`, `S0-REC-002`, `S0-REC-005`, `S0-SEC-003`](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) |
-| [Local generation-CAS envelope](TEST-CASES-LOCAL-CAS/outcome.md) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Not executed](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [`S0-ATM-001`, `S0-ATM-002`, `S0-ATM-003`, `S0-CON-001`, `S0-CON-002`, `S0-CON-004`, `S0-CON-005`, `S0-JRN-001`, `S0-JRN-002`, `S0-CRS-001`, `S0-CRS-002`, `S0-CRS-003`, `S0-COL-001`, `S0-BCK-001`, `S0-COR-001`, `S0-COR-002`, `S0-COR-003`, `S0-COR-004`, `S0-HYD-001`, `S0-HYD-002`, `S0-HYD-003`, `S0-MIG-001`, `S0-MIG-002`, `S0-MIG-003`, `S0-IMP-001`, `S0-IMP-002`, `S0-BKP-001`, `S0-BKP-002`, `S0-REC-001`, `S0-REC-002`, `S0-REC-005`, `S0-SEC-003`](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) |
+| [Local SQLite](TEST-CASES-LOCAL-SQLITE/outcome.md) | [Pass](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Pass](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Pass](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [14/40](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [Component eligible](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) | [None](TEST-CASES-LOCAL-SQLITE/outcome.md) ([raw](TEST-CASES-LOCAL-SQLITE/raw-results.json)) |
+| [Local generation-CAS envelope](TEST-CASES-LOCAL-CAS/outcome.md) | [Pass](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Pass](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Pass](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Incomplete](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [19/40](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [Component eligible](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) | [None](TEST-CASES-LOCAL-CAS/outcome.md) ([raw](TEST-CASES-LOCAL-CAS/raw-results.json)) |
 | [OneDrive generation-CAS envelope](TEST-CASES-ONEDRIVE-LIVE/outcome.md) | [Fail](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [Pass](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [Incomplete](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [Pass](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [24/40](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [Reject component](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) | [`S0-SEC-005`, `S0-BKP-004`](TEST-CASES-ONEDRIVE-LIVE/outcome.md) ([raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json)) |
 | [ADO generation-CAS envelope](TEST-CASES-ADO-LIVE/outcome.md) | [Pass](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [Pass](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [Pass](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [Pass](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [24/40](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [Component eligible](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) | [None](TEST-CASES-ADO-LIVE/outcome.md) ([raw](TEST-CASES-ADO-LIVE/raw-results.json)) |
 | [GitHub generation-CAS envelope](TEST-CASES-GITHUB-LIVE/outcome.md) | [Pass](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [Pass](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [Incomplete](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [Pass](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [26/40](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [Incomplete](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) | [`S0-BKP-004`](TEST-CASES-GITHUB-LIVE/outcome.md) ([raw](TEST-CASES-GITHUB-LIVE/raw-results.json)) |
@@ -56,77 +46,89 @@ live runs with effective target identity/coordinates bound to an approved target
 
 | Mapping | Components | Absolute status | Recommendation | Conditions |
 |---|---|---|---|---|
-| Hybrid SQLite + provider-native CAS | CFG-LOCAL-SQLITE + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Rejected | Do not select | Close applicable gates for Local SQLite, OneDrive generation-CAS envelope, GitHub generation-CAS envelope |
-| Generation-CAS envelope on every backing path | CFG-LOCAL-CAS + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Rejected | Do not select | Close applicable gates for Local generation-CAS envelope, OneDrive generation-CAS envelope, GitHub generation-CAS envelope |
+| Hybrid SQLite + provider-native CAS | CFG-LOCAL-SQLITE + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Rejected | Do not select | Close applicable gates for OneDrive generation-CAS envelope, GitHub generation-CAS envelope |
+| Generation-CAS envelope on every backing path | CFG-LOCAL-CAS + CFG-ONEDRIVE-LIVE + CFG-ADO-LIVE + CFG-GITHUB-LIVE | Rejected | Do not select | Close applicable gates for OneDrive generation-CAS envelope, GitHub generation-CAS envelope |
+
+## GitHub restore limitation
+
+GitHub passed normal generation commits, stale-writer rejection, object/ref
+preconditions, auditable history, known-generation recovery, offline
+reconciliation, and provider-failure recovery. The remaining GitHub gap is
+`S0-BKP-004`, not `S0-BCK-004`.
+
+The current GitHub adapter writes through the Contents API, where each file
+write creates an independent commit. Restoring a backup containing multiple
+workspace files with that transport would expose intermediate mixtures of
+restored and pre-restore state. The adapter therefore fails closed rather than
+reporting a partial restore as success.
+
+Closing `S0-BKP-004` requires a commit-level restore transaction:
+
+1. Retain the expected authoritative branch-head SHA.
+2. Create all required blobs and one complete tree, including deletions.
+3. Create one restore commit.
+4. Advance the branch only if its head still equals the expected SHA.
+5. Reject and reconcile if another writer moved the head.
+
+GitHub GraphQL `createCommitOnBranch` with `expectedHeadOid` is a candidate
+transport, subject to validating its file-count and payload limits against the
+maximum supported Tippani workspace. Until such a path is implemented and
+tested, GitHub cannot establish one atomic authoritative restore head.
+
+## OneDrive cleanup and restore limitations
+
+OneDrive passed ETag stale-writer rejection, item version-history recovery,
+multi-client conflict handling, offline reconciliation, provider outage and
+lost-response recovery, synthetic-data and credential controls, request
+budgets, performance measurement, and the separate signed two-client
+synced-folder gate. Its rejection is caused by two specific absolute gates.
+
+### `S0-SEC-005`: conditionally safe cleanup
+
+The OneDrive cleanup path enumerates every run-owned child, records each item
+ID and ETag in the cleanup manifest, deletes each child with its recorded ETag,
+and lists the folder again to verify that it is empty. Microsoft Graph does not
+provide a condition meaning "delete this folder only if it is still empty and
+no child has appeared since the last check."
+
+Graph folder deletion is recursive. A child created after the final empty check
+but before the folder delete could therefore be removed even though it was not
+recorded in the cleanup manifest. The adapter fails closed with
+`cleanup_precondition_unavailable` rather than risk deleting an unrecorded
+concurrent child. This behavior is safe, but it does not satisfy the gate that
+the automated reaper completely deletes the run-owned namespace.
+
+The final campaign teardown does not convert this result to a pass. That
+cleanup occurred only after execution stopped, the exact campaign root was
+inventoried, and ownership of every remaining item was confirmed. It does not
+prove that the normal reaper can delete a live namespace safely under
+concurrent writes.
+
+Closing this gate requires a namespace lifecycle that prevents new writes
+before final deletion, or a cleanup contract that treats an empty, permanently
+retired tombstone folder as the completed safe state instead of requiring
+recursive folder deletion.
+
+### `S0-BKP-004`: atomic authoritative restore
+
+Each workspace is a separate OneDrive item. Restoring a multi-workspace
+snapshot with individual Graph writes would expose intermediate mixtures of
+restored and pre-restore state. Graph does not provide a transaction that
+atomically replaces all items in a folder, so the adapter fails closed rather
+than report a partial restore as successful.
+
+A candidate design is to upload and validate the complete snapshot under a new
+immutable generation directory, then switch one small authoritative `HEAD`
+item to that generation using an ETag `If-Match` update. Readers would resolve
+the active generation only through `HEAD`; a concurrent head change would
+reject the restore and require reconciliation. Until that design is
+implemented and tested, OneDrive cannot establish one atomic authoritative
+restore head.
 
 ## Exact open gates and evidence requirements
 
 | Configuration | Gate | State | Owner | Evidence required | Component report |
 |---|---|---|---|---|---|
-| Local SQLite | `S0-ATM-001` | Not executed | S0 implementation owner | Execute: A multi-field workspace mutation commits completely or not at all. Blocker/result: A multi-field workspace mutation commits completely or not at all. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-ATM-002` | Not executed | S0 implementation owner | Execute: Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically. Blocker/result: Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-ATM-003` | Not executed | S0 implementation owner | Execute: Failed mutation exposes no empty-body intent, mixed generation, or dangling alias. Blocker/result: Failed mutation exposes no empty-body intent, mixed generation, or dangling alias. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CON-001` | Not executed | S0 implementation owner | Execute: Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict. Blocker/result: Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CON-002` | Not executed | S0 implementation owner | Execute: Multiple headless/automation clients cannot overwrite a newer generation. Blocker/result: Multiple headless/automation clients cannot overwrite a newer generation. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CON-004` | Not executed | S0 implementation owner | Execute: Concurrent staging during publication preserves the newer intent revision. Blocker/result: Concurrent staging during publication preserves the newer intent revision. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CON-005` | Not executed | S0 implementation owner | Execute: Lock/CAS contention is bounded, observable, and retryable. Blocker/result: Lock/CAS contention is bounded, observable, and retryable. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-JRN-001` | Not executed | S0 implementation owner | Execute: Frozen intent tuples and planned journal become durable atomically before any provider operation. Blocker/result: Frozen intent tuples and planned journal become durable atomically before any provider operation. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-JRN-002` | Not executed | S0 implementation owner | Execute: No journal references a missing workspace, generation, or intent revision. Blocker/result: No journal references a missing workspace, generation, or intent revision. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CRS-001` | Not executed | S0 implementation owner | Execute: Kill before/during/after commit recovers only the complete previous or committed generation. Blocker/result: Kill before/during/after commit recovers only the complete previous or committed generation. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CRS-002` | Not executed | S0 implementation owner | Execute: Kill during alias/index update never exposes a partially updated index. Blocker/result: Kill during alias/index update never exposes a partially updated index. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-CRS-003` | Not executed | S0 implementation owner | Execute: Kill during backup or migration leaves an unambiguous recoverable state. Blocker/result: Kill during backup or migration leaves an unambiguous recoverable state. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-COL-001` | Not executed | S0 provider test owner | Execute: Independent local actors observe one stable workspace/generation and equal concurrency rules. Blocker/result: Independent local actors observe one stable workspace/generation and equal concurrency rules. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-BCK-001` | Not executed | S0 provider test owner | Execute: Local flush and atomic replace preserve file and index durability under supported filesystems. Blocker/result: Local flush and atomic replace preserve file and index durability under supported filesystems. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-COR-001` | Not executed | S0 implementation owner | Execute: Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined. Blocker/result: Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-COR-002` | Not executed | S0 implementation owner | Execute: Missing/dangling aliases and duplicate identities fail closed. Blocker/result: Missing/dangling aliases and duplicate identities fail closed. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-COR-003` | Not executed | S0 implementation owner | Execute: Unsupported schema/provider-operation version fails closed with a typed state. Blocker/result: Unsupported schema/provider-operation version fails closed with a typed state. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-COR-004` | Not executed | S0 implementation owner | Execute: Permission-denied or unreadable existing state is never treated as an absent/new store. Blocker/result: Permission-denied or unreadable existing state is never treated as an absent/new store. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-HYD-001` | Not executed | S0 implementation owner | Execute: Startup enumerates and validates all workspaces/aliases before APIs open. Blocker/result: Startup enumerates and validates all workspaces/aliases before APIs open. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-HYD-002` | Not executed | S0 implementation owner | Execute: Rehydration restores exact generation, intent order, private state, journal state, and last selection. Blocker/result: Rehydration restores exact generation, intent order, private state, journal state, and last selection. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-HYD-003` | Not executed | S0 implementation owner | Execute: Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted. Blocker/result: Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-MIG-001` | Not executed | S0 provider test owner | Execute: Forward migration is transactional or resumable, idempotent, and preserves originals/audit. Blocker/result: Forward migration is transactional or resumable, idempotent, and preserves originals/audit. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-MIG-002` | Not executed | S0 provider test owner | Execute: Interrupted migration resumes or rolls back without ambiguity. Blocker/result: Interrupted migration resumes or rolls back without ambiguity. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-MIG-003` | Not executed | S0 provider test owner | Execute: Unsupported source version and downgrade policy are explicit and fail closed. Blocker/result: Unsupported source version and downgrade policy are explicit and fail closed. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-IMP-001` | Not executed | S0 implementation owner | Execute: Complete checksummed legacy envelope validates before atomic import. Blocker/result: Complete checksummed legacy envelope validates before atomic import. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-IMP-002` | Not executed | S0 implementation owner | Execute: Failed/corrupt/duplicate legacy import preserves source and creates no partial destination. Blocker/result: Failed/corrupt/duplicate legacy import preserves source and creates no partial destination. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-BKP-001` | Not executed | S0 provider test owner | Execute: Active-store backup is internally consistent at one logical generation. Blocker/result: Active-store backup is internally consistent at one logical generation. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-BKP-002` | Not executed | S0 provider test owner | Execute: Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup. Blocker/result: Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-REC-001` | Not executed | S0 provider test owner | Execute: Clean and forced shutdown restart recover exact durable state. Blocker/result: Clean and forced shutdown restart recover exact durable state. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-REC-002` | Not executed | S0 provider test owner | Execute: Stale lock recovery removes only provably owned stale state. Blocker/result: Stale lock recovery removes only provably owned stale state. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-REC-005` | Not executed | S0 provider test owner | Execute: Diagnostics identify recovery state without exposing content or credentials. Blocker/result: Diagnostics identify recovery state without exposing content or credentials. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local SQLite | `S0-SEC-003` | Not executed | S0 implementation owner | Execute: Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports. Blocker/result: Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports. | [report](TEST-CASES-LOCAL-SQLITE/outcome.md) · [raw](TEST-CASES-LOCAL-SQLITE/raw-results.json) |
-| Local generation-CAS envelope | `S0-ATM-001` | Not executed | S0 implementation owner | Execute: A multi-field workspace mutation commits completely or not at all. Blocker/result: A multi-field workspace mutation commits completely or not at all. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-ATM-002` | Not executed | S0 implementation owner | Execute: Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically. Blocker/result: Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-ATM-003` | Not executed | S0 implementation owner | Execute: Failed mutation exposes no empty-body intent, mixed generation, or dangling alias. Blocker/result: Failed mutation exposes no empty-body intent, mixed generation, or dangling alias. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CON-001` | Not executed | S0 implementation owner | Execute: Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict. Blocker/result: Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CON-002` | Not executed | S0 implementation owner | Execute: Multiple headless/automation clients cannot overwrite a newer generation. Blocker/result: Multiple headless/automation clients cannot overwrite a newer generation. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CON-004` | Not executed | S0 implementation owner | Execute: Concurrent staging during publication preserves the newer intent revision. Blocker/result: Concurrent staging during publication preserves the newer intent revision. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CON-005` | Not executed | S0 implementation owner | Execute: Lock/CAS contention is bounded, observable, and retryable. Blocker/result: Lock/CAS contention is bounded, observable, and retryable. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-JRN-001` | Not executed | S0 implementation owner | Execute: Frozen intent tuples and planned journal become durable atomically before any provider operation. Blocker/result: Frozen intent tuples and planned journal become durable atomically before any provider operation. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-JRN-002` | Not executed | S0 implementation owner | Execute: No journal references a missing workspace, generation, or intent revision. Blocker/result: No journal references a missing workspace, generation, or intent revision. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CRS-001` | Not executed | S0 implementation owner | Execute: Kill before/during/after commit recovers only the complete previous or committed generation. Blocker/result: Kill before/during/after commit recovers only the complete previous or committed generation. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CRS-002` | Not executed | S0 implementation owner | Execute: Kill during alias/index update never exposes a partially updated index. Blocker/result: Kill during alias/index update never exposes a partially updated index. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-CRS-003` | Not executed | S0 implementation owner | Execute: Kill during backup or migration leaves an unambiguous recoverable state. Blocker/result: Kill during backup or migration leaves an unambiguous recoverable state. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-COL-001` | Not executed | S0 provider test owner | Execute: Independent local actors observe one stable workspace/generation and equal concurrency rules. Blocker/result: Independent local actors observe one stable workspace/generation and equal concurrency rules. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-BCK-001` | Not executed | S0 provider test owner | Execute: Local flush and atomic replace preserve file and index durability under supported filesystems. Blocker/result: Local flush and atomic replace preserve file and index durability under supported filesystems. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-COR-001` | Not executed | S0 implementation owner | Execute: Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined. Blocker/result: Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-COR-002` | Not executed | S0 implementation owner | Execute: Missing/dangling aliases and duplicate identities fail closed. Blocker/result: Missing/dangling aliases and duplicate identities fail closed. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-COR-003` | Not executed | S0 implementation owner | Execute: Unsupported schema/provider-operation version fails closed with a typed state. Blocker/result: Unsupported schema/provider-operation version fails closed with a typed state. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-COR-004` | Not executed | S0 implementation owner | Execute: Permission-denied or unreadable existing state is never treated as an absent/new store. Blocker/result: Permission-denied or unreadable existing state is never treated as an absent/new store. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-HYD-001` | Not executed | S0 implementation owner | Execute: Startup enumerates and validates all workspaces/aliases before APIs open. Blocker/result: Startup enumerates and validates all workspaces/aliases before APIs open. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-HYD-002` | Not executed | S0 implementation owner | Execute: Rehydration restores exact generation, intent order, private state, journal state, and last selection. Blocker/result: Rehydration restores exact generation, intent order, private state, journal state, and last selection. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-HYD-003` | Not executed | S0 implementation owner | Execute: Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted. Blocker/result: Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-MIG-001` | Not executed | S0 provider test owner | Execute: Forward migration is transactional or resumable, idempotent, and preserves originals/audit. Blocker/result: Forward migration is transactional or resumable, idempotent, and preserves originals/audit. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-MIG-002` | Not executed | S0 provider test owner | Execute: Interrupted migration resumes or rolls back without ambiguity. Blocker/result: Interrupted migration resumes or rolls back without ambiguity. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-MIG-003` | Not executed | S0 provider test owner | Execute: Unsupported source version and downgrade policy are explicit and fail closed. Blocker/result: Unsupported source version and downgrade policy are explicit and fail closed. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-IMP-001` | Not executed | S0 implementation owner | Execute: Complete checksummed legacy envelope validates before atomic import. Blocker/result: Complete checksummed legacy envelope validates before atomic import. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-IMP-002` | Not executed | S0 implementation owner | Execute: Failed/corrupt/duplicate legacy import preserves source and creates no partial destination. Blocker/result: Failed/corrupt/duplicate legacy import preserves source and creates no partial destination. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-BKP-001` | Not executed | S0 provider test owner | Execute: Active-store backup is internally consistent at one logical generation. Blocker/result: Active-store backup is internally consistent at one logical generation. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-BKP-002` | Not executed | S0 provider test owner | Execute: Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup. Blocker/result: Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-REC-001` | Not executed | S0 provider test owner | Execute: Clean and forced shutdown restart recover exact durable state. Blocker/result: Clean and forced shutdown restart recover exact durable state. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-REC-002` | Not executed | S0 provider test owner | Execute: Stale lock recovery removes only provably owned stale state. Blocker/result: Stale lock recovery removes only provably owned stale state. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-REC-005` | Not executed | S0 provider test owner | Execute: Diagnostics identify recovery state without exposing content or credentials. Blocker/result: Diagnostics identify recovery state without exposing content or credentials. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
-| Local generation-CAS envelope | `S0-SEC-003` | Not executed | S0 implementation owner | Execute: Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports. Blocker/result: Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports. | [report](TEST-CASES-LOCAL-CAS/outcome.md) · [raw](TEST-CASES-LOCAL-CAS/raw-results.json) |
 | OneDrive generation-CAS envelope | `S0-SEC-005` | Fail | S0 implementation owner | Execute: Cleanup/reaper deletes only run-owned resources recorded in the manifest. Blocker/result: OneDrive cannot condition recursive folder deletion on the folder remaining empty. | [report](TEST-CASES-ONEDRIVE-LIVE/outcome.md) · [raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json) |
 | OneDrive generation-CAS envelope | `S0-BKP-004` | Incomplete | S0 provider test owner | Execute: Restored shared workspace establishes one explicit authoritative head. Blocker/result: onedrive restore cannot establish one atomic authoritative head with the current spike transport. | [report](TEST-CASES-ONEDRIVE-LIVE/outcome.md) · [raw](TEST-CASES-ONEDRIVE-LIVE/raw-results.json) |
 | GitHub generation-CAS envelope | `S0-BKP-004` | Incomplete | S0 provider test owner | Execute: Restored shared workspace establishes one explicit authoritative head. Blocker/result: github restore cannot establish one atomic authoritative head with the current spike transport. | [report](TEST-CASES-GITHUB-LIVE/outcome.md) · [raw](TEST-CASES-GITHUB-LIVE/raw-results.json) |
@@ -137,10 +139,12 @@ These values are provisional and are not used for architecture selection.
 
 | Metric | Local SQLite | Local generation-CAS envelope | OneDrive generation-CAS envelope | ADO generation-CAS envelope | GitHub generation-CAS envelope |
 |---|---:|---:|---:|---:|---:|
+| Open by alias p50, small (ms) | 0.089 | 14.701 | — | — | — |
+| Mutation p50, small (ms) | 0.810 | 16.828 | — | — | — |
 | Remote CAS p50, small (ms) | — | — | 1560.947 | 579.535 | 1131.664 |
 | Collaborator discovery p50, small (ms) | — | — | 867.295 | 82.287 | 438.954 |
 | Provider requests per mutation, small | — | — | 5 | 5 | 5 |
-| Common complexity burden (of 40) | — | — | 24 | 24 | 26 |
+| Common complexity burden (of 40) | 14 | 19 | 24 | 24 | 26 |
 
 ## Decision conditions and evidence
 

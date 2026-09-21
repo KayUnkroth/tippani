@@ -9,12 +9,15 @@
     "kind": "local-temp",
     "identityLabel": "Synthetic Local Harness",
     "identityVerified": false,
+    "providerIdentity": null,
     "ownershipMarker": "tippani-s0:s0-local-cas-windows",
     "namespace": null,
     "defaultBranchExcluded": false,
     "corporateFallbackDisabled": true,
     "dryRunOperations": [],
-    "cleanup": null
+    "cleanup": null,
+    "effectiveTargetHash": null,
+    "approval": null
   },
   "budgets": {
     "maxOperations": 100,
