@@ -6,6 +6,22 @@
 **ADR approval:** Pending; this generated comparison does not record human acceptance.
 **Concrete mapping recommendation:** Deferred until a selected mapping passes every applicable absolute gate.
 
+> **Current status: both local persistence components are eligible.**
+>
+> Fresh Local SQLite and Local generation-CAS campaigns were executed on
+> 2026-09-21 against the current source, catalog, applicability profiles, and
+> configurations. Local SQLite passed 31 applicable absolute gates with one
+> independently approved `N/A` (`S0-REC-002`); Local generation-CAS passed all
+> 32 applicable absolute gates. Neither local component has a failed, blocked,
+> incomplete, or unexecuted absolute gate, and comparison validation reports
+> no stale or identity-mismatched local evidence.
+>
+> `S0-PER-001` and `S0-PER-003` remain incomplete relative performance
+> protocols for both local configurations. They do not affect absolute
+> component eligibility. Overall ADR readiness remains incomplete only because
+> OneDrive fails `S0-SEC-005` and remains incomplete for `S0-BKP-004`, while
+> GitHub remains incomplete for `S0-BKP-004`.
+
 Eligibility is evaluated per engine/backing-path configuration and then rolled up into
 candidate mappings. `N/A` requires approver identity, approval date, and a reference.
 Stale, identity-mismatched, or incomplete artifacts are rejected as incomplete evidence.
