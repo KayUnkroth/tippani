@@ -1,0 +1,45 @@
+{
+  "configurationId": "CFG-GITHUB-LIVE",
+  "runId": "s0-github-s0-20260920-215851-c1",
+  "adapter": "github",
+  "backingPath": "github",
+  "syntheticDataOnly": true,
+  "sandbox": {
+    "approved": true,
+    "kind": "provider-live",
+    "identityLabel": "One GitHub identity (supplied at runtime)",
+    "identityVerified": true,
+    "providerIdentity": "github:MDQ6VXNlcjMwMjY4Nzkz",
+    "ownershipMarker": "tippani-s0:s0-github-s0-20260920-215851-c1",
+    "namespace": "tippani-s0/s0-github-s0-20260920-215851-c1",
+    "defaultBranchExcluded": true,
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "connect",
+      "put-run-marker",
+      "get-contents",
+      "put-contents",
+      "list-contents",
+      "list-commits",
+      "delete-ref-with-lease"
+    ],
+    "cleanup": {
+      "manifestId": "syn-cleanup-s0-github-live",
+      "retentionHours": 24,
+      "expiresAt": "2026-09-22T15:19:29.425Z"
+    },
+    "effectiveTargetHash": "sha256:65d47596318a1bbdddff7496cf998b6c8b3771deed7dd10244cd19208700b4b5",
+    "approval": {
+      "approver": "Kay",
+      "approvedAt": "2026-09-20T21:54:47.5846096-07:00",
+      "reference": "Chat approval for s0-github-s0-20260920-215851-c1",
+      "targetHash": "sha256:65d47596318a1bbdddff7496cf998b6c8b3771deed7dd10244cd19208700b4b5"
+    }
+  },
+  "budgets": {
+    "maxOperations": 500,
+    "maxDurationMs": 300000,
+    "maxObjects": 10000,
+    "maxBytes": 104857600
+  }
+}

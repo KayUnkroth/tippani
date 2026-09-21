@@ -1,0 +1,1220 @@
+{
+  "schemaVersion": 2,
+  "syntheticData": true,
+  "harnessRevision": "s0-harness-v4",
+  "evidenceIdentity": {
+    "sourceRevision": "sha256:eef1ed728c3c3078e27ef025e9b45076598359a50acd09196acb4636720b9167",
+    "catalogRevision": "sha256:a2d4052f88cde758aff0bccf62bebd380907b935259f9571dd8f1646740723e7",
+    "applicabilityRevision": "sha256:7d9b94e9ea7e7f38893230577d6b5aa26ab141e96e3d430244ec51f8c5849b4d",
+    "configRevision": "sha256:b6000e8c3b8373833109eeba1ed087f5f8fa0a8b76591498618a8a8d7ed34e35"
+  },
+  "startedAt": "2026-09-21T15:17:28.644Z",
+  "completedAt": "2026-09-21T15:18:47.600Z",
+  "configuration": {
+    "configurationId": "CFG-ADO-LIVE",
+    "adapter": "ado",
+    "backingPath": "ado",
+    "platform": "windows-ntfs",
+    "scale": "small",
+    "runId": "s0-ado-s0-20260920-215851-c3",
+    "durable": false,
+    "host": "win32 x64 node 24.21.0",
+    "applicabilityProfile": "ado"
+  },
+  "preflight": {
+    "configurationId": "CFG-ADO-LIVE",
+    "runId": "s0-ado-s0-20260920-215851-c3",
+    "adapter": "ado",
+    "backingPath": "ado",
+    "syntheticDataOnly": true,
+    "sandbox": {
+      "approved": true,
+      "kind": "provider-live",
+      "identityLabel": "One Azure DevOps identity (supplied at runtime)",
+      "identityVerified": true,
+      "providerIdentity": "ado:316aa7f3-322a-6c0b-a058-a37488966840",
+      "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c3",
+      "namespace": "tippani-s0/s0-ado-s0-20260920-215851-c3",
+      "defaultBranchExcluded": true,
+      "corporateFallbackDisabled": true,
+      "dryRunOperations": [
+        "connect",
+        "push-run-marker",
+        "read-item",
+        "push",
+        "list-items",
+        "list-commits",
+        "delete-ref"
+      ],
+      "cleanup": {
+        "manifestId": "syn-cleanup-s0-ado-live",
+        "retentionHours": 24,
+        "expiresAt": "2026-09-22T15:17:28.644Z"
+      },
+      "effectiveTargetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce",
+      "approval": {
+        "approver": "Kay",
+        "approvedAt": "2026-09-20T21:54:47.5846096-07:00",
+        "reference": "Chat approval for s0-ado-s0-20260920-215851-c3",
+        "targetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce"
+      }
+    },
+    "budgets": {
+      "maxOperations": 600,
+      "maxDurationMs": 300000,
+      "maxObjects": 10000,
+      "maxBytes": 104857600
+    }
+  },
+  "environment": {
+    "os": "win32 10.0.22631",
+    "architecture": "x64",
+    "cpuModel": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "logicalCpuCount": 2,
+    "totalMemoryBytes": 8584384512,
+    "nodeVersion": "24.21.0",
+    "providerApiVersion": "Azure DevOps Git REST 7.1",
+    "configuredPlatform": "windows-ntfs",
+    "filesystem": "Not recorded",
+    "temporaryStoreRoot": "tippani-s0-s0-ado-s0-20260920-215851-c3-0LEaR9",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "Not recorded",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=24.21.0; sqlite=3.53.4",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "None recorded",
+    "processTopology": "Scenario-dependent: distinct child PIDs are required and recorded for collaboration gates"
+  },
+  "applicableScenarioIds": [
+    "S0-COL-002",
+    "S0-COL-003",
+    "S0-COL-004",
+    "S0-COL-005",
+    "S0-COL-006",
+    "S0-BCK-005",
+    "S0-MIG-004",
+    "S0-BKP-003",
+    "S0-BKP-004",
+    "S0-REC-003",
+    "S0-REC-004",
+    "S0-SEC-001",
+    "S0-SEC-002",
+    "S0-SEC-003",
+    "S0-SEC-004",
+    "S0-SEC-005",
+    "S0-SEC-006",
+    "S0-PER-004",
+    "S0-PER-005",
+    "S0-BCK-003"
+  ],
+  "catalogSize": 58,
+  "catalog": [
+    {
+      "id": "S0-ATM-001",
+      "criterionType": "absolute",
+      "title": "A multi-field workspace mutation commits completely or not at all",
+      "section": "1"
+    },
+    {
+      "id": "S0-ATM-002",
+      "criterionType": "absolute",
+      "title": "Branch-to-PR alias transition preserves one workspace and commits alias/index/state atomically",
+      "section": "1"
+    },
+    {
+      "id": "S0-ATM-003",
+      "criterionType": "absolute",
+      "title": "Failed mutation exposes no empty-body intent, mixed generation, or dangling alias",
+      "section": "1"
+    },
+    {
+      "id": "S0-CON-001",
+      "criterionType": "absolute",
+      "title": "Portal/user and Copilot/MCP writers from generation g produce one winner and one typed stale conflict",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-002",
+      "criterionType": "absolute",
+      "title": "Multiple headless/automation clients cannot overwrite a newer generation",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-003",
+      "criterionType": "absolute",
+      "title": "Independent workspaces progress concurrently without global serialization",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-004",
+      "criterionType": "absolute",
+      "title": "Concurrent staging during publication preserves the newer intent revision",
+      "section": "2"
+    },
+    {
+      "id": "S0-CON-005",
+      "criterionType": "absolute",
+      "title": "Lock/CAS contention is bounded, observable, and retryable",
+      "section": "2"
+    },
+    {
+      "id": "S0-JRN-001",
+      "criterionType": "absolute",
+      "title": "Frozen intent tuples and planned journal become durable atomically before any provider operation",
+      "section": "3"
+    },
+    {
+      "id": "S0-JRN-002",
+      "criterionType": "absolute",
+      "title": "No journal references a missing workspace, generation, or intent revision",
+      "section": "3"
+    },
+    {
+      "id": "S0-CRS-001",
+      "criterionType": "absolute",
+      "title": "Kill before/during/after commit recovers only the complete previous or committed generation",
+      "section": "4"
+    },
+    {
+      "id": "S0-CRS-002",
+      "criterionType": "absolute",
+      "title": "Kill during alias/index update never exposes a partially updated index",
+      "section": "4"
+    },
+    {
+      "id": "S0-CRS-003",
+      "criterionType": "absolute",
+      "title": "Kill during backup or migration leaves an unambiguous recoverable state",
+      "section": "4"
+    },
+    {
+      "id": "S0-COL-001",
+      "criterionType": "absolute",
+      "title": "Independent local actors observe one stable workspace/generation and equal concurrency rules",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-002",
+      "criterionType": "absolute",
+      "title": "Two concurrent clients on a shared backing path cannot silently overwrite each other",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-003",
+      "criterionType": "absolute",
+      "title": "Two clients reconnecting from different generations receive deterministic conflict/reload behavior",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-004",
+      "criterionType": "absolute",
+      "title": "Remote success with a lost response is reconciled without duplicate generation or false failure",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-005",
+      "criterionType": "absolute",
+      "title": "Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite",
+      "section": "5"
+    },
+    {
+      "id": "S0-COL-006",
+      "criterionType": "absolute",
+      "title": "A second client discovers a committed generation through the backing path change mechanism",
+      "section": "5"
+    },
+    {
+      "id": "S0-BCK-001",
+      "criterionType": "absolute",
+      "title": "Local flush and atomic replace preserve file and index durability under supported filesystems",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-002",
+      "criterionType": "absolute",
+      "title": "OneDrive ETag/version preconditions reject stale updates and support version recovery",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-003",
+      "criterionType": "absolute",
+      "title": "ADO object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-004",
+      "criterionType": "absolute",
+      "title": "GitHub object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-005",
+      "criterionType": "absolute",
+      "title": "Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state",
+      "section": "6"
+    },
+    {
+      "id": "S0-BCK-006",
+      "criterionType": "relative",
+      "title": "Synced-folder conflict behavior is measured separately from provider-API CAS",
+      "section": "6"
+    },
+    {
+      "id": "S0-COR-001",
+      "criterionType": "absolute",
+      "title": "Truncated, invalid, checksum-failing, or damaged primary state is detected and preserved/quarantined",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-002",
+      "criterionType": "absolute",
+      "title": "Missing/dangling aliases and duplicate identities fail closed",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-003",
+      "criterionType": "absolute",
+      "title": "Unsupported schema/provider-operation version fails closed with a typed state",
+      "section": "7"
+    },
+    {
+      "id": "S0-COR-004",
+      "criterionType": "absolute",
+      "title": "Permission-denied or unreadable existing state is never treated as an absent/new store",
+      "section": "7"
+    },
+    {
+      "id": "S0-HYD-001",
+      "criterionType": "absolute",
+      "title": "Startup enumerates and validates all workspaces/aliases before APIs open",
+      "section": "8"
+    },
+    {
+      "id": "S0-HYD-002",
+      "criterionType": "absolute",
+      "title": "Rehydration restores exact generation, intent order, private state, journal state, and last selection",
+      "section": "8"
+    },
+    {
+      "id": "S0-HYD-003",
+      "criterionType": "absolute",
+      "title": "Incomplete/indeterminate journals are surfaced for reconciliation before mutation is accepted",
+      "section": "8"
+    },
+    {
+      "id": "S0-MIG-001",
+      "criterionType": "absolute",
+      "title": "Forward migration is transactional or resumable, idempotent, and preserves originals/audit",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-002",
+      "criterionType": "absolute",
+      "title": "Interrupted migration resumes or rolls back without ambiguity",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-003",
+      "criterionType": "absolute",
+      "title": "Unsupported source version and downgrade policy are explicit and fail closed",
+      "section": "9"
+    },
+    {
+      "id": "S0-MIG-004",
+      "criterionType": "absolute",
+      "title": "Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt",
+      "section": "9"
+    },
+    {
+      "id": "S0-IMP-001",
+      "criterionType": "absolute",
+      "title": "Complete checksummed legacy envelope validates before atomic import",
+      "section": "10"
+    },
+    {
+      "id": "S0-IMP-002",
+      "criterionType": "absolute",
+      "title": "Failed/corrupt/duplicate legacy import preserves source and creates no partial destination",
+      "section": "10"
+    },
+    {
+      "id": "S0-BKP-001",
+      "criterionType": "absolute",
+      "title": "Active-store backup is internally consistent at one logical generation",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-002",
+      "criterionType": "absolute",
+      "title": "Restore reproduces exact workspace/journal state and rejects incomplete/corrupt backup",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-003",
+      "criterionType": "absolute",
+      "title": "Shared-backing history/export recovers a known generation without rewriting newer valid history",
+      "section": "11"
+    },
+    {
+      "id": "S0-BKP-004",
+      "criterionType": "absolute",
+      "title": "Restored shared workspace establishes one explicit authoritative head",
+      "section": "11"
+    },
+    {
+      "id": "S0-REC-001",
+      "criterionType": "absolute",
+      "title": "Clean and forced shutdown restart recover exact durable state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-002",
+      "criterionType": "absolute",
+      "title": "Stale lock recovery removes only provably owned stale state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-003",
+      "criterionType": "absolute",
+      "title": "Provider outage/auth/throttle/lost-response recovery reconciles authoritative state",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-004",
+      "criterionType": "absolute",
+      "title": "Local offline cache reconciles against newer authority without silent overwrite",
+      "section": "12"
+    },
+    {
+      "id": "S0-REC-005",
+      "criterionType": "absolute",
+      "title": "Diagnostics identify recovery state without exposing content or credentials",
+      "section": "12"
+    },
+    {
+      "id": "S0-SEC-001",
+      "criterionType": "absolute",
+      "title": "Preflight rejects non-allow-listed, unmarked, default/protected, or production coordinates before provider calls",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-002",
+      "criterionType": "absolute",
+      "title": "Effective sandbox identity is verified and corporate-account fallback is impossible",
+      "section": "Prerequisites"
+    },
+    {
+      "id": "S0-SEC-003",
+      "criterionType": "absolute",
+      "title": "Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports",
+      "section": "Prerequisites"
+    },
+    {
+      "id": "S0-SEC-004",
+      "criterionType": "absolute",
+      "title": "Credentials remain brokered/redacted and absent from workspace state and evidence",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-005",
+      "criterionType": "absolute",
+      "title": "Cleanup/reaper deletes only run-owned resources recorded in the manifest",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-SEC-006",
+      "criterionType": "absolute",
+      "title": "Provider request/object/time/storage budgets stop unsafe or abusive runs",
+      "section": "Safety contract"
+    },
+    {
+      "id": "S0-PER-001",
+      "criterionType": "relative",
+      "title": "Cold startup and enumeration are measured at small, medium, and stress scale",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-002",
+      "criterionType": "relative",
+      "title": "Alias-open, mutation, conflict, and journal p50/p95 are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-003",
+      "criterionType": "relative",
+      "title": "Backup/restore time, store size, memory, and write amplification are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-004",
+      "criterionType": "relative",
+      "title": "Provider requests, bytes, throttling, CAS latency, and collaborator discovery are measured comparably",
+      "section": "13"
+    },
+    {
+      "id": "S0-PER-005",
+      "criterionType": "relative",
+      "title": "Operational and implementation complexity is recorded using the same rubric",
+      "section": "Decision criteria"
+    }
+  ],
+  "results": [
+    {
+      "scenarioId": "S0-COL-002",
+      "title": "Two concurrent clients on a shared backing path cannot silently overwrite each other",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 3278.7175,
+      "evidence": {
+        "accounts": 1,
+        "clientProcesses": 2,
+        "clientProcessIds": [
+          9968,
+          13272
+        ],
+        "executionMode": "independent-os-processes",
+        "logicalActors": "Synthetic Client 1,Synthetic Client 2",
+        "winners": 1,
+        "staleConflicts": 1,
+        "noSilentOverwrite": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-COL-003",
+      "title": "Two clients reconnecting from different generations receive deterministic conflict/reload behavior",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 4467.3827,
+      "evidence": {
+        "accounts": 1,
+        "clientProcesses": 2,
+        "clientProcessIds": [
+          6864,
+          11832
+        ],
+        "executionMode": "independent-os-processes",
+        "staleGeneration": 0,
+        "reloadedGeneration": 1,
+        "reconciledGeneration": 2,
+        "deterministicReconnect": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-COL-004",
+      "title": "Remote success with a lost response is reconciled without duplicate generation or false failure",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 2163.6465000000007,
+      "evidence": {
+        "lostResponseDetected": true,
+        "noDuplicate": true,
+        "reconciledGeneration": 1
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-COL-005",
+      "title": "Offline work remains pending until authoritative CAS confirmation and reconciles without silent overwrite",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 3904.569300000001,
+      "evidence": {
+        "offlinePendingConflicted": true,
+        "processRestartRecoveredQueue": true,
+        "queueWriterProcessIds": [
+          1652,
+          11364
+        ],
+        "queueRestartInspectorProcessId": 5160,
+        "fifoStoppedAtFirstConflict": true,
+        "staleEntryRetained": true,
+        "noSilentOverwrite": true,
+        "authorityGeneration": 2
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-COL-006",
+      "title": "A second client discovers a committed generation through the backing path change mechanism",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 2874.3697999999986,
+      "evidence": {
+        "accounts": 1,
+        "clientProcesses": 2,
+        "clientProcessIds": [
+          5172,
+          12488
+        ],
+        "executionMode": "independent-os-processes",
+        "changeMechanism": "ADO branch/ref and item polling",
+        "observedGeneration": 1
+      },
+      "measurements": {
+        "collaboratorDiscoveryMs": 58
+      }
+    },
+    {
+      "scenarioId": "S0-BCK-005",
+      "title": "Provider outage, throttling, auth expiry, quota, or permission loss never produces success-shaped state",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 8737.416000000001,
+      "evidence": {
+        "faultsRejected": 4,
+        "faultsExercised": [
+          "auth-expiry",
+          "outage",
+          "quota",
+          "permission-loss",
+          "throttle"
+        ],
+        "rejectedFaultGenerationUnchanged": true,
+        "throttleRecoveredByBoundedRetry": true,
+        "throttleResponses": 1,
+        "retries": 1,
+        "retryAfterSeconds": [
+          1
+        ],
+        "backoffMs": 1000,
+        "transferredBytes": 92487
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-MIG-004",
+      "title": "Local-to-OneDrive/ADO/GitHub rehome preserves WorkspaceId and establishes one authority only after receipt",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 1454.2890999999981,
+      "evidence": {
+        "workspaceIdPreserved": true,
+        "generation": 1,
+        "receipt": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-BKP-003",
+      "title": "Shared-backing history/export recovers a known generation without rewriting newer valid history",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 2953.3984999999993,
+      "evidence": {
+        "recoveredGeneration": 1
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-BKP-004",
+      "title": "Restored shared workspace establishes one explicit authoritative head",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 4165.908300000003,
+      "evidence": {
+        "restoredGeneration": 2,
+        "oneHead": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-REC-003",
+      "title": "Provider outage/auth/throttle/lost-response recovery reconciles authoritative state",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 17250.001099999994,
+      "evidence": {
+        "faultsExercised": [
+          "outage",
+          "throttle",
+          "auth-expiry",
+          "quota",
+          "permission-loss",
+          "lost-response"
+        ],
+        "recoveredFaults": [
+          "outage",
+          "throttle",
+          "auth-expiry",
+          "quota",
+          "permission-loss"
+        ],
+        "throttleRecovery": {
+          "boundedRetries": 1,
+          "retryAfterSeconds": 1,
+          "minimumBackoffMs": 1000
+        },
+        "lostResponseReconciled": true,
+        "blindRetryRejected": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-REC-004",
+      "title": "Local offline cache reconciles against newer authority without silent overwrite",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 3913.7667999999976,
+      "evidence": {
+        "discoveredNewerAuthority": true,
+        "transientFailureRetained": true,
+        "processRestartRecoveredQueue": true,
+        "queueWriterProcessId": 10792,
+        "queueRestartInspectorProcessId": 6152,
+        "noSilentOverwrite": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-001",
+      "title": "Preflight rejects non-allow-listed, unmarked, default/protected, or production coordinates before provider calls",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.7232999999978347,
+      "evidence": {
+        "providerPreflightRejected": true,
+        "errorCount": 8
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-002",
+      "title": "Effective sandbox identity is verified and corporate-account fallback is impossible",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.5774999999994179,
+      "evidence": {
+        "corporateFallbackImpossible": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-003",
+      "title": "Only synthetic data appears in stores, fixtures, logs, backups, screenshots, dumps, and reports",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.5929000000032829,
+      "evidence": {
+        "syntheticFixtureAccepted": true,
+        "actualDataRejected": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-004",
+      "title": "Credentials remain brokered/redacted and absent from workspace state and evidence",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.6129000000000815,
+      "evidence": {
+        "configSecretRejected": true,
+        "workspaceHasNoSecrets": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-005",
+      "title": "Cleanup/reaper deletes only run-owned resources recorded in the manifest",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 0.5798999999969965,
+      "evidence": {
+        "ownedAuthorized": true,
+        "foreignRefused": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-SEC-006",
+      "title": "Provider request/object/time/storage budgets stop unsafe or abusive runs",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 101.21639999999752,
+      "evidence": {
+        "nonPositiveBudgetsRejected": true,
+        "operationLimitEnforced": true,
+        "objectLimitEnforced": true,
+        "byteLimitEnforced": true,
+        "deadlineEnforced": true,
+        "abortSignalEnforced": true,
+        "providerChildBudget": {
+          "metered": true,
+          "childPid": 11536,
+          "operationsBefore": 385,
+          "operationsAfter": 386
+        },
+        "cleanupBudgeted": true,
+        "cleanupSharedDeadline": true
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-PER-004",
+      "title": "Provider requests, bytes, throttling, CAS latency, and collaborator discovery are measured comparably",
+      "criterionType": "relative",
+      "status": "Pass",
+      "durationMs": 17939.098099999996,
+      "evidence": {
+        "scales": "small,medium,stress",
+        "warmupIterations": 3,
+        "timingMethod": "performance.now monotonic elapsed time",
+        "reportedStatistics": "min,p50,p95,max,mean,stddev",
+        "byteMethod": "UTF-8 application payload bytes submitted or consumed",
+        "rawSamples": {
+          "small": {
+            "remoteCasMs": [
+              575.4137000000046,
+              668.6538999999975,
+              720.8188000000009,
+              649.4714000000022,
+              578.3321999999971,
+              564.5633000000016
+            ],
+            "collaboratorDiscoveryMs": [
+              84.8559000000023,
+              85.4198999999935,
+              82.8556000000026,
+              122.12320000000182,
+              85.77030000000377,
+              82.71010000000388
+            ],
+            "requestsPerMutation": [
+              5,
+              5,
+              5,
+              5,
+              5,
+              5
+            ],
+            "transferredBytesPerMutation": [
+              10307,
+              10488,
+              10670,
+              10852,
+              11034,
+              11216
+            ],
+            "requestBytesPerMutation": [
+              3115,
+              3181,
+              3247,
+              3313,
+              3379,
+              3445
+            ],
+            "responseBytesPerMutation": [
+              7192,
+              7307,
+              7423,
+              7539,
+              7655,
+              7771
+            ],
+            "retriesPerMutation": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "throttleResponsesPerMutation": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ],
+            "retryAfterSeconds": [],
+            "backoffMsPerMutation": [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "medium": {
+            "remoteCasMs": [
+              609.092899999996,
+              598.683299999997,
+              672.0694999999978,
+              884.2179999999935
+            ],
+            "collaboratorDiscoveryMs": [
+              188.37870000000112,
+              88.83080000000336,
+              128.18710000000283,
+              92.57859999999346
+            ],
+            "requestsPerMutation": [
+              6,
+              6,
+              6,
+              6
+            ],
+            "transferredBytesPerMutation": [
+              82346,
+              82527,
+              82709,
+              82891
+            ],
+            "requestBytesPerMutation": [
+              27125,
+              27191,
+              27257,
+              27323
+            ],
+            "responseBytesPerMutation": [
+              55221,
+              55336,
+              55452,
+              55568
+            ],
+            "retriesPerMutation": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "throttleResponsesPerMutation": [
+              0,
+              0,
+              0,
+              0
+            ],
+            "retryAfterSeconds": [],
+            "backoffMsPerMutation": [
+              0,
+              0,
+              0,
+              0
+            ]
+          },
+          "stress": {
+            "remoteCasMs": [
+              1085.5718000000052,
+              891.4186999999947
+            ],
+            "collaboratorDiscoveryMs": [
+              132.1478000000061,
+              358.55280000000494
+            ],
+            "requestsPerMutation": [
+              7,
+              7
+            ],
+            "transferredBytesPerMutation": [
+              1504485,
+              1504666
+            ],
+            "requestBytesPerMutation": [
+              514510,
+              514576
+            ],
+            "responseBytesPerMutation": [
+              989975,
+              990090
+            ],
+            "retriesPerMutation": [
+              0,
+              0
+            ],
+            "throttleResponsesPerMutation": [
+              0,
+              0
+            ],
+            "retryAfterSeconds": [],
+            "backoffMsPerMutation": [
+              0,
+              0
+            ]
+          }
+        },
+        "repetitions_small": 6,
+        "requestsPerMutation_small": 5,
+        "bytesPerMutation_small": 10761.167,
+        "throttleResponses_small": 0,
+        "retries_small": 0,
+        "retryAfterSeconds_small": [],
+        "backoffMs_small": 0,
+        "requestCount_small": 30,
+        "requestBytes_small": 19680,
+        "responseBytes_small": 44887,
+        "repetitions_medium": 4,
+        "requestsPerMutation_medium": 6,
+        "bytesPerMutation_medium": 82618.25,
+        "throttleResponses_medium": 0,
+        "retries_medium": 0,
+        "retryAfterSeconds_medium": [],
+        "backoffMs_medium": 0,
+        "requestCount_medium": 24,
+        "requestBytes_medium": 108896,
+        "responseBytes_medium": 221577,
+        "repetitions_stress": 2,
+        "requestsPerMutation_stress": 7,
+        "bytesPerMutation_stress": 1504575.5,
+        "throttleResponses_stress": 0,
+        "retries_stress": 0,
+        "retryAfterSeconds_stress": [],
+        "backoffMs_stress": 0,
+        "requestCount_stress": 14,
+        "requestBytes_stress": 1029086,
+        "responseBytes_stress": 1980065,
+        "throttleResponses": 1,
+        "throttleRetries": 1,
+        "throttleRetryAfterSeconds": [
+          1
+        ],
+        "throttleBackoffMs": 1000,
+        "throttleBehavior": "bounded retry honored Retry-After and committed once"
+      },
+      "measurements": {
+        "setupMs_small": 1284.4406000000017,
+        "warmupMs_small": 219.43650000000343,
+        "remoteCasMinMs_small": 564.5633000000016,
+        "remoteCasP50Ms_small": 578.3321999999971,
+        "remoteCasP95Ms_small": 720.8188000000009,
+        "remoteCasMaxMs_small": 720.8188000000009,
+        "remoteCasMeanMs_small": 626.208883333334,
+        "remoteCasStdDevMs_small": 57.68631532484981,
+        "collaboratorDiscoveryMinMs_small": 82.71010000000388,
+        "collaboratorDiscoveryP50Ms_small": 84.8559000000023,
+        "collaboratorDiscoveryP95Ms_small": 122.12320000000182,
+        "collaboratorDiscoveryMaxMs_small": 122.12320000000182,
+        "collaboratorDiscoveryMeanMs_small": 90.62250000000131,
+        "collaboratorDiscoveryStdDevMs_small": 14.136769297473977,
+        "cleanupMs_small": 0.025199999996402767,
+        "setupMs_medium": 1565.8698000000004,
+        "warmupMs_medium": 276.4904999999999,
+        "remoteCasMinMs_medium": 598.683299999997,
+        "remoteCasP50Ms_medium": 609.092899999996,
+        "remoteCasP95Ms_medium": 884.2179999999935,
+        "remoteCasMaxMs_medium": 884.2179999999935,
+        "remoteCasMeanMs_medium": 691.0159249999961,
+        "remoteCasStdDevMs_medium": 115.02467612335003,
+        "collaboratorDiscoveryMinMs_medium": 88.83080000000336,
+        "collaboratorDiscoveryP50Ms_medium": 92.57859999999346,
+        "collaboratorDiscoveryP95Ms_medium": 188.37870000000112,
+        "collaboratorDiscoveryMaxMs_medium": 188.37870000000112,
+        "collaboratorDiscoveryMeanMs_medium": 124.49380000000019,
+        "collaboratorDiscoveryStdDevMs_medium": 39.95419400056877,
+        "cleanupMs_medium": 0.0062000000034458935,
+        "setupMs_stress": 2038.486699999994,
+        "warmupMs_stress": 617.5023999999976,
+        "remoteCasMinMs_stress": 891.4186999999947,
+        "remoteCasP50Ms_stress": 891.4186999999947,
+        "remoteCasP95Ms_stress": 1085.5718000000052,
+        "remoteCasMaxMs_stress": 1085.5718000000052,
+        "remoteCasMeanMs_stress": 988.4952499999999,
+        "remoteCasStdDevMs_stress": 97.07655000000523,
+        "collaboratorDiscoveryMinMs_stress": 132.1478000000061,
+        "collaboratorDiscoveryP50Ms_stress": 132.1478000000061,
+        "collaboratorDiscoveryP95Ms_stress": 358.55280000000494,
+        "collaboratorDiscoveryMaxMs_stress": 358.55280000000494,
+        "collaboratorDiscoveryMeanMs_stress": 245.35030000000552,
+        "collaboratorDiscoveryStdDevMs_stress": 113.20249999999942,
+        "cleanupMs_stress": 0.007599999997182749,
+        "throttleRecoveryLatencyMs": 1890.4573999999993
+      }
+    },
+    {
+      "scenarioId": "S0-PER-005",
+      "title": "Operational and implementation complexity is recorded using the same rubric",
+      "criterionType": "relative",
+      "status": "Pass",
+      "durationMs": 0.31910000000789296,
+      "evidence": {
+        "scale": "1=trivial, 2=low, 3=moderate, 4=high, 5=very high",
+        "dependencies": 2,
+        "implementation": 3,
+        "test": 4,
+        "migration": 3,
+        "deployment": 3,
+        "maintenance": 3,
+        "diagnostics": 3,
+        "recovery": 3,
+        "rationale": {
+          "dependencies": "Azure DevOps Git REST API and scoped authentication",
+          "implementation": "Repository envelope with branch-tip oldObjectId CAS",
+          "test": "Live repository, ref race, offline, failure, history, and cleanup coverage",
+          "migration": "Receipt-gated local-to-repository rehome",
+          "deployment": "Scoped credential, repository coordinates, and per-run branch",
+          "maintenance": "ADO Git REST API and ref semantics",
+          "diagnostics": "Provider responses, request telemetry, branch, commit, and generation state",
+          "recovery": "Auditable commit history plus offline conflict reconciliation"
+        },
+        "total": 24,
+        "mean": 3
+      },
+      "measurements": {}
+    },
+    {
+      "scenarioId": "S0-BCK-003",
+      "title": "ADO object/ref preconditions reject stale updates and preserve one auditable generation commit",
+      "criterionType": "absolute",
+      "status": "Pass",
+      "durationMs": 4830.581000000006,
+      "evidence": {
+        "winners": 1,
+        "staleConflicts": 1,
+        "durableGeneration": 2
+      },
+      "measurements": {}
+    }
+  ],
+  "safetyBudget": {
+    "operations": 567,
+    "objects": 23,
+    "bytes": 9688904,
+    "deadlineAt": 300092.4409,
+    "limits": {
+      "maxOperations": 600,
+      "maxDurationMs": 300000,
+      "maxObjects": 10000,
+      "maxBytes": 104857600
+    }
+  },
+  "budgetTelemetry": {
+    "identity": {
+      "requests": 1,
+      "requestBytes": 0,
+      "responseBytes": 253,
+      "transferredBytes": 253,
+      "throttleResponses": 0,
+      "retries": 0,
+      "retryAfterSeconds": [],
+      "backoffMs": 0,
+      "failures": {},
+      "byteMethod": "UTF-8 application payload bytes submitted or consumed"
+    },
+    "cleanup": {
+      "requests": 6,
+      "requestBytes": 177,
+      "responseBytes": 3327,
+      "transferredBytes": 3504,
+      "throttleResponses": 0,
+      "retries": 0,
+      "retryAfterSeconds": [],
+      "backoffMs": 0,
+      "failures": {},
+      "byteMethod": "UTF-8 application payload bytes submitted or consumed"
+    },
+    "final": {
+      "operations": 567,
+      "objects": 23,
+      "bytes": 9688904,
+      "deadlineAt": 300092.4409,
+      "limits": {
+        "maxOperations": 600,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    }
+  },
+  "cleanup": {
+    "required": true,
+    "status": "complete",
+    "outcome": {
+      "deleted": "tippani-s0/s0-ado-s0-20260920-215851-c3"
+    },
+    "budgeted": true,
+    "budgetSource": "preflight.budgets",
+    "sharedDeadline": true,
+    "budgetBefore": {
+      "operations": 561,
+      "objects": 23,
+      "bytes": 9685400,
+      "deadlineAt": 300092.4409,
+      "limits": {
+        "maxOperations": 600,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    },
+    "budgetAfter": {
+      "operations": 567,
+      "objects": 23,
+      "bytes": 9688904,
+      "deadlineAt": 300092.4409,
+      "limits": {
+        "maxOperations": 600,
+        "maxDurationMs": 300000,
+        "maxObjects": 10000,
+        "maxBytes": 104857600
+      }
+    },
+    "providerTelemetry": {
+      "requests": 6,
+      "requestBytes": 177,
+      "responseBytes": 3327,
+      "transferredBytes": 3504,
+      "throttleResponses": 0,
+      "retries": 0,
+      "retryAfterSeconds": [],
+      "backoffMs": 0,
+      "failures": {},
+      "byteMethod": "UTF-8 application payload bytes submitted or consumed"
+    },
+    "manifest": {
+      "artifact": "cleanup-manifest.json",
+      "manifestId": "syn-cleanup-s0-ado-live",
+      "manifestNonce": "afcddf61-a265-4551-90a2-5e2bd5a5f5e5",
+      "digest": "sha256:73fd60121a7d218d7168a943c86f57e19d2c130e88395ad8416e8b3a42c1ed5a",
+      "schemaVersion": 4,
+      "revision": 5,
+      "resourceCount": 1,
+      "cleanedCount": 1,
+      "phases": {
+        "recorded": 0,
+        "prepared": 0,
+        "mutating": 0,
+        "deleted": 0,
+        "cleaned": 1
+      }
+    },
+    "manifestDocument": {
+      "schemaVersion": 4,
+      "syntheticData": true,
+      "revision": 5,
+      "runId": "s0-ado-s0-20260920-215851-c3",
+      "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c3",
+      "manifestId": "syn-cleanup-s0-ado-live",
+      "coordinatesHash": "sha256:3fe938050f353d12b605abe223b2819e106821e03d70b88f5963f095e5bf2104",
+      "effectiveTargetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce",
+      "manifestNonce": "afcddf61-a265-4551-90a2-5e2bd5a5f5e5",
+      "resources": [
+        {
+          "kind": "ado-ref",
+          "id": "refs/heads/tippani-s0/s0-ado-s0-20260920-215851-c3",
+          "runId": "s0-ado-s0-20260920-215851-c3",
+          "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c3",
+          "coordinatesHash": "sha256:3fe938050f353d12b605abe223b2819e106821e03d70b88f5963f095e5bf2104",
+          "effectiveTargetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce",
+          "manifestNonce": "afcddf61-a265-4551-90a2-5e2bd5a5f5e5",
+          "marker": {
+            "kind": "ado-git-item",
+            "id": ".tippani-s0-run",
+            "digest": "sha256:b0ee303a37cd9a02e2050a17bbcbaec7cf3596fb53ad114adfc9230d56ceea73"
+          },
+          "phase": "cleaned",
+          "cleaned": true,
+          "condition": {
+            "expectedObjectId": "cfdf68c030d690118cfabf85b2d5c8ba93182223",
+            "expectedMarkerPath": ".tippani-s0-run",
+            "expectedMarkerDigest": "sha256:b0ee303a37cd9a02e2050a17bbcbaec7cf3596fb53ad114adfc9230d56ceea73"
+          }
+        }
+      ],
+      "manifestDigest": "sha256:73fd60121a7d218d7168a943c86f57e19d2c130e88395ad8416e8b3a42c1ed5a"
+    }
+  }
+}

@@ -53,6 +53,19 @@ function executeGit(args, { cwd, env, signal }) {
   });
 }
 
+export function writeAskPassFiles(temporaryRoot, platform = process.platform) {
+  const scriptPath = path.join(temporaryRoot, "askpass.cjs");
+  fs.writeFileSync(scriptPath, ASKPASS_SOURCE, { encoding: "utf8", mode: 0o700 });
+  if (platform !== "win32") return scriptPath;
+  const commandPath = path.join(temporaryRoot, "askpass.cmd");
+  fs.writeFileSync(
+    commandPath,
+    `@echo off\r\n"${process.execPath}" "%~dp0askpass.cjs" %*\r\n`,
+    "utf8",
+  );
+  return commandPath;
+}
+
 export async function conditionalDeleteGitHubRef({
   owner,
   repository,
@@ -64,9 +77,8 @@ export async function conditionalDeleteGitHubRef({
   validateInput({ owner, repository, ref, expectedSha, token });
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "tippani-s0-github-cleanup-"));
   const bareRepository = path.join(temporaryRoot, "repo.git");
-  const askpassPath = path.join(temporaryRoot, "askpass.cjs");
   try {
-    fs.writeFileSync(askpassPath, ASKPASS_SOURCE, { encoding: "utf8", mode: 0o700 });
+    const askpassPath = writeAskPassFiles(temporaryRoot);
     const isolatedEnvironment = {
       ...process.env,
       GIT_ASKPASS: askpassPath,

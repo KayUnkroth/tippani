@@ -9,7 +9,7 @@
   "syntheticDataOnly": true,
   "dryRun": false,
   "budgets": {
-    "maxOperations": 100,
+    "maxOperations": 600,
     "maxDurationMs": 300000,
     "maxObjects": 10000,
     "maxBytes": 104857600

@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "configurationId": "CFG-ADO-LIVE",
+  "runId": "s0-ado-s0-20260920-215851-c3",
+  "startedAt": "2026-09-21T15:17:28.644Z",
+  "completedAt": "2026-09-21T15:18:47.600Z",
+  "evidenceIdentity": {
+    "sourceRevision": "sha256:eef1ed728c3c3078e27ef025e9b45076598359a50acd09196acb4636720b9167",
+    "catalogRevision": "sha256:a2d4052f88cde758aff0bccf62bebd380907b935259f9571dd8f1646740723e7",
+    "applicabilityRevision": "sha256:7d9b94e9ea7e7f38893230577d6b5aa26ab141e96e3d430244ec51f8c5849b4d",
+    "configRevision": "sha256:b6000e8c3b8373833109eeba1ed087f5f8fa0a8b76591498618a8a8d7ed34e35"
+  },
+  "environment": {
+    "os": "win32 10.0.22631",
+    "architecture": "x64",
+    "cpuModel": "INTEL(R) XEON(R) PLATINUM 8573C",
+    "logicalCpuCount": 2,
+    "totalMemoryBytes": 8584384512,
+    "nodeVersion": "24.21.0",
+    "providerApiVersion": "Azure DevOps Git REST 7.1",
+    "configuredPlatform": "windows-ntfs",
+    "filesystem": "Not recorded",
+    "temporaryStoreRoot": "tippani-s0-s0-ado-s0-20260920-215851-c3-0LEaR9",
+    "networkCharacteristics": "Not recorded",
+    "providerRegion": "Not recorded",
+    "storageCharacteristics": "Not recorded",
+    "syncClientState": "Not applicable",
+    "repositoryProtections": "Not recorded",
+    "dependencyVersions": "node=24.21.0; sqlite=3.53.4",
+    "workloadMix": "scenario-defined deterministic small/medium/stress fixtures",
+    "knownLimitations": "None recorded",
+    "processTopology": "Scenario-dependent: distinct child PIDs are required and recorded for collaboration gates"
+  }
+}

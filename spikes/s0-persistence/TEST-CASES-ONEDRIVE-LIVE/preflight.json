@@ -9,24 +9,28 @@
     "kind": "provider-live",
     "identityLabel": "Live delegated identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "redacted-per-campaign",
-    "namespace": "redacted-per-campaign",
+    "providerIdentity": "onedrive:0f8e09c5fa47b8fc",
+    "ownershipMarker": "redacted-per-run",
+    "namespace": "redacted-per-run",
     "defaultBranchExcluded": true,
     "corporateFallbackDisabled": true,
     "dryRunOperations": [
       "ensure-folder",
+      "put-run-marker",
       "put-content",
       "get-content",
       "list-children",
       "delete-folder"
     ],
     "cleanup": {
-      "manifestId": "see-campaign-preflights",
-      "expiresAt": "see-campaign-preflights"
-    }
+      "manifestId": "see-run-preflights",
+      "expiresAt": "see-run-preflights"
+    },
+    "effectiveTargetHash": "see-run-preflights",
+    "approval": null
   },
   "budgets": {
-    "maxOperations": 100,
+    "maxOperations": 500,
     "maxDurationMs": 300000,
     "maxObjects": 10000,
     "maxBytes": 104857600

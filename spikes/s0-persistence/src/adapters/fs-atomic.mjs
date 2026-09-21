@@ -239,13 +239,21 @@ function cleanupReclaimArtifacts(lockPath) {
   }
 }
 
+function publishLockClaim(staging, ownerPath, lockPath) {
+  if (process.platform === "win32") {
+    // Windows rename can replace an existing file, so publish the owner file
+    // with an exclusive hard link instead.
+    fs.linkSync(ownerPath, lockPath);
+    return;
+  }
+  fs.renameSync(staging, lockPath);
+}
+
 /**
- * Exclusive cross-process lock. A complete owner directory is assembled at a
- * private path and atomically renamed into place. The token is also the owner
- * filename, so a delayed releaser can only unlink its own claim; a replacement
- * owner keeps a different non-empty directory that rmdir cannot remove. An
- * empty lock directory is therefore unambiguously an interrupted release and
- * can be recovered without a persistent reclamation mutex.
+ * Exclusive cross-process lock. POSIX publishes a complete owner directory by
+ * atomic rename. Windows publishes the owner file with an exclusive hard link
+ * because rename can replace an existing file there. Both representations are
+ * removed only after re-reading and matching the complete owner identity.
  */
 export async function acquireLock(lockPath, {
   timeoutMs = 10_000,
@@ -267,7 +275,7 @@ export async function acquireLock(lockPath, {
       fs.closeSync(handle);
     }
     try {
-      fs.renameSync(staging, lockPath);
+      publishLockClaim(staging, ownerPath, lockPath);
       cleanupReclaimArtifacts(lockPath);
       return {
         path: lockPath,
@@ -320,7 +328,7 @@ export function acquireLockSync(lockPath, {
       fs.closeSync(handle);
     }
     try {
-      fs.renameSync(staging, lockPath);
+      publishLockClaim(staging, ownerPath, lockPath);
       cleanupReclaimArtifacts(lockPath);
       return {
         path: lockPath,

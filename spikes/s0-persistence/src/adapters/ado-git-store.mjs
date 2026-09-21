@@ -534,11 +534,26 @@ export class AdoGitStore {
       } catch (error) {
         if (error?.code === "alias_conflict") throw error;
       }
-      // A non-fast-forward push (the ref moved) is the stale-writer signal.
-      let latest = null;
-      try { latest = await this.readAt(workspaceId, this.branch, "branch"); } catch { /* fall through */ }
-      if (latest && latest.generation !== expectedGeneration) {
-        throw new WorkspaceConflictError(workspaceId, expectedGeneration, latest.generation);
+      // A rejected non-fast-forward push can become visible through branch
+      // reads slightly after the push response, so reconcile against the moved
+      // ref before classifying it as a provider failure.
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          const latestTip = await this.getTip();
+          if (latestTip && latestTip !== tip) {
+            const latest = await this.readAt(workspaceId, latestTip, "commit");
+            if (latest.generation !== expectedGeneration) {
+              throw new WorkspaceConflictError(
+                workspaceId,
+                expectedGeneration,
+                latest.generation,
+              );
+            }
+          }
+        } catch (error) {
+          if (error instanceof WorkspaceConflictError) throw error;
+        }
+        if (attempt < 9) await sleep(100);
       }
       throw new WorkspaceStoreError(`update failed: ${resp.status}`, "provider_error");
     }

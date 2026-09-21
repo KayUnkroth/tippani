@@ -1,0 +1,45 @@
+{
+  "configurationId": "CFG-ADO-LIVE",
+  "runId": "s0-ado-s0-20260920-215851-c2",
+  "adapter": "ado",
+  "backingPath": "ado",
+  "syntheticDataOnly": true,
+  "sandbox": {
+    "approved": true,
+    "kind": "provider-live",
+    "identityLabel": "One Azure DevOps identity (supplied at runtime)",
+    "identityVerified": true,
+    "providerIdentity": "ado:316aa7f3-322a-6c0b-a058-a37488966840",
+    "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c2",
+    "namespace": "tippani-s0/s0-ado-s0-20260920-215851-c2",
+    "defaultBranchExcluded": true,
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "connect",
+      "push-run-marker",
+      "read-item",
+      "push",
+      "list-items",
+      "list-commits",
+      "delete-ref"
+    ],
+    "cleanup": {
+      "manifestId": "syn-cleanup-s0-ado-live",
+      "retentionHours": 24,
+      "expiresAt": "2026-09-22T15:15:04.696Z"
+    },
+    "effectiveTargetHash": "sha256:04c771b1a1df590c98fb9ff330394e25337251a6e66650e32a09ada6596ddf47",
+    "approval": {
+      "approver": "Kay",
+      "approvedAt": "2026-09-20T21:54:47.5846096-07:00",
+      "reference": "Chat approval for s0-ado-s0-20260920-215851-c2",
+      "targetHash": "sha256:04c771b1a1df590c98fb9ff330394e25337251a6e66650e32a09ada6596ddf47"
+    }
+  },
+  "budgets": {
+    "maxOperations": 600,
+    "maxDurationMs": 300000,
+    "maxObjects": 10000,
+    "maxBytes": 104857600
+  }
+}

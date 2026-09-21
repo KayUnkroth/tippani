@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 4,
+  "syntheticData": true,
+  "revision": 5,
+  "runId": "s0-ado-s0-20260920-215851-c3",
+  "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c3",
+  "manifestId": "syn-cleanup-s0-ado-live",
+  "coordinatesHash": "sha256:3fe938050f353d12b605abe223b2819e106821e03d70b88f5963f095e5bf2104",
+  "effectiveTargetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce",
+  "manifestNonce": "afcddf61-a265-4551-90a2-5e2bd5a5f5e5",
+  "resources": [
+    {
+      "kind": "ado-ref",
+      "id": "refs/heads/tippani-s0/s0-ado-s0-20260920-215851-c3",
+      "runId": "s0-ado-s0-20260920-215851-c3",
+      "ownershipMarker": "tippani-s0:s0-ado-s0-20260920-215851-c3",
+      "coordinatesHash": "sha256:3fe938050f353d12b605abe223b2819e106821e03d70b88f5963f095e5bf2104",
+      "effectiveTargetHash": "sha256:1cbef6a775719433fdeebdb73f8f95258af9c9f41823037e50077ce7882763ce",
+      "manifestNonce": "afcddf61-a265-4551-90a2-5e2bd5a5f5e5",
+      "marker": {
+        "kind": "ado-git-item",
+        "id": ".tippani-s0-run",
+        "digest": "sha256:b0ee303a37cd9a02e2050a17bbcbaec7cf3596fb53ad114adfc9230d56ceea73"
+      },
+      "phase": "cleaned",
+      "cleaned": true,
+      "condition": {
+        "expectedObjectId": "cfdf68c030d690118cfabf85b2d5c8ba93182223",
+        "expectedMarkerPath": ".tippani-s0-run",
+        "expectedMarkerDigest": "sha256:b0ee303a37cd9a02e2050a17bbcbaec7cf3596fb53ad114adfc9230d56ceea73"
+      }
+    }
+  ],
+  "manifestDigest": "sha256:73fd60121a7d218d7168a943c86f57e19d2c130e88395ad8416e8b3a42c1ed5a"
+}

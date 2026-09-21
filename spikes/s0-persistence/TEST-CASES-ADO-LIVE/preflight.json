@@ -7,14 +7,16 @@
   "sandbox": {
     "approved": true,
     "kind": "provider-live",
-    "identityLabel": "Live delegated identity (supplied at runtime)",
+    "identityLabel": "One Azure DevOps identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "redacted-per-campaign",
-    "namespace": "redacted-per-campaign",
+    "providerIdentity": "ado:316aa7f3-322a-6c0b-a058-a37488966840",
+    "ownershipMarker": "redacted-per-run",
+    "namespace": "redacted-per-run",
     "defaultBranchExcluded": true,
     "corporateFallbackDisabled": true,
     "dryRunOperations": [
       "connect",
+      "push-run-marker",
       "read-item",
       "push",
       "list-items",
@@ -22,12 +24,14 @@
       "delete-ref"
     ],
     "cleanup": {
-      "manifestId": "see-campaign-preflights",
-      "expiresAt": "see-campaign-preflights"
-    }
+      "manifestId": "see-run-preflights",
+      "expiresAt": "see-run-preflights"
+    },
+    "effectiveTargetHash": "see-run-preflights",
+    "approval": null
   },
   "budgets": {
-    "maxOperations": 100,
+    "maxOperations": 600,
     "maxDurationMs": 300000,
     "maxObjects": 10000,
     "maxBytes": 104857600

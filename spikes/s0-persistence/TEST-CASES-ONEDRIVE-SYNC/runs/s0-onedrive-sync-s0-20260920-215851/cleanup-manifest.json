@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 4,
+  "syntheticData": true,
+  "revision": 1,
+  "runId": "s0-onedrive-sync-s0-20260920-215851",
+  "ownershipMarker": "tippani-s0:s0-onedrive-sync-s0-20260920-215851",
+  "manifestId": "sync-cleanup-s0-onedrive-sync-s0-20260920-215851",
+  "coordinatesHash": "sha256:de7fae2f9ac1ade1c972594f8d4a8d93656ac95ae4b3fbcfdf2abc6bc7c4b2f6",
+  "effectiveTargetHash": "dry-run-unapproved",
+  "manifestNonce": "634b5b05-28e3-4dc1-9268-8a84676d79b1",
+  "resources": [
+    {
+      "kind": "onedrive-folder",
+      "id": "Tippani-S0-s0-20260920-215851/tippani-s0/s0-onedrive-sync-s0-20260920-215851",
+      "runId": "s0-onedrive-sync-s0-20260920-215851",
+      "ownershipMarker": "tippani-s0:s0-onedrive-sync-s0-20260920-215851",
+      "coordinatesHash": "sha256:de7fae2f9ac1ade1c972594f8d4a8d93656ac95ae4b3fbcfdf2abc6bc7c4b2f6",
+      "effectiveTargetHash": "dry-run-unapproved",
+      "manifestNonce": "634b5b05-28e3-4dc1-9268-8a84676d79b1",
+      "marker": {
+        "kind": "onedrive-item",
+        "id": "Tippani-S0-s0-20260920-215851/tippani-s0/s0-onedrive-sync-s0-20260920-215851/.tippani-s0-run",
+        "digest": "sha256:521a447f739bb8bb4cfb89932848c156185d6afb67f8fb47b5986194e3f877be"
+      },
+      "phase": "recorded",
+      "cleaned": false
+    }
+  ],
+  "manifestDigest": "sha256:4d291dc14262e53272c973369726fab3d1701066ee84657a1f1c838f7d46d81f"
+}

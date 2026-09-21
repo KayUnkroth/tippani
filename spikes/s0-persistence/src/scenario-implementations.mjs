@@ -1096,21 +1096,19 @@ async function providerPerformance(context) {
     const before = throttle.providerTelemetry();
     const started = performance.now();
     throttle.injectFault("throttle");
-    await assert.rejects(
-      throttle.compareAndSwap({
-        workspaceId: workspace.workspaceId,
-        expectedGeneration: 0,
-        operation: { auditEvent: { actor: "Synthetic Provider Perf", action: "throttle" } },
-      }),
-      (error) => typeof error.code === "string" && error.code !== "generation_conflict",
-    );
-    measurements.throttleFailureLatencyMs = performance.now() - started;
+    const recovered = await throttle.compareAndSwap({
+      workspaceId: workspace.workspaceId,
+      expectedGeneration: 0,
+      operation: { auditEvent: { actor: "Synthetic Provider Perf", action: "throttle" } },
+    });
+    assert.equal(recovered.generation, 1);
+    measurements.throttleRecoveryLatencyMs = performance.now() - started;
     const delta = telemetryDelta(before, throttle.providerTelemetry());
     evidence.throttleResponses = delta.throttleResponses;
     evidence.throttleRetries = delta.retries;
     evidence.throttleRetryAfterSeconds = delta.retryAfterSeconds;
     evidence.throttleBackoffMs = delta.backoffMs;
-    evidence.throttleBehavior = "typed failure; no success-shaped state";
+    evidence.throttleBehavior = "bounded retry honored Retry-After and committed once";
   } finally {
     await close(throttle);
   }
@@ -1517,7 +1515,7 @@ async function preflightRejectsUnsafeCoords() {
       ownershipMarker: "tippani-s0:s0-provider-unsafe",
     },
   };
-  const errors = validatePreflight(unsafe);
+  const errors = validatePreflight(unsafe, { env: {} });
   assert.ok(errors.some((error) => /allow-listed/.test(error)), "Non-allow-listed provider coords must be rejected");
   assert.ok(errors.some((error) => /identity/i.test(error)), "Unverified provider identity must be rejected");
   assert.ok(errors.some((error) => /namespace/i.test(error) || /branch/i.test(error)));
@@ -1526,7 +1524,7 @@ async function preflightRejectsUnsafeCoords() {
 }
 
 async function identityVerifiedNoCorporateFallback(context) {
-  const base = deepClone(context.config);
+  const base = context.config;
   assert.deepEqual(validatePreflight(base), [], "The sandbox config must pass its own preflight");
   const fallback = { ...base, sandbox: { ...base.sandbox, corporateFallbackDisabled: false } };
   assert.ok(

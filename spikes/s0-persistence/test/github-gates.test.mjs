@@ -8,7 +8,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { GitHubRepoStore } from "../src/adapters/github-repo-store.mjs";
-import { conditionalDeleteGitHubRef } from "../src/adapters/github-ref-delete.mjs";
+import {
+  conditionalDeleteGitHubRef,
+  writeAskPassFiles,
+} from "../src/adapters/github-ref-delete.mjs";
 import { createCleanupAuthorization } from "../src/cleanup-manifest.mjs";
 import { ONEDRIVE_GATE_IMPLEMENTATIONS } from "../src/onedrive-gates.mjs";
 import { createSyntheticWorkspace } from "../src/synthetic-fixtures.mjs";
@@ -460,6 +463,20 @@ await check("native Git cleanup rejects unsafe input before spawning", async () 
     }),
     TypeError,
   );
+});
+
+await check("native Git cleanup uses an executable Windows askpass shim", () => {
+  const root = fs.mkdtempSync(path.join(process.cwd(), ".github-askpass-"));
+  try {
+    const askpassPath = writeAskPassFiles(root, "win32");
+    assert.equal(path.extname(askpassPath), ".cmd");
+    assert.equal(fs.existsSync(path.join(root, "askpass.cjs")), true);
+    const command = fs.readFileSync(askpassPath, "utf8");
+    assert.match(command, /askpass\.cjs/);
+    assert.match(command, /%\*/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 await check("GitHub cleanup returns to prepared after a confirmed authentication failure", async () => {

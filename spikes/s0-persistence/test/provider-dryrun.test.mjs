@@ -52,6 +52,10 @@ const onedriveLiveConfig = JSON.parse(fs.readFileSync(
   path.join(spikeRoot, "config", "provider-onedrive-live.json"),
   "utf8",
 ));
+const githubLiveConfig = JSON.parse(fs.readFileSync(
+  path.join(spikeRoot, "config", "provider-github-live.json"),
+  "utf8",
+));
 
 let pass = 0;
 let fail = 0;
@@ -233,6 +237,62 @@ await check("live preflight rejects unresolved placeholders before any network c
   const errors = validatePreflight(live, { env: {} });
   assert(errors.some((error) => /resolved before provider calls/.test(error)));
   assert(errors.some((error) => /Structured preflight approval/.test(error)));
+});
+
+await check("live security preflight self-tests isolate runtime environment and retain trusted identity", async () => {
+  const live = structuredClone(githubLiveConfig);
+  const runId = "s0-live-security-self-tests";
+  const identity = "github:syn-identity-001";
+  live.runId = runId;
+  live.sandbox.ownershipMarker = `tippani-s0:${runId}`;
+  live.sandbox.namespace = `tippani-s0/${runId}`;
+  live.sandbox.cleanup.manifestId = `syn-cleanup-${runId}`;
+  const targetHash = providerTargetHash({
+    provider: "github",
+    identity,
+    coordinates: {
+      owner: "synthetic-owner",
+      repository: "synthetic-repository",
+    },
+    namespace: live.sandbox.namespace,
+  });
+  const values = {
+    S0_GITHUB_TOKEN: "syn-token",
+    S0_GITHUB_OWNER: "synthetic-owner",
+    S0_GITHUB_REPO: "synthetic-repository",
+    S0_ADO_ORG: "environment-value-must-not-resolve-unsafe-fixture",
+    S0_ADO_PROJECT: "environment-value-must-not-resolve-unsafe-fixture",
+    S0_ADO_REPO: "environment-value-must-not-resolve-unsafe-fixture",
+    S0_PREFLIGHT_APPROVER: "Synthetic Reviewer",
+    S0_PREFLIGHT_APPROVED_AT: "2026-09-03T20:00:00.000Z",
+    S0_PREFLIGHT_APPROVAL_REFERENCE: "syn-live-security",
+    S0_PREFLIGHT_TARGET_HASH: targetHash,
+  };
+  const previous = Object.fromEntries(
+    Object.keys(values).map((name) => [name, process.env[name]]),
+  );
+  try {
+    Object.assign(process.env, values);
+    const { run } = await runHarness({
+      config: live,
+      scenarioIds: ["S0-SEC-001", "S0-SEC-002"],
+      adapterFactory: () => ({}),
+      identityResolver: async () => ({ subject: identity }),
+      writeArtifacts: false,
+    });
+    assert.deepEqual(
+      run.results.map(({ scenarioId, status }) => ({ scenarioId, status })),
+      [
+        { scenarioId: "S0-SEC-001", status: "Pass" },
+        { scenarioId: "S0-SEC-002", status: "Pass" },
+      ],
+    );
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 });
 
 await check("provider adapter rejects a mismatched approved target before fetch", async () => {

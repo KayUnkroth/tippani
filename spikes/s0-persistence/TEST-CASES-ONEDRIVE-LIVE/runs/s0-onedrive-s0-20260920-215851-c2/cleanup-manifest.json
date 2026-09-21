@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 4,
+  "syntheticData": true,
+  "revision": 3,
+  "runId": "s0-onedrive-s0-20260920-215851-c2",
+  "ownershipMarker": "tippani-s0:s0-onedrive-s0-20260920-215851-c2",
+  "manifestId": "syn-cleanup-s0-onedrive-live",
+  "coordinatesHash": "sha256:eced8ff662d01e3ac225dd1d830105426f1eadd320b68a216a0d5f681858d1a3",
+  "effectiveTargetHash": "sha256:8552ff4e1d51b8517cba2b64cf6c4f62e3921f605f0a36968bcb073e44d192be",
+  "manifestNonce": "5fcd8730-983e-4051-9eca-c7793513731d",
+  "resources": [
+    {
+      "kind": "onedrive-folder",
+      "id": "Tippani-S0-s0-20260920-215851/tippani-s0/s0-onedrive-s0-20260920-215851-c2",
+      "runId": "s0-onedrive-s0-20260920-215851-c2",
+      "ownershipMarker": "tippani-s0:s0-onedrive-s0-20260920-215851-c2",
+      "coordinatesHash": "sha256:eced8ff662d01e3ac225dd1d830105426f1eadd320b68a216a0d5f681858d1a3",
+      "effectiveTargetHash": "sha256:8552ff4e1d51b8517cba2b64cf6c4f62e3921f605f0a36968bcb073e44d192be",
+      "manifestNonce": "5fcd8730-983e-4051-9eca-c7793513731d",
+      "marker": {
+        "kind": "onedrive-item",
+        "id": "Tippani-S0-s0-20260920-215851/tippani-s0/s0-onedrive-s0-20260920-215851-c2/.tippani-s0-run",
+        "digest": "sha256:1fac7e5b9b221e347e8bd8dc8e644a51df8312f4deea1be5f2609d7d780e460e"
+      },
+      "phase": "mutating",
+      "cleaned": false,
+      "condition": {
+        "expectedItemId": "F8E09C5FA47B8FC!s2eef121936da4ce2a6cb4f01b1e77699",
+        "expectedMarkerItemId": "F8E09C5FA47B8FC!s14ed7c7b9fe042958a293bf8d6a650a8",
+        "expectedMarkerDigest": "sha256:1fac7e5b9b221e347e8bd8dc8e644a51df8312f4deea1be5f2609d7d780e460e",
+        "expectedChildren": [
+          {
+            "id": "F8E09C5FA47B8FC!s05dec61f8cdc4598bcbe229117bc6fb9",
+            "name": "syn-ws-provider-per-medium-s0-onedrive-.json",
+            "eTag": "\"{05DEC61F-8CDC-4598-BCBE-229117BC6FB9},5\""
+          },
+          {
+            "id": "F8E09C5FA47B8FC!s0e83e529a18d412498b13ecdd7c5d42d",
+            "name": "syn-ws-provider-per-stress-s0-onedrive-.json",
+            "eTag": "\"{0E83E529-A18D-4124-98B1-3ECDD7C5D42D},3\""
+          },
+          {
+            "id": "F8E09C5FA47B8FC!s14ed7c7b9fe042958a293bf8d6a650a8",
+            "name": ".tippani-s0-run",
+            "eTag": "\"{14ED7C7B-9FE0-4295-8A29-3BF8D6A650A8},1\""
+          },
+          {
+            "id": "F8E09C5FA47B8FC!s7cb5e40c6e0747858f2b94a12857a1ef",
+            "name": "syn-ws-provider-per-small-s0-onedrive-s.json",
+            "eTag": "\"{7CB5E40C-6E07-4785-8F2B-94A12857A1EF},7\""
+          },
+          {
+            "id": "F8E09C5FA47B8FC!sb0cc313e3b2f454cbda13200d0a5c624",
+            "name": "syn-ws-provider-throttle-s0-onedrive-s0.json",
+            "eTag": "\"{B0CC313E-3B2F-454C-BDA1-3200D0A5C624},2\""
+          }
+        ]
+      }
+    }
+  ],
+  "manifestDigest": "sha256:605246be65388a3c31f6239e30d9f88fdb1e395c860922317fa85f4ddc369a2b"
+}

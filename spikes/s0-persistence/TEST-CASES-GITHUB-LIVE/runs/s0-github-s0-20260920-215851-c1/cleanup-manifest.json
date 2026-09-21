@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 4,
+  "syntheticData": true,
+  "revision": 5,
+  "runId": "s0-github-s0-20260920-215851-c1",
+  "ownershipMarker": "tippani-s0:s0-github-s0-20260920-215851-c1",
+  "manifestId": "syn-cleanup-s0-github-live",
+  "coordinatesHash": "sha256:1e41e5822a10216a17a203752fef849bfa8b2264888a9788328b729d1b24f5fc",
+  "effectiveTargetHash": "sha256:65d47596318a1bbdddff7496cf998b6c8b3771deed7dd10244cd19208700b4b5",
+  "manifestNonce": "067b4413-8565-4596-affd-b14f65397282",
+  "resources": [
+    {
+      "kind": "github-ref",
+      "id": "refs/heads/tippani-s0/s0-github-s0-20260920-215851-c1",
+      "runId": "s0-github-s0-20260920-215851-c1",
+      "ownershipMarker": "tippani-s0:s0-github-s0-20260920-215851-c1",
+      "coordinatesHash": "sha256:1e41e5822a10216a17a203752fef849bfa8b2264888a9788328b729d1b24f5fc",
+      "effectiveTargetHash": "sha256:65d47596318a1bbdddff7496cf998b6c8b3771deed7dd10244cd19208700b4b5",
+      "manifestNonce": "067b4413-8565-4596-affd-b14f65397282",
+      "phase": "cleaned",
+      "cleaned": true,
+      "condition": {
+        "expectedSha": "b367530f125d605640f494e4d8dc4c2f4bdb4c62"
+      }
+    }
+  ],
+  "manifestDigest": "sha256:9d3156572d1a10c8bce4357a5aca01de44a87efb2ab6d052ecbb1ce0b58491fb"
+}

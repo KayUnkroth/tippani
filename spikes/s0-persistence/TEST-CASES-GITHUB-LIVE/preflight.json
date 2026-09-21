@@ -7,27 +7,31 @@
   "sandbox": {
     "approved": true,
     "kind": "provider-live",
-    "identityLabel": "Live delegated identity (supplied at runtime)",
+    "identityLabel": "One GitHub identity (supplied at runtime)",
     "identityVerified": true,
-    "ownershipMarker": "redacted-per-campaign",
-    "namespace": "redacted-per-campaign",
+    "providerIdentity": "github:MDQ6VXNlcjMwMjY4Nzkz",
+    "ownershipMarker": "redacted-per-run",
+    "namespace": "redacted-per-run",
     "defaultBranchExcluded": true,
     "corporateFallbackDisabled": true,
     "dryRunOperations": [
       "connect",
+      "put-run-marker",
       "get-contents",
       "put-contents",
       "list-contents",
       "list-commits",
-      "delete-ref"
+      "delete-ref-with-lease"
     ],
     "cleanup": {
-      "manifestId": "see-campaign-preflights",
-      "expiresAt": "see-campaign-preflights"
-    }
+      "manifestId": "see-run-preflights",
+      "expiresAt": "see-run-preflights"
+    },
+    "effectiveTargetHash": "see-run-preflights",
+    "approval": null
   },
   "budgets": {
-    "maxOperations": 100,
+    "maxOperations": 500,
     "maxDurationMs": 300000,
     "maxObjects": 10000,
     "maxBytes": 104857600

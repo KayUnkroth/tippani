@@ -1,0 +1,44 @@
+{
+  "configurationId": "CFG-ONEDRIVE-LIVE",
+  "runId": "s0-onedrive-s0-20260920-215851-c2",
+  "adapter": "onedrive",
+  "backingPath": "onedrive",
+  "syntheticDataOnly": true,
+  "sandbox": {
+    "approved": true,
+    "kind": "provider-live",
+    "identityLabel": "Live delegated identity (supplied at runtime)",
+    "identityVerified": true,
+    "providerIdentity": "onedrive:0f8e09c5fa47b8fc",
+    "ownershipMarker": "tippani-s0:s0-onedrive-s0-20260920-215851-c2",
+    "namespace": "tippani-s0/s0-onedrive-s0-20260920-215851-c2",
+    "defaultBranchExcluded": true,
+    "corporateFallbackDisabled": true,
+    "dryRunOperations": [
+      "ensure-folder",
+      "put-run-marker",
+      "put-content",
+      "get-content",
+      "list-children",
+      "delete-folder"
+    ],
+    "cleanup": {
+      "manifestId": "syn-cleanup-s0-onedrive-live",
+      "retentionHours": 24,
+      "expiresAt": "2026-09-22T15:38:57.997Z"
+    },
+    "effectiveTargetHash": "sha256:8552ff4e1d51b8517cba2b64cf6c4f62e3921f605f0a36968bcb073e44d192be",
+    "approval": {
+      "approver": "Kay",
+      "approvedAt": "2026-09-20T22:14:12.7624515-07:00",
+      "reference": "Chat approval for s0-onedrive-s0-20260920-215851-c2",
+      "targetHash": "sha256:8552ff4e1d51b8517cba2b64cf6c4f62e3921f605f0a36968bcb073e44d192be"
+    }
+  },
+  "budgets": {
+    "maxOperations": 500,
+    "maxDurationMs": 300000,
+    "maxObjects": 10000,
+    "maxBytes": 104857600
+  }
+}
