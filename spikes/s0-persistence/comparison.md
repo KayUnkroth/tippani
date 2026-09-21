@@ -1,10 +1,26 @@
 # S0 architecture-mapping handoff
 
 **Generated:** 2026-09-21T16:57:35.124Z
-**Host:** win32 x64 node 24.14.0
+**Host for local runs:** Windows `win32 10.0.26200` x64, Node.js `24.14.0`
+**Hosts for provider runs:** Two zonally separated Azure Windows VMs, Node.js `24.21.0`
 **Final ADR readiness:** Incomplete
 **ADR approval:** Pending; this generated comparison does not record human acceptance.
 **Concrete mapping recommendation:** Deferred until a selected mapping passes every applicable absolute gate.
+
+## Execution environments
+
+| Property | Local SQLite and Local generation-CAS | ADO, GitHub, OneDrive API, and synced-folder providers |
+|---|---|---|
+| Execution location | Current Windows workstation | Azure West US 2 |
+| Hosts | One local host | `s0-20260920-215851-vm1` in availability zone 1; `s0-20260920-215851-vm2` in availability zone 2 |
+| Operating system | Windows `win32 10.0.26200` x64 | Windows 11 Enterprise 23H2, observed as `win32 10.0.22631` x64 |
+| Azure image | Not applicable | `MicrosoftWindowsDesktop:windows-11:win11-23h2-ent:22631.7582.260907` |
+| Compute | Intel Core Ultra 7 165H; 22 logical CPUs; 33,983,225,856 bytes RAM | `Standard_D2s_v5` per VM; 2 vCPUs and 8 GiB class memory; observed Intel Xeon Platinum 8573C, 2 logical CPUs, and 8,584,384,512 bytes RAM |
+| Storage | Windows NTFS configuration; detailed filesystem/storage characteristics were not recorded | Standard SSD LRS OS disk; Windows NTFS configuration; detailed runtime filesystem/storage characteristics were not recorded |
+| Runtime | Node.js `24.14.0` | Node.js `24.21.0`; SQLite `3.53.4`; MinGit `2.55.0.windows.5`; OneDrive `26.163.0823.0004` |
+| VM security | Not applicable | Trusted Launch, Secure Boot, and virtual TPM enabled |
+| Network access | Local workstation network | No VM public IPs; administrative access through Azure Bastion |
+| Campaign lifecycle | Fresh local runs completed on 2026-09-21 | Campaign `s0-20260920-215851`; Azure resource group and campaign-owned OneDrive root confirmed absent after teardown |
 
 > **Current status: both local persistence components are eligible.**
 >
